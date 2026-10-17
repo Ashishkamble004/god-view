@@ -162,7 +162,7 @@ async def test_t1_lb_requests_denied_by_security_policy_and_negative() -> None:
 
 @pytest.mark.unit
 async def test_t2_probe_asset_404_and_negative() -> None:
-    """T2 Repro: 404 on vehicle images / empty CDN bucket 403."""
+    """T2 Repro: 404 on product images / empty CDN bucket 403."""
     invoker = CapabilityInvoker()
 
     def probe_handler(args: dict[str, Any]) -> dict[str, Any]:
@@ -367,19 +367,19 @@ async def test_t2_asset_discovery_from_api_response() -> None:
 
     def probe_handler(args: dict[str, Any]) -> dict[str, Any]:
         url = args.get("url", "")
-        if url == "https://api.example.com/v1/vehicles":
+        if url == "https://api.example.com/v1/catalog":
             # API response references an asset URL
             return {
                 "status_code": 200,
                 "latency_ms": 50.0,
                 "json": {
                     "items": [
-                        {"id": "v1", "image_url": "/assets/vehicles/suv.png"},
+                        {"id": "item1", "image_url": "/assets/catalog/sample.png"},
                     ]
                 },
                 "error": None,
             }
-        if "/assets/vehicles/suv.png" in url:
+        if "/assets/catalog/sample.png" in url:
             # Referenced static asset fails with 404 (e.g. unpopulated CDN bucket)
             return {"status_code": 404, "latency_ms": 40.0, "error": None}
         return {"status_code": 200, "latency_ms": 30.0, "error": None}
@@ -387,10 +387,10 @@ async def test_t2_asset_discovery_from_api_response() -> None:
     invoker.register_handler("http.probe", probe_handler)
     ctx = EvaluatorContext(invoker=invoker)
 
-    snt = build_probe_sentinel("https://api.example.com/v1/vehicles")
+    snt = build_probe_sentinel("https://api.example.com/v1/catalog")
     evaluator = get_evaluator("probe")
     res = await evaluator.evaluate(snt, ctx)
 
     assert res.breached is True
     assert res.signature == "probe_asset_404"
-    assert "/assets/vehicles/suv.png" in res.resource_id
+    assert "/assets/catalog/sample.png" in res.resource_id

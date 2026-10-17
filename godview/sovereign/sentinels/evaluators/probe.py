@@ -13,6 +13,8 @@ Breaches on:
 
 from __future__ import annotations
 
+import json
+import re
 import urllib.parse
 from typing import Any
 
@@ -44,8 +46,18 @@ class ProbeEvaluator(BaseSentinelEvaluator):
 
         timeout_s = float(spec.get("timeout_s", 5.0))
         max_latency_ms = float(spec.get("max_latency_ms", 5000.0))
-        expected_status = spec.get("expected_status", [200, 204, 301, 302])
+        allowed_status_codes = set(spec.get("expected_status", [200, 204, 301, 302]))
 
+        # Learn expected status (e.g. 401/403/302 on auth-gated hosts) from first-seen
+        learned_status = None
+        if sentinel.last_result and isinstance(sentinel.last_result, dict):
+            details_map = sentinel.last_result.get("details", {})
+            if isinstance(details_map, dict):
+                learned_status = details_map.get("first_seen_status")
+                if learned_status:
+                    allowed_status_codes.add(int(learned_status))
+
+        first_seen_recorded = learned_status
         failed_probes: list[dict[str, Any]] = []
         all_transcripts: list[dict[str, Any]] = []
 
@@ -66,6 +78,11 @@ class ProbeEvaluator(BaseSentinelEvaluator):
             latency_ms = float(probe_result.get("latency_ms") or 0.0)
             error = probe_result.get("error")
 
+            # First-seen learning for auth-gated endpoints
+            if first_seen_recorded is None and status_code in (401, 403, 302) and not error:
+                first_seen_recorded = status_code
+                allowed_status_codes.add(status_code)
+
             transcript = {
                 "url": target_url,
                 "status_code": status_code,
@@ -81,9 +98,9 @@ class ProbeEvaluator(BaseSentinelEvaluator):
             if error:
                 is_failed = True
                 fail_reason = f"Network or transport error: {error}"
-            elif status_code not in expected_status:
+            elif status_code not in allowed_status_codes:
                 is_failed = True
-                fail_reason = f"Unexpected HTTP status {status_code} (expected {expected_status})"
+                fail_reason = f"Unexpected HTTP status {status_code} (expected {sorted(allowed_status_codes)})"
             elif latency_ms > max_latency_ms:
                 is_failed = True
                 fail_reason = f"Probe latency {latency_ms:.1f}ms exceeded threshold {max_latency_ms:.1f}ms"
@@ -95,6 +112,19 @@ class ProbeEvaluator(BaseSentinelEvaluator):
                 # T2 static asset discovery from API response bodies
                 discovered_asset_urls: list[str] = []
                 resp_body = probe_result.get("json") or probe_result.get("body")
+                if isinstance(resp_body, str):
+                    raw_str = resp_body.strip()
+                    try:
+                        resp_body = json.loads(raw_str)
+                    except Exception:
+                        # Fallback for truncated string: regex scan
+                        urls_found = re.findall(
+                            r'["\'](?:[^"\']*_url|image_url|asset_url)["\']\s*:\s*["\']([^"\']+)["\']',
+                            raw_str,
+                        )
+                        urls_found += re.findall(r'["\'](/assets/[^"\']+)["\']', raw_str)
+                        for u in urls_found:
+                            discovered_asset_urls.append(urllib.parse.urljoin(target_url, u))
 
                 def _extract_asset_urls(data: Any, found: list[str], base_url: str) -> None:
                     if isinstance(data, dict):
@@ -108,7 +138,7 @@ class ProbeEvaluator(BaseSentinelEvaluator):
                         for item in data:
                             _extract_asset_urls(item, found, base_url)
 
-                if resp_body:
+                if resp_body and isinstance(resp_body, (dict, list)):
                     _extract_asset_urls(resp_body, discovered_asset_urls, target_url)
 
                 for asset_url in discovered_asset_urls[:5]:
@@ -133,9 +163,10 @@ class ProbeEvaluator(BaseSentinelEvaluator):
                             "is_discovered_asset": True,
                         }
                         all_transcripts.append(a_trans)
-                        if a_err or a_status not in expected_status:
+                        asset_expected = [200, 204, 304]
+                        if a_err or a_status not in asset_expected:
                             a_trans["fail_reason"] = (
-                                a_err or f"Static asset returned HTTP {a_status} (expected {expected_status})"
+                                a_err or f"Static asset returned HTTP {a_status} (expected {asset_expected})"
                             )
                             failed_probes.append(a_trans)
 
@@ -178,5 +209,9 @@ class ProbeEvaluator(BaseSentinelEvaluator):
         return SentinelEvaluation(
             observed=0.0,
             breached=False,
-            details={"total_probed": len(urls), "transcripts": all_transcripts[:5]},
+            details={
+                "total_probed": len(urls),
+                "transcripts": all_transcripts[:5],
+                "first_seen_status": first_seen_recorded,
+            },
         )

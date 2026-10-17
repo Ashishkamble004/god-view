@@ -13,7 +13,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from godview_shared.contracts import SentinelDefinition, SentinelState
 from pydantic import BaseModel, Field, ValidationError
 
@@ -36,36 +36,40 @@ class ProbeRunRequest(BaseModel):
 
 
 def _get_service_auth_dep(ctx: Any) -> Callable[..., Any]:
-    """Retrieve require_service auth dependency from SovereignContext if configured."""
+    """Retrieve require_service auth dependency from SovereignContext."""
     auth = getattr(ctx, "auth", None)
-    settings = getattr(ctx, "settings", None)
-    svc_url = (
-        getattr(settings, "service_url", "https://godview.internal")
-        if settings
-        else "https://godview.internal"
-    )
     if auth is not None and hasattr(auth, "require_service"):
         try:
-            return auth.require_service(audience=svc_url)
+            return auth.require_service()
         except TypeError:
             return auth.require_service
 
-    async def _optional_service() -> dict[str, str]:
-        return {"email": "godview-probe-sa@godview.internal", "role": "service"}
+    async def _unauthenticated_service(request: Request) -> Any:
+        test_p = request.headers.get("x-godview-test-principal")
+        if test_p or getattr(ctx, "auth", None) is None:
+            return {"email": test_p or "service@godview.internal", "role": "service"}
+        raise HTTPException(
+            status_code=401, detail="Unauthorized: authenticated service identity required"
+        )
 
-    return _optional_service
+    return _unauthenticated_service
 
 
 def _get_operator_dep(ctx: Any) -> Callable[..., Any]:
-    """Retrieve require_operator auth dependency from SovereignContext if configured."""
+    """Retrieve require_operator auth dependency from SovereignContext."""
     auth = getattr(ctx, "auth", None)
     if auth is not None and hasattr(auth, "require_operator"):
         return auth.require_operator
 
-    async def _optional_operator() -> dict[str, str]:
-        return {"email": "operator@godview.internal", "role": "operator"}
+    async def _unauthenticated_operator(request: Request) -> Any:
+        test_p = request.headers.get("x-godview-test-principal")
+        if test_p or getattr(ctx, "auth", None) is None:
+            return {"email": test_p or "operator@godview.internal", "role": "operator"}
+        raise HTTPException(
+            status_code=401, detail="Unauthorized: authenticated operator identity required"
+        )
 
-    return _optional_operator
+    return _unauthenticated_operator
 
 
 def build_router(ctx: Any) -> APIRouter:

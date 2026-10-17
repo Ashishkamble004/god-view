@@ -185,6 +185,9 @@ class SentinelEngine:
         start_time = time.monotonic()
         effective_budget = budget_s or self.budget_s
 
+        if hasattr(self._eval_context.invoker, "clear_tick_cache"):
+            self._eval_context.invoker.clear_tick_cache()
+
         active_sentinels = [s for s in self.list_sentinels() if s.state not in ("paused", "retired")]
         # Rotate / sort to evaluate least recently run sentinels first to avoid starving tail sentinels
         active_sentinels.sort(key=lambda s: s.last_run_at or "")
@@ -201,8 +204,8 @@ class SentinelEngine:
         }
 
         for snt in active_sentinels:
-            # Check cadence
-            if snt.last_run_at and snt.cadence_s > 0:
+            # Check cadence: sentinels with cadence > loop cadence only run when due
+            if snt.last_run_at and snt.cadence_s > self.cadence_s:
                 try:
                     last_run_dt = datetime.fromisoformat(snt.last_run_at)
                     if (now - last_run_dt).total_seconds() < snt.cadence_s:

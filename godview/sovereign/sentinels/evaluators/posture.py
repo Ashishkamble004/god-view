@@ -37,11 +37,13 @@ class PostureEvaluator(BaseSentinelEvaluator):
         resource_id = str(spec.get("resource_id") or sentinel.source_ref)
         resource_kind = str(spec.get("resource_kind") or "cloud_run")
         baseline = spec.get("baseline") or {}
+        baseline_source = "specification" if baseline else None
 
         # 1. Check if tfstate.read can provide baseline
         tfstate = await ctx.invoke_capability("tfstate.read", {"resource_id": resource_id})
         if isinstance(tfstate, dict) and "baseline" in tfstate:
             baseline = tfstate["baseline"]
+            baseline_source = "tfstate"
 
         drift_items: list[dict[str, Any]] = []
 
@@ -67,6 +69,7 @@ class PostureEvaluator(BaseSentinelEvaluator):
                 saved_bl = ctx.firestore.get("posture_baselines", resource_id)
                 if saved_bl and isinstance(saved_bl, dict):
                     baseline = saved_bl.get("baseline", {})
+                    baseline_source = saved_bl.get("baseline_source", "first_seen")
                 else:
                     first_seen = {
                         "ingress": posture_data.get("ingress", "internal-and-cloud-load-balancing"),
@@ -74,10 +77,18 @@ class PostureEvaluator(BaseSentinelEvaluator):
                         "all_users": posture_data.get("all_users", False),
                     }
                     baseline = first_seen
+                    baseline_source = "first_seen"
                     try:
-                        ctx.firestore.set("posture_baselines", resource_id, {"baseline": first_seen})
+                        ctx.firestore.set(
+                            "posture_baselines",
+                            resource_id,
+                            {"baseline": first_seen, "baseline_source": "first_seen"},
+                        )
                     except Exception:
                         pass
+
+            if not baseline_source:
+                baseline_source = "first_seen"
 
             current_ingress = posture_data.get("ingress")
             invoker_iam_disabled = posture_data.get("invoker_iam_disabled", False)
@@ -266,6 +277,9 @@ class PostureEvaluator(BaseSentinelEvaluator):
                             }
                         )
 
+        for d in drift_items:
+            d["baseline_source"] = baseline_source
+
         if drift_items:
             primary_drift = drift_items[0]
             if primary_drift["field"] == "waf_sensitivity":
@@ -289,11 +303,12 @@ class PostureEvaluator(BaseSentinelEvaluator):
                     "resource_kind": resource_kind,
                     "drift_count": len(drift_items),
                     "drifts": drift_items,
+                    "baseline_source": baseline_source,
                 },
             )
 
         return SentinelEvaluation(
             observed=0.0,
             breached=False,
-            details={"resource_id": resource_id, "status": "compliant"},
+            details={"resource_id": resource_id, "status": "compliant", "baseline_source": baseline_source},
         )

@@ -7,12 +7,13 @@ Implements TDD §2.4, §3.3 & §4:
   related change events, topology neighbourhood)
 - Severity classification (sev1, sev2, sev3)
 - `on_change_event` hook fed by nervous system / audit push
-- SSE / EventBus emission (`incident.opened`, `incident.updated`, `incident.closed`)
+- SSE / EventBus event publishing (`incident.opened`, `incident.updated`, `incident.closed`)
 - Handoff to court agents via `ctx.hooks.on_incident` and/or A2A wake messages
 """
 
 from __future__ import annotations
 
+import inspect
 import logging
 import uuid
 from collections.abc import Callable
@@ -76,19 +77,31 @@ class IncidentManager:
         self._active_incidents: dict[str, IncidentDoc] = {}
         self._load_active_incidents_from_store()
 
-    def _get_embedding(self, text: str) -> list[float] | None:
-        """Return embedding vector from provided embed_fn or ctx.llm; otherwise None."""
+    async def _get_embedding(self, text: str) -> list[float] | None:
+        """Return embedding vector from ctx.llm or provided embed_fn; otherwise None."""
         if self._embed_fn is not None:
             try:
-                return self._embed_fn(text)
+                res = self._embed_fn(text)
+                if inspect.isawaitable(res):
+                    return await res
+                return res
             except Exception:
                 return None
         llm = getattr(self._ctx, "llm", None)
-        if llm is not None and hasattr(llm, "embed_sync"):
-            try:
-                return llm.embed_sync(text)
-            except Exception:
-                return None
+        if llm is not None:
+            if hasattr(llm, "embed"):
+                try:
+                    res = llm.embed(text)
+                    if inspect.isawaitable(res):
+                        return await res
+                    return res
+                except Exception:
+                    return None
+            elif hasattr(llm, "embed_sync"):
+                try:
+                    return llm.embed_sync(text)
+                except Exception:
+                    return None
         return None
 
     def _load_active_incidents_from_store(self) -> None:
@@ -151,7 +164,7 @@ class IncidentManager:
                 pass
         return {"upstream": upstream[:5], "downstream": downstream[:5]}
 
-    def _build_evidence_pack(
+    async def _build_evidence_pack(
         self,
         incident_id: str,
         sentinel: SentinelDefinition,
@@ -189,12 +202,14 @@ class IncidentManager:
                         except Exception:
                             pass
 
+                    chg_kind = chg.get("kind")
+                    chg_summary = chg.get("business_summary")
                     correlated_changes.append(
                         EvidenceCorrelatedChange(
                             change_event_id=chg.get("_id") or chg.get("doc_id", "chg-0"),
-                            kind=str(chg.get("kind", "deploy")),
+                            kind=str(chg_kind) if chg_kind else "unknown",
                             occurred_at=str(chg.get("occurred_at", now_iso)),
-                            business_summary=str(chg.get("business_summary", "Recent change")),
+                            business_summary=str(chg_summary) if chg_summary else "",
                         )
                     )
                     if len(correlated_changes) >= 5:
@@ -207,7 +222,7 @@ class IncidentManager:
             f"Sentinel {sentinel.sentinel_id} ({sentinel.sentinel_class}) breached: "
             f"signature={eval_result.signature} observed={eval_result.observed}"
         )
-        query_vec = self._get_embedding(symptom_text)
+        query_vec = await self._get_embedding(symptom_text)
         episodic_hits: list[Any] = []
         skill_hits: list[Any] = []
         if query_vec is not None and self._firestore is not None and hasattr(self._firestore, "find_nearest"):
@@ -247,36 +262,48 @@ class IncidentManager:
             ],
         )
 
-        # Golden signals summary (honest metrics without synthetic defaults)
-        all_non_probe: list[dict[str, Any]] = []
-        if self._bigquery is not None and hasattr(self._bigquery, "get_table"):
+        # Golden signals summary (honest metrics without synthetic defaults or full table scan)
+        query_rows: list[dict[str, Any]] = []
+        if self._bigquery is not None and hasattr(self._bigquery, "query"):
             try:
-                all_non_probe = [
-                    r for r in self._bigquery.get_table("events")
-                    if r.get("source") != "probe"
-                ]
+                sql = (
+                    "SELECT http_status, duration_ms FROM events "
+                    "WHERE COALESCE(source, 'otel') != 'probe' LIMIT 50"
+                )
+                query_rows = self._bigquery.query(sql)
             except Exception:
                 pass
 
-        if all_non_probe:
-            error_rows = [r for r in all_non_probe if int(r.get("http_status") or 200) >= 500]
+        gs_status = "unknown"
+        p95_ms_val: float | None = None
+        error_rate_val: float | None = None
+
+        if query_rows:
+            error_rows = [r for r in query_rows if int(r.get("http_status") or 200) >= 500]
             durations = sorted(
-                float(r["duration_ms"]) for r in all_non_probe if r.get("duration_ms") is not None
+                float(r["duration_ms"]) for r in query_rows if r.get("duration_ms") is not None
             )
-            p95_ms = durations[int(len(durations) * 0.95)] if durations else 0.0
-            error_rate = len(error_rows) / len(all_non_probe)
-            if sentinel.sentinel_class == "golden_signal_gate" or len(error_rows) > 0:
+            p95_ms_val = durations[int(len(durations) * 0.95)] if durations else 0.0
+            error_rate_val = round((len(error_rows) / len(query_rows)) * 100.0, 2)
+            if sentinel.sentinel_class == "golden_signals" or len(error_rows) > 0 or (p95_ms_val >= 5000.0 and p95_ms_val > 0.0):
                 gs_status = (
                     "red"
-                    if (sentinel.sentinel_class == "golden_signal_gate" or (error_rate * 100.0) >= 5.0)
+                    if (error_rate_val >= 5.0 or p95_ms_val >= 5000.0)
                     else "amber"
                 )
             else:
                 gs_status = "green"
+        elif "p95_ms" in eval_result.details or "error_rate" in eval_result.details:
+            p95_ms_val = float(eval_result.details.get("p95_ms", 0.0))
+            err_raw = float(eval_result.details.get("error_rate", 0.0))
+            error_rate_val = round(err_raw * 100.0 if err_raw <= 1.0 else err_raw, 2)
+            gs_status = (
+                "red" if (error_rate_val >= 5.0 or (p95_ms_val >= 5000.0 and p95_ms_val > 0.0)) else "green"
+            )
+        elif sentinel.sentinel_class == "golden_signals":
+            gs_status = "red" if eval_result.breached else "green"
         else:
-            p95_ms = float(eval_result.details.get("p95_ms", 0.0))
-            error_rate = float(eval_result.details.get("error_rate", 0.0))
-            gs_status = "red" if (error_rate >= 0.05 or (p95_ms >= 5000.0 and p95_ms > 0.0)) else "green"
+            gs_status = "unknown"
 
         # Budget from token governor (or 0 if unconfigured)
         tokens_rem = 0
@@ -333,8 +360,8 @@ class IncidentManager:
                 "correlated_changes": correlated_changes,
                 "golden_signals": EvidenceGoldenSignals(
                     status=gs_status,
-                    p95_ms=p95_ms,
-                    error_rate_pct=round(error_rate * 100.0, 2),
+                    p95_ms=p95_ms_val,
+                    error_rate_pct=error_rate_val,
                 ),
                 "recall": recall,
                 "budget": EvidenceBudget(
@@ -484,7 +511,7 @@ class IncidentManager:
 
         # Case 2: Open new incident
         inc_id = self._generate_incident_id(now)
-        evp = self._build_evidence_pack(inc_id, sentinel, eval_result, now)
+        evp = await self._build_evidence_pack(inc_id, sentinel, eval_result, now)
         severity = eval_result.severity_override or "sev2"
 
         raw_ev = {
@@ -517,7 +544,7 @@ class IncidentManager:
             consecutive_breaches=sentinel.consecutive_breaches or 1,
             clear_ticks=0,
             raw_evidence=raw_ev,
-            symptom_embedding=self._get_embedding(symptom),
+            symptom_embedding=await self._get_embedding(symptom),
         )
 
         self._active_incidents[dedupe_key] = incident

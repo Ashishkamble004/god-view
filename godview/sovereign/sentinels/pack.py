@@ -7,6 +7,7 @@ during perception cycles without tenant-specific knowledge.
 from __future__ import annotations
 
 import re
+import urllib.parse
 from datetime import UTC, datetime
 from typing import Any
 
@@ -56,7 +57,7 @@ def build_lb_requests_sentinel(
                 },
                 "window_s": 300,
             },
-            "cadence_s": 10,
+            "cadence_s": 60,
             "baseline": SentinelBaseline(model="adaptive", expected=0.0, stddev=0.1),
             "wake_condition": SentinelWakeCondition(
                 operator=">=",
@@ -205,7 +206,7 @@ def build_pubsub_health_sentinel(
                 "spec": {"subscription_name": subscription_name, "backlog_threshold": 50},
                 "window_s": 300,
             },
-            "cadence_s": 10,
+            "cadence_s": 60,
             "baseline": SentinelBaseline(model="queue_health", expected=0.0, stddev=0.0),
             "wake_condition": SentinelWakeCondition(
                 operator=">=",
@@ -252,7 +253,7 @@ def build_golden_signals_sentinel(
                 },
                 "window_s": 300,
             },
-            "cadence_s": 10,
+            "cadence_s": 60,
             "baseline": SentinelBaseline(model="adaptive_monitoring", expected=0.0, stddev=0.1),
             "wake_condition": SentinelWakeCondition(
                 operator=">=",
@@ -420,9 +421,24 @@ def compile_universal_sentinels(
         if kind in ("cloud_run", "gke_workload", "gce_instance", "gce_vm"):
             add(build_golden_signals_sentinel(name))
 
-        # 3. Load balancer requests sentinel for edge & public entrypoints
-        if kind in ("lb_frontend", "backend_service", "security_policy"):
+        # 3. Load balancer requests sentinel: compile ONE per security policy or public LB frontend/host (not per backend)
+        if kind == "security_policy":
             add(build_lb_requests_sentinel(name))
+        elif kind == "lb_frontend":
+            front_host = None
+            if isinstance(svc, dict):
+                front_host = svc.get("host") or svc.get("hostname")
+                if not front_host and svc.get("endpoint"):
+                    try:
+                        front_host = urllib.parse.urlparse(svc["endpoint"]).hostname
+                    except Exception:
+                        pass
+            elif hasattr(svc, "endpoint") and svc.endpoint:
+                try:
+                    front_host = urllib.parse.urlparse(svc.endpoint).hostname
+                except Exception:
+                    pass
+            add(build_lb_requests_sentinel(name, host=front_host))
 
         # 4. Probe sentinel for public endpoints and probe-safe entrypoints
         candidate_urls: list[str] = []
@@ -453,11 +469,20 @@ def compile_universal_sentinels(
             raw_routes = getattr(svc, "routes", None)
         routes = raw_routes if isinstance(raw_routes, list) else []
         for r in routes:
-            r_url = r.get("url") if isinstance(r, dict) else getattr(r, "url", None)
-            is_probe_safe = (
+            method = r.get("method") if isinstance(r, dict) else getattr(r, "method", "GET")
+            method_upper = str(method or "GET").upper()
+            is_probe_safe_flag = (
                 (isinstance(r, dict) and (r.get("probe_safe") is True or r.get("x-godview-probe-safe") is True))
                 or getattr(r, "probe_safe", False)
                 or getattr(r, "x_godview_probe_safe", False)
+            )
+            # Only probe routes whose method is GET (or explicitly flagged probe-safe)
+            if method_upper != "GET" and not is_probe_safe_flag:
+                continue
+
+            r_url = r.get("url") if isinstance(r, dict) else getattr(r, "url", None)
+            is_probe_safe = (
+                is_probe_safe_flag
                 or (r_url and not str(r_url).endswith(".run.app") and ".run.app" not in str(r_url))
             )
             if r_url and (is_probe_safe or is_public_entrypoint):

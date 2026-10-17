@@ -28,22 +28,8 @@ from godview_shared.capabilities import CAPABILITY_REGISTRY
 # §2.1 Tenant Business Database (9 tables; zero telemetry tables — TDD I-04)
 # ==============================================================================
 
-def _load_tenant_fixture_tables() -> tuple[tuple[str, ...], tuple[str, ...]]:
-    import json
-    from pathlib import Path
-
-    repo_root = Path(__file__).resolve().parents[3]
-    for p in repo_root.glob("*/fixtures/godview/tenant_tables.json"):
-        if p.is_file():
-            try:
-                data = json.loads(p.read_text(encoding="utf-8"))
-                return tuple(data.get("tables", ())), tuple(data.get("chaos_scenarios", ()))
-            except Exception:
-                pass
-    return (), ()
-
-
-TENANT_BUSINESS_TABLES, CHAOS_SCENARIO_IDS = _load_tenant_fixture_tables()
+TENANT_BUSINESS_TABLES: tuple[str, ...] = ()
+CHAOS_SCENARIO_IDS: tuple[str, ...] = ()
 
 FORBIDDEN_TELEMETRY_TABLES: frozenset[str] = frozenset(
     {
@@ -77,8 +63,6 @@ KpiName = str
 
 
 class LedgerEventRow(BaseModel):
-    model_config = ConfigDict(extra="allow")
-
     event_id: str
     event_time: datetime | str
     env_id: str
@@ -97,27 +81,10 @@ class LedgerEventRow(BaseModel):
     trace_id: str | None = None
     span_id: str | None = None
 
-    customer_id: str | None = None
-    entity: str | None = None
-    decision: str | None = None
     http_status: int | None = None
     duration_ms: int | None = None
     is_synthetic: bool = False
     source: LedgerEventSource = "otel"
-
-    @model_validator(mode="before")
-    @classmethod
-    def _shim_generic_fields(cls, data: Any) -> Any:
-        if isinstance(data, dict):
-            if "entity" in data and not data.get("entity_type"):
-                data["entity_type"] = data["entity"]
-            elif "entity_type" in data and not data.get("entity"):
-                data["entity"] = data["entity_type"]
-            if "status_from" in data and not data.get("state_from"):
-                data["state_from"] = data["status_from"]
-            if "status_to" in data and not data.get("state_to"):
-                data["state_to"] = data["status_to"]
-        return data
 
 
 class StateTransitionRow(BaseModel):
@@ -697,9 +664,9 @@ class EvidenceCorrelatedChange(BaseModel):
 
 
 class EvidenceGoldenSignals(BaseModel):
-    status: Literal["green", "yellow", "red"] = "green"
-    p95_ms: float = 0.0
-    error_rate_pct: float = 0.0
+    status: Literal["green", "yellow", "amber", "red", "unknown"] = "unknown"
+    p95_ms: float | None = None
+    error_rate_pct: float | None = None
 
 
 class EpisodicRecallHit(BaseModel):
@@ -836,6 +803,8 @@ class ApprovalCard(BaseModel):
     trust_level_required: int = Field(ge=1, le=4)
     narrative: str
     evidence_pack_id: str
+    impact_amount: Decimal | float | int = 0
+    currency: str = "USD"
     financial_impact: Decimal | float | int = 0
     reversal_recipe: dict[str, Any]
     requested_at: datetime | str
@@ -845,6 +814,16 @@ class ApprovalCard(BaseModel):
     decided_at: datetime | str | None = None
     channel: Literal["chat", "cockpit", "email"] = "cockpit"
     audit_id: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _shim_impact_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "impact_amount" in data and "financial_impact" not in data:
+                data["financial_impact"] = data["impact_amount"]
+            elif "financial_impact" in data and "impact_amount" not in data:
+                data["impact_amount"] = data["financial_impact"]
+        return data
 
 
 class AuditApprover(BaseModel):

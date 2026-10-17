@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 from collections.abc import Callable
 from typing import Any
@@ -23,16 +24,29 @@ class CapabilityInvoker:
     def __init__(self, adapters: list[Any] | None = None) -> None:
         self.adapters = adapters or []
         self._handlers: dict[str, Callable[[dict[str, Any]], Any]] = {}
+        self._tick_cache: dict[str, Any] = {}
+
+    def clear_tick_cache(self) -> None:
+        """Clear tick-level memoised capability results."""
+        self._tick_cache.clear()
 
     def register_handler(
         self, capability_id: str, handler: Callable[[dict[str, Any]], Any]
     ) -> None:
         """Register a handler function for a specific capability ID."""
         self._handlers[capability_id] = handler
+        self.clear_tick_cache()
 
     async def invoke(self, capability_id: str, args: dict[str, Any] | None = None) -> Any:
         """Invoke a capability with arguments, ensuring per-call timeout and error isolation."""
         call_args = args or {}
+        try:
+            cache_key = f"{capability_id}:{json.dumps(call_args, sort_keys=True, default=str)}"
+        except Exception:
+            cache_key = ""
+
+        if cache_key and cache_key in self._tick_cache:
+            return self._tick_cache[cache_key]
 
         # 1. Custom / registered handler takes precedence
         if capability_id in self._handlers:
@@ -40,7 +54,9 @@ class CapabilityInvoker:
             try:
                 res = handler(call_args)
                 if inspect.isawaitable(res):
-                    return await asyncio.wait_for(res, timeout=5.0)
+                    res = await asyncio.wait_for(res, timeout=5.0)
+                if cache_key:
+                    self._tick_cache[cache_key] = res
                 return res
             except TimeoutError:
                 logger.warning("Capability handler for '%s' timed out", capability_id)
@@ -59,7 +75,9 @@ class CapabilityInvoker:
                     if hasattr(adapter, "execute_capability"):
                         res = adapter.execute_capability(capability_id, call_args)
                         if inspect.isawaitable(res):
-                            return await asyncio.wait_for(res, timeout=5.0)
+                            res = await asyncio.wait_for(res, timeout=5.0)
+                        if cache_key:
+                            self._tick_cache[cache_key] = res
                         return res
             except TimeoutError:
                 logger.warning("Adapter capability '%s' timed out", capability_id)
