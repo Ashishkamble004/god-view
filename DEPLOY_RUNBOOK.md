@@ -292,5 +292,11 @@ gcloud scheduler jobs run godview-tenant-resume --location=us-central1 --project
   - **Result**: 1 added, 2 changed, 1 destroyed. `google_monitoring_uptime_check_config.sovereign_health` recreated successfully with `monitored_resource { type = "cloud_run_revision" }` and OIDC service agent authentication against `/public/healthz`. Alert policy updated.
   - **Rollback**: `terraform destroy -target=module.godview.google_monitoring_uptime_check_config.sovereign_health ...`
 
+- **2026-10-17T18:16:58Z**
+  - **Command**: `terraform -chdir=infra/terraform/platform apply -input=false $HOME/tmp/platform-infra-rev7.tfplan` (targets: `module.data.google_firestore_field.change_events_ttl`, `module.godview.google_cloud_run_v2_service.sovereign`)
+  - **Result**: 1 added, 1 changed, 0 destroyed. Firestore TTL policy on `change_events.expires_at` created in `god-view-memory-db`. Sovereign Cloud Run updated with `GODVIEW_SOVEREIGN_URL`, `SERVICE_URL`, and tightened `GODVIEW_SERVICE_PRINCIPALS`. New revision `god-view-sovereign-00008-l86` is Ready and `/public/healthz` verified 200 OK.
+  - **Rollback**: `terraform destroy -target=module.data.google_firestore_field.change_events_ttl ...`
+
+
 
 
