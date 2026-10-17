@@ -22,6 +22,247 @@ export const handlers = [
     return HttpResponse.json(state.perceive);
   }),
 
+  http.get('/api/v1/topology', () => {
+    const nodes = state.perceive.discovered_services.map((s, idx) => {
+      let tier = 'compute';
+      if (['api_gateway', 'lb_frontend', 'security_policy'].includes(s.kind)) tier = 'edge';
+      else if (['cloud_sql', 'bucket', 'firestore_db', 'bigquery_dataset'].includes(s.kind)) tier = 'data';
+      else if (['pubsub_topic', 'pubsub_subscription'].includes(s.kind)) tier = 'messaging';
+      else if (['reasoning_engine', 'agent'].includes(s.kind)) tier = 'observer';
+
+      const openIncidents = state.incidents.filter(
+        (inc) =>
+          (inc.symptom_summary && inc.symptom_summary.toLowerCase().includes(s.name.toLowerCase())) ||
+          (inc.root_cause && inc.root_cause.toLowerCase().includes(s.name.toLowerCase()))
+      ).length;
+
+      return {
+        id: s.id,
+        name: s.name,
+        kind: s.kind,
+        tier,
+        status: openIncidents > 0 ? 'red' : 'green',
+        business: {
+          domain: s.inferred_role || 'Enterprise Core Platform',
+          role_summary: `${s.name} handles distributed ${s.inferred_role.toLowerCase()} operations with verified evidence and contracts.`,
+          confidence: s.role_confidence || 0.94,
+        },
+        incidents_open: openIncidents,
+        agent_id: s.owner_agent_id || null,
+        golden: {
+          rps: 140 + idx * 20,
+          p95_ms: 16 + idx * 3,
+          error_ratio: openIncidents > 0 ? 0.045 : 0.0001,
+        },
+        posture: {
+          ingress: 'internal-and-cloud-load-balancing',
+          iap: true,
+          invoker_iam: true,
+          waf: openIncidents > 0 ? 'sensitivity-4' : 'sensitivity-1',
+        },
+      };
+    });
+
+    const edges = state.perceive.discovered_edges.map((e, idx) => ({
+      id: e.id || `edge-${idx}`,
+      src: e.src,
+      dst: e.dst,
+      kind: e.protocol || 'http',
+      evidence_kind: e.evidence || 'trace',
+      rps: 42 + idx * 8,
+      error_ratio: 0.0001,
+      confidence: 0.96,
+    }));
+
+    const journeys = state.journeys.map((j) => ({
+      name: j.name,
+      steps: j.steps.map((st) => ({
+        node: st.service,
+        operation: st.operation,
+      })),
+      health: (j.status === 'degraded' || j.status === 'stalled' ? 'amber' : 'green') as any,
+      confidence: 0.92,
+    }));
+
+    return HttpResponse.json({
+      env_id: state.perceive.env_id,
+      generated_at: new Date().toISOString(),
+      nodes,
+      edges,
+      journeys,
+      layout_hint: {
+        groups: [
+          { tier: 'edge', node_ids: nodes.filter((n) => n.tier === 'edge').map((n) => n.id) },
+          { tier: 'compute', node_ids: nodes.filter((n) => n.tier === 'compute').map((n) => n.id) },
+          { tier: 'data', node_ids: nodes.filter((n) => n.tier === 'data').map((n) => n.id) },
+        ],
+      },
+    });
+  }),
+
+  http.get('/api/v1/business-context/:nodeId', ({ params }) => {
+    const rawId = decodeURIComponent(String(params.nodeId));
+    const s = state.perceive.discovered_services.find((svc) => svc.id === rawId || svc.name === rawId) || state.perceive.discovered_services[0];
+    const relatedIncidents = state.incidents.filter(
+      (inc) =>
+        (inc.symptom_summary && inc.symptom_summary.toLowerCase().includes(s.name.toLowerCase())) ||
+        (inc.root_cause && inc.root_cause.toLowerCase().includes(s.name.toLowerCase()))
+    );
+
+    return HttpResponse.json({
+      role_summary: `${s.name} coordinates and executes distributed operations within the ${s.inferred_role || 'Enterprise'} subsystem. All behavior verified via live telemetry.`,
+      domain: s.inferred_role || 'Enterprise Financial Core',
+      capabilities: s.routes.length > 0 ? s.routes : ['POST /v1/process', 'GET /v1/healthz', 'POST /v1/reconcile'],
+      upstream: state.perceive.discovered_edges.filter((e) => e.dst === s.id).map((e) => e.src),
+      downstream: state.perceive.discovered_edges.filter((e) => e.src === s.id).map((e) => e.dst),
+      journeys: state.journeys
+        .filter((j) => j.steps.some((st) => st.service === s.id))
+        .map((j) => ({
+          name: j.name,
+          steps: j.steps.map((st) => ({ service: st.service, operation: st.operation })),
+          confidence: 0.95,
+          evidence: { kind: 'trace', ref: j.journey_key },
+        })),
+      kpis: [
+        {
+          name: 'Request Throughput',
+          definition: 'sum(rate(http_requests_total[5m]))',
+          unit: 'req/sec',
+          confidence: 0.98,
+          evidence: { kind: 'metric', ref: 'prometheus/run_timeseries' },
+          value: 184.2,
+        },
+        {
+          name: 'p95 Execution Latency',
+          definition: 'histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])))',
+          unit: 'ms',
+          confidence: 0.95,
+          evidence: { kind: 'trace', ref: 'cloudtrace/p95' },
+          value: 38.6,
+        },
+        {
+          name: 'Invariant Conformance',
+          definition: 'verified_executions / total_executions',
+          unit: '%',
+          confidence: 0.99,
+          evidence: { kind: 'ledger', ref: 'bigquery/conformance' },
+          value: 99.8,
+        },
+      ],
+      invariants: [
+        {
+          statement: 'Every mutated record must emit a verifiable audit ledger event',
+          check: 'ledger.verify_audit_event(event_id) == true',
+          severity: 'HIGH',
+          confidence: 0.96,
+          evidence: { kind: 'openapi', ref: 'contracts/spec.json' },
+          status: 'verified',
+        },
+        {
+          statement: 'Outbound traffic must pass through the verified secure gateway NEG',
+          check: 'network.egress_route == verified_gateway',
+          severity: 'MEDIUM',
+          confidence: 0.91,
+          evidence: { kind: 'env', ref: 'EGRESS_GATEWAY_URL' },
+          status: 'verified',
+        },
+      ],
+      risk_notes: [
+        'Cloud Armor WAF rules require periodic sensitivity evaluation to prevent valid JSON payload blocks.',
+        'High memory watermark observed during peak ingestion bursts.',
+      ],
+      confidence: s.role_confidence || 0.94,
+      evidence: [
+        { kind: 'openapi', ref: `${s.name}/openapi.json`, excerpt: 'endpoints: /v1/process, /v1/validate' },
+        { kind: 'trace', ref: 'projects/general-ak/traces/tr-88419', excerpt: 'Parent span calls downstream auth service' },
+        { kind: 'env', ref: 'CONTAINER_ENV_VARS', excerpt: 'DB_HOST=10.0.1.4, PORT=8080' },
+      ],
+      inferred_by: 'gemini-4-argon@global',
+      inferred_at: new Date().toISOString(),
+      recent_incidents: relatedIncidents.map((i) => ({
+        id: i.incident_id,
+        title: i.symptom_summary,
+        severity: i.severity,
+        status: i.outcome,
+      })),
+    });
+  }),
+
+  http.get('/api/v1/harness/:agentId/tree', ({ params }) => {
+    const rawId = decodeURIComponent(String(params.agentId));
+    return HttpResponse.json({
+      agent_id: rawId,
+      version: 'v1.2-active',
+      active: true,
+      accuracy_gain_pct: 18.4,
+      tree: {
+        id: 'root-decision-tree',
+        label: 'Incident Triage & Heuristic Synthesis',
+        type: 'condition',
+        description: 'Analyzes incoming incident evidence pack and determines remediation path',
+        confidence: 0.94,
+        version: 'v1.2',
+        children: [
+          {
+            id: 'branch-waf-block',
+            label: 'Cloud Armor WAF False Positive Detected',
+            type: 'heuristic',
+            description: 'Rule 1000 triggered on legitimate application JSON payload',
+            confidence: 0.96,
+            children: [
+              {
+                id: 'action-propose-waf-mitigation',
+                label: 'Propose armor.set_waf_sensitivity (Level 2 Approval)',
+                type: 'action',
+                description: 'Set sensitivity 1 with preview mode first to avoid downtime',
+                confidence: 0.98,
+                children: [
+                  {
+                    id: 'verify-probe-outcome',
+                    label: 'Synthetic POST Probe Verification',
+                    type: 'verification',
+                    description: 'Verify 422 Unprocessable Entity instead of 403 Forbidden',
+                    confidence: 0.99,
+                  },
+                ],
+              },
+            ],
+          },
+          {
+            id: 'branch-latency-breach',
+            label: 'Downstream Service Latency SLA Breach',
+            type: 'heuristic',
+            description: 'p95 latency exceeded 200ms threshold on external dependency',
+            confidence: 0.88,
+            children: [
+              {
+                id: 'action-scale-workload',
+                label: 'Propose run.scale_instances or Warm Standby',
+                type: 'action',
+                description: 'Adjust min_instances to absorb burst traffic',
+                confidence: 0.91,
+              },
+            ],
+          },
+        ],
+      },
+      skills: [
+        {
+          id: 'skill-waf-paranoia-mitigation',
+          name: 'Cloud Armor WAF Sensitivity Tuning',
+          fitness_score: 0.96,
+          description: 'Autonomously identifies CRS rule false positives on JSON POST payloads and calculates optimal sensitivity.',
+        },
+        {
+          id: 'skill-distributed-trace-correlation',
+          name: 'Distributed Trace Anomaly Isolation',
+          fitness_score: 0.94,
+          description: 'Correlates multi-hop OpenTelemetry spans to pinpoint lock contention and slow database queries.',
+        },
+      ],
+    });
+  }),
+
   http.post('/api/v1/perceive', async () => {
     state.perceive.heartbeat_at = new Date().toISOString();
     return HttpResponse.json(state.perceive);

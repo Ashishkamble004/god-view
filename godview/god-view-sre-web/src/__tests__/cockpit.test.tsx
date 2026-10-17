@@ -27,12 +27,14 @@ describe('God-View Cockpit (URL 3)', () => {
   });
 
   it('proves zero hardcoded service/agent/model names by swapping to a different random seed', async () => {
+    window.location.hash = '#organism';
     const seedA = resetMockCockpitState(11);
     const { unmount } = render(<App />);
     expect(await screen.findByText(seedA.me.email)).toBeInTheDocument();
     expect(screen.getAllByText(seedA.court[0].subject_ref).length).toBeGreaterThan(0);
     unmount();
 
+    window.location.hash = '#organism';
     const seedB = resetMockCockpitState(73);
     render(<App />);
     expect(await screen.findByText(seedB.me.email)).toBeInTheDocument();

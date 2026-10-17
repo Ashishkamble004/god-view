@@ -2,6 +2,7 @@ import { RefreshCw, Sliders, UserCheck, X } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   CockpitApiError,
+  buildTopologyFallback,
   cockpitApi,
   subscribeCockpitStream,
 } from './api/client';
@@ -17,6 +18,7 @@ import { ApprovalsTab } from './components/ApprovalsTab';
 import { ChangesTab } from './components/ChangesTab';
 import { ControlsTab } from './components/ControlsTab';
 import { CostTab } from './components/CostTab';
+import { GlobeView } from './components/GlobeView';
 import { IncidentsTab } from './components/IncidentsTab';
 import { InvariantsTab } from './components/InvariantsTab';
 import { JourneysTab } from './components/JourneysTab';
@@ -24,6 +26,7 @@ import { OrganismTab } from './components/OrganismTab';
 import { Badge, Button, TableSkeleton, formatEnumLabel } from './components/ui';
 
 export type CockpitRouteTab =
+  | 'globe'
   | 'organism'
   | 'agent'
   | 'invariants'
@@ -41,8 +44,11 @@ interface ParsedHashRoute {
 
 function parseWindowHash(rawHash: string): ParsedHashRoute {
   const cleaned = rawHash.replace(/^#\/?/, '').trim();
-  if (!cleaned || cleaned === 'organism') {
+  if (cleaned === 'organism') {
     return { tab: 'organism', param: null };
+  }
+  if (!cleaned || cleaned === 'globe') {
+    return { tab: 'globe', param: null };
   }
   if (cleaned.startsWith('agent/')) {
     return {
@@ -50,7 +56,7 @@ function parseWindowHash(rawHash: string): ParsedHashRoute {
       param: decodeURIComponent(cleaned.slice('agent/'.length)),
     };
   }
-  if (cleaned === 'agent') {
+  if (cleaned === 'agent' || cleaned === 'agents') {
     return { tab: 'agent', param: null };
   }
   if (cleaned.startsWith('incident/')) {
@@ -69,7 +75,7 @@ function parseWindowHash(rawHash: string): ParsedHashRoute {
   if (cleaned === 'cost') return { tab: 'cost', param: null };
   if (cleaned === 'controls') return { tab: 'controls', param: null };
 
-  return { tab: 'organism', param: null };
+  return { tab: 'globe', param: null };
 }
 
 function getMockQueryMode(): string | null {
@@ -363,23 +369,10 @@ export function App() {
     badge?: string | number;
   }> = [
     {
-      tab: 'organism',
-      hash: '#organism',
-      label: 'Organism Court',
-      badge: dataset?.court.length,
-    },
-    {
-      tab: 'agent',
-      hash: dataset?.court[0]
-        ? `#agent/${encodeURIComponent(dataset.court[0].id)}`
-        : '#agent',
-      label: 'Living Models',
-    },
-    {
-      tab: 'invariants',
-      hash: '#invariants',
-      label: 'Invariants',
-      badge: dataset?.invariants.length,
+      tab: 'globe',
+      hash: '#globe',
+      label: '3D Globe',
+      badge: dataset?.topology?.nodes.length ?? dataset?.perceive.discovered_services.length,
     },
     {
       tab: 'journeys',
@@ -400,17 +393,37 @@ export function App() {
       badge: dataset?.approvals.filter((a) => a.decision === 'pending').length,
     },
     {
-      tab: 'changes',
-      hash: '#changes',
-      label: 'Changes',
-      badge: dataset?.changes.length,
+      tab: 'agent',
+      hash: dataset?.court[0]
+        ? `#agent/${encodeURIComponent(dataset.court[0].id)}`
+        : '#agent',
+      label: 'Agents',
+      badge: dataset?.court.length,
     },
     {
       tab: 'cost',
       hash: '#cost',
-      label: 'Cost & Drift',
+      label: 'Cost & Quotas',
       badge: dataset?.cost.drift_diffs.filter((d) => d.status === 'drifted')
         .length,
+    },
+    {
+      tab: 'organism',
+      hash: '#organism',
+      label: 'Organism Court',
+      badge: dataset?.court.length,
+    },
+    {
+      tab: 'invariants',
+      hash: '#invariants',
+      label: 'Invariants',
+      badge: dataset?.invariants.length,
+    },
+    {
+      tab: 'changes',
+      hash: '#changes',
+      label: 'Changes',
+      badge: dataset?.changes.length,
     },
     {
       tab: 'controls',
@@ -583,7 +596,13 @@ export function App() {
       </header>
 
       {/* Main Content Container */}
-      <main className="mx-auto max-w-[1440px] px-6 py-6">
+      <main
+        className={
+          route.tab === 'globe'
+            ? 'w-full'
+            : 'mx-auto max-w-[1440px] px-6 py-6'
+        }
+      >
         {/* IAP Session Expiry Banner */}
         {iapExpired && (
           <div
@@ -681,6 +700,31 @@ export function App() {
 
         {dataset && (
           <>
+            {route.tab === 'globe' && (
+              <GlobeView
+                topology={
+                  dataset.topology ||
+                  buildTopologyFallback(
+                    dataset.perceive,
+                    dataset.incidents,
+                    dataset.journeys
+                  )
+                }
+                onSelectNode={(nodeId) => console.log('Selected node:', nodeId)}
+                onSelectIncident={(incId) =>
+                  navigateToHash(
+                    incId === 'active-incident'
+                      ? '#incidents'
+                      : `#incident/${encodeURIComponent(incId)}`
+                  )
+                }
+                onSelectJourney={() => navigateToHash('#journeys')}
+                onSelectAgent={(agentId) =>
+                  navigateToHash(`#agent/${encodeURIComponent(agentId)}`)
+                }
+              />
+            )}
+
             {route.tab === 'organism' && (
               <OrganismTab
                 perceive={dataset.perceive}

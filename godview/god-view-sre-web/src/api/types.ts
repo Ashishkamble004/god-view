@@ -744,4 +744,155 @@ export interface CockpitDataset {
   changes: ChangeEvent[];
   cost: CostAndDriftOverview;
   drills: ChaosDrill[];
+  topology?: TopologyResponse | null;
 }
+
+export type TopologyTier =
+  | 'edge'
+  | 'compute'
+  | 'data'
+  | 'messaging'
+  | 'platform'
+  | 'observer'
+  | 'external';
+
+export type TopologyStatus = 'green' | 'amber' | 'red' | 'unknown';
+
+export interface TopologyNode {
+  id: string;
+  name: string;
+  kind: DiscoveredServiceKind | string;
+  tier: TopologyTier;
+  status: TopologyStatus;
+  business: {
+    domain: string;
+    role_summary: string;
+    confidence: number;
+  };
+  incidents_open: number;
+  agent_id: string | null;
+  golden: {
+    rps: number | null;
+    p95_ms: number | null;
+    error_ratio: number | null;
+  };
+  posture: {
+    ingress: string | null;
+    iap: boolean | null;
+    invoker_iam: boolean | null;
+    waf: string | null;
+  };
+}
+
+export interface TopologyEdge {
+  id: string;
+  src: string;
+  dst: string;
+  kind: 'http' | 'grpc' | 'pubsub' | 'sql' | 'lb_route' | 'iam' | string;
+  evidence_kind: string;
+  rps: number | null;
+  error_ratio: number | null;
+  confidence: number;
+}
+
+export interface TopologyJourneyStep {
+  node: string;
+  operation: string;
+}
+
+export interface TopologyJourney {
+  name: string;
+  steps: TopologyJourneyStep[];
+  health: 'green' | 'amber' | 'red';
+  confidence: number;
+}
+
+export interface TopologyResponse {
+  env_id: string;
+  generated_at: string;
+  nodes: TopologyNode[];
+  edges: TopologyEdge[];
+  journeys: TopologyJourney[];
+  layout_hint?: {
+    groups?: Array<{
+      tier: string;
+      node_ids: string[];
+    }>;
+  };
+}
+
+export interface EvidenceItem {
+  kind: string;
+  ref: string;
+  excerpt: string;
+}
+
+export interface BusinessContextKPI {
+  name: string;
+  definition: string;
+  unit: string;
+  confidence: number;
+  evidence: any;
+  value?: number | null;
+}
+
+export interface BusinessContextInvariant {
+  statement: string;
+  check: string;
+  severity: string;
+  confidence: number;
+  evidence: any;
+  status?: 'verified' | 'breached' | 'shadow';
+}
+
+export interface FullBusinessContext {
+  role_summary: string;
+  domain: string;
+  capabilities: string[];
+  upstream: string[];
+  downstream: string[];
+  journeys: Array<{
+    name: string;
+    steps: Array<{ service: string; operation: string }>;
+    confidence: number;
+    evidence: any;
+  }>;
+  kpis: BusinessContextKPI[];
+  invariants: BusinessContextInvariant[];
+  risk_notes: string[];
+  confidence: number;
+  evidence: EvidenceItem[];
+  inferred_by: string;
+  inferred_at: string;
+  recent_incidents?: Array<{
+    id: string;
+    title: string;
+    severity: string;
+    status: string;
+  }>;
+}
+
+export interface HarnessTreeNode {
+  id: string;
+  label: string;
+  type: 'condition' | 'action' | 'heuristic' | 'verification';
+  description?: string;
+  children?: HarnessTreeNode[];
+  confidence?: number;
+  version?: string;
+}
+
+export interface HarnessTreeResponse {
+  agent_id: string;
+  version: string;
+  active: boolean;
+  accuracy_gain_pct?: number;
+  tree: HarnessTreeNode;
+  skills: Array<{
+    id: string;
+    name: string;
+    fitness_score: number;
+    description: string;
+  }>;
+}
+
