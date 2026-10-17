@@ -79,6 +79,8 @@ class InMemoryFirestore:
         collection: str,
         predicate: Callable[[dict[str, Any]], bool] | None = None,
         where: dict[str, Any] | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
     ) -> list[dict[str, Any]]:
         """List documents in a collection with optional equality filters or predicate."""
         self._validate_collection(collection)
@@ -90,6 +92,17 @@ class InMemoryFirestore:
             if predicate and not predicate(doc):
                 continue
             results.append(copy.deepcopy(doc))
+        if cursor is not None:
+            # Drop elements until after cursor
+            idx = -1
+            for i, doc in enumerate(results):
+                if doc.get("_id") == cursor or doc.get("id") == cursor:
+                    idx = i
+                    break
+            if idx >= 0:
+                results = results[idx + 1 :]
+        if limit is not None:
+            results = results[:limit]
         return results
 
     def set_subdoc(

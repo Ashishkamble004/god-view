@@ -31,6 +31,9 @@ class InMemoryAgentEngine:
         cpu: str = "1",
         memory: str = "2Gi",
         card: A2AAgentCard | dict[str, Any] | None = None,
+        subject: str | None = None,
+        env_vars: dict[str, str] | None = None,
+        **kwargs: Any,
     ) -> dict[str, Any]:
         """Simulate deploying an ADK ReasoningEngine with deployment_spec.min_instances=0."""
         if min_instances not in range(0, 76):
@@ -40,6 +43,8 @@ class InMemoryAgentEngine:
         record = {
             "agent_id": agent_id,
             "agent_type": agent_type,
+            "subject": subject,
+            "env_vars": copy.deepcopy(env_vars) if env_vars else {},
             "reasoning_engine": resource_name,
             "a2a_card_url": card_url,
             "memory_bank_id": f"mb-{agent_id}",

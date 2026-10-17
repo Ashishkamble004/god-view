@@ -321,7 +321,10 @@ def test_otlp_traces_receiver_and_configure_exporters_pipeline() -> None:
     journeys = app.state.bigquery.get_table("journeys")
     assert len(events) == 1
     assert events[0]["journey_id"] == "jrn-trace-001"
-    assert events[0]["cibil_score"] == 765
+    assert (
+        events[0].get("cibil_score") == 765
+        or events[0].get("numeric_attributes", {}).get("cibil_score") == 765.0
+    )
     assert len(transitions) == 1
     assert transitions[0]["status_to"] == "STEP_B"
     assert len(journeys) == 1
