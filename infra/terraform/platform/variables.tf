@@ -97,7 +97,7 @@ variable "sql_availability_type" {
 variable "sovereign_cpu" {
   description = "CPU allocation for god-view-sovereign"
   type        = string
-  default     = "1"
+  default     = "2"
 }
 
 variable "sovereign_min_instances" {
@@ -115,7 +115,7 @@ variable "sovereign_max_instances" {
 variable "sovereign_memory" {
   description = "Memory allocation for god-view-sovereign (A7)"
   type        = string
-  default     = "1Gi"
+  default     = "2Gi"
 }
 
 variable "traffic_resume_cron" {

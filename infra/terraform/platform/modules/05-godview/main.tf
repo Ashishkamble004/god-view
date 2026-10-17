@@ -11,6 +11,7 @@ locals {
     "serviceAccount:${var.act_sa_email}",
     "serviceAccount:${var.runtime_sa_email}",
     "serviceAccount:service-${var.project_number}@gcp-sa-iap.iam.gserviceaccount.com",
+    "serviceAccount:service-${var.project_number}@gcp-sa-monitoring-notification.iam.gserviceaccount.com",
   ])
 
   cockpit_invokers = toset([
@@ -19,11 +20,38 @@ locals {
   ])
 }
 
+data "google_compute_backend_service" "sovereign_api" {
+  project = var.project_id
+  name    = "god-view-bs-sovereign-api"
+}
+
+data "google_compute_backend_service" "cockpit" {
+  project = var.project_id
+  name    = "god-view-bs-cockpit"
+}
+
 resource "google_pubsub_topic" "nervous_system_dlq" {
   project                    = var.project_id
   name                       = "godview-nervous-system-dlq"
-  message_retention_duration = "86400s"
+  message_retention_duration = "604800s"
   labels                     = local.godview_labels
+}
+
+resource "google_pubsub_subscription" "nervous_system_dlq" {
+  project                    = var.project_id
+  name                       = "godview-nervous-system-dlq-sub"
+  topic                      = google_pubsub_topic.nervous_system_dlq.id
+  ack_deadline_seconds       = 20
+  message_retention_duration = "604800s"
+  retain_acked_messages      = true
+  labels                     = local.godview_labels
+}
+
+resource "google_pubsub_subscription_iam_member" "dlq_sense_subscriber" {
+  project      = var.project_id
+  subscription = google_pubsub_subscription.nervous_system_dlq.name
+  role         = "roles/pubsub.subscriber"
+  member       = "serviceAccount:${var.sense_sa_email}"
 }
 
 resource "google_pubsub_topic" "nervous_system" {
@@ -53,6 +81,30 @@ resource "google_logging_project_sink" "audit_to_nervous_system" {
   destination            = "pubsub.googleapis.com/projects/${var.project_id}/topics/${google_pubsub_topic.nervous_system.name}"
   filter                 = "logName:\"logs/cloudaudit.googleapis.com%2Factivity\" AND protoPayload.serviceName:(\"run.googleapis.com\" OR \"container.googleapis.com\" OR \"k8s.io\" OR \"compute.googleapis.com\" OR \"cloudsql.googleapis.com\" OR \"iam.googleapis.com\" OR \"apigateway.googleapis.com\" OR \"secretmanager.googleapis.com\" OR \"cloudresourcemanager.googleapis.com\")"
   unique_writer_identity = true
+
+  exclusions {
+    name        = "exclude-gke-leases"
+    description = "Exclude GKE lease coordination churn"
+    filter      = "protoPayload.serviceName:(\"k8s.io\" OR \"container.googleapis.com\") AND (\"io.k8s.coordination.v1.leases\")"
+  }
+
+  exclusions {
+    name        = "exclude-gke-configmaps"
+    description = "Exclude GKE configmaps churn"
+    filter      = "protoPayload.serviceName:(\"k8s.io\" OR \"container.googleapis.com\") AND (\"io.k8s.core.v1.configmaps\")"
+  }
+
+  exclusions {
+    name        = "exclude-gke-pods-binding"
+    description = "Exclude GKE pods binding churn"
+    filter      = "protoPayload.serviceName:(\"k8s.io\" OR \"container.googleapis.com\") AND (\"pods.binding\")"
+  }
+
+  exclusions {
+    name        = "exclude-gke-endpointslices"
+    description = "Exclude GKE endpointslices churn"
+    filter      = "protoPayload.serviceName:(\"k8s.io\" OR \"container.googleapis.com\") AND (\"endpointslices\")"
+  }
 }
 
 resource "google_pubsub_topic_iam_member" "sink_writer" {
@@ -62,7 +114,7 @@ resource "google_pubsub_topic_iam_member" "sink_writer" {
   member  = google_logging_project_sink.audit_to_nervous_system.writer_identity
 }
 
-# --- God-View Sovereign (min=max=1, 1 vCPU / 1 GiB, cpu_idle=false, Direct VPC egress ALL_TRAFFIC) ---
+# --- God-View Sovereign (min=max=1, 2 vCPU / 2 GiB, cpu_idle=false, Direct VPC egress ALL_TRAFFIC) ---
 
 resource "google_cloud_run_v2_service" "sovereign" {
   project             = var.project_id
@@ -153,8 +205,13 @@ resource "google_cloud_run_v2_service" "sovereign" {
         value = "2"
       }
       env {
-        name  = "PG_READONLY_PASSWORD"
-        value = var.sql_readonly_password
+        name = "PG_READONLY_PASSWORD"
+        value_source {
+          secret_key_ref {
+            secret  = "godview-pg-readonly-password"
+            version = "latest"
+          }
+        }
       }
       env {
         name  = "GODVIEW_HINT_EXCLUDE"
@@ -167,6 +224,26 @@ resource "google_cloud_run_v2_service" "sovereign" {
       env {
         name  = "GODVIEW_ENV"
         value = "gcp"
+      }
+      env {
+        name  = "GOOGLE_CLOUD_PROJECT"
+        value = var.project_id
+      }
+      env {
+        name  = "GOOGLE_CLOUD_PROJECT_NUMBER"
+        value = var.project_number
+      }
+      env {
+        name  = "GODVIEW_REGIONS"
+        value = "us-central1"
+      }
+      env {
+        name  = "IAP_BACKEND_SERVICE_IDS"
+        value = "${data.google_compute_backend_service.sovereign_api.generated_id},${data.google_compute_backend_service.cockpit.generated_id}"
+      }
+      env {
+        name  = "PERCEPTION_INTERVAL_SECONDS"
+        value = "300"
       }
       env {
         name  = "GODVIEW_BUDGET_APPLICATION_USD"
@@ -241,8 +318,13 @@ resource "google_cloud_run_v2_service" "sovereign" {
         value = "godview_readonly"
       }
       env {
-        name  = "DB_PASSWORD"
-        value = var.sql_readonly_password
+        name = "DB_PASSWORD"
+        value_source {
+          secret_key_ref {
+            secret  = "godview-pg-readonly-password"
+            version = "latest"
+          }
+        }
       }
       env {
         name = "GITHUB_WEBHOOK_SECRET"
@@ -498,13 +580,17 @@ resource "google_monitoring_uptime_check_config" "sovereign_health" {
     port         = 443
     use_ssl      = true
     validate_ssl = true
+
+    service_agent_authentication {
+      type = "OIDC_TOKEN"
+    }
   }
 
   monitored_resource {
     type = "uptime_url"
     labels = {
       project_id = var.project_id
-      host       = "godview.ak-demos.com"
+      host       = replace(replace(google_cloud_run_v2_service.sovereign.uri, "https://", ""), "/", "")
     }
   }
 }

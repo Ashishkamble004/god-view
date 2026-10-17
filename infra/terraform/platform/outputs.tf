@@ -163,6 +163,10 @@ output "nervous_system_dlq_topic" {
   value = module.godview.nervous_system_dlq_topic
 }
 
+output "nervous_system_dlq_subscription" {
+  value = module.godview.nervous_system_dlq_subscription
+}
+
 output "hibernate_job_name" {
   value = module.godview.hibernate_job_name
 }

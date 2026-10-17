@@ -1,32 +1,38 @@
-# God-View v4 & Cymbal Auto Finance — Deployment Runbook
+# God-View v5 & Cymbal Auto Finance — Deployment Runbook
 
-> [!CAUTION]
-> **Status correction (17-10-26, 13:00 UTC) — see [`issues-identified-17-10-26.md`](issues-identified-17-10-26.md).**
-> - §2.2 is wrong: **no God-View court agents are deployed** on Vertex AI Agent Engine, and `deploy_agent_engine.py` would deploy an echo-only wrapper.
-> - §2.1 is stale: the Sovereign serves revision `god-view-sovereign-00006-mfk` (`@sha256:93fae7d6…`). That build runs on in-memory fakes with zero sense adapters (`app = create_app()`).
-> - Edge changes on 17-10-26: the 3 God-View backends (`god-view-bs-cockpit`, `-sovereign-api`, `-sovereign-public`) now use Cloud Armor `god-view-control-policy` (WAF sensitivity 1), and LB logging is on for all 6 `god-view-bs-*` backends. Tenant backends still use `god-view-edge-policy`.
-> - `smoke.sh --with-mutations` force-runs `godview-tenant-pause`. Always follow it with `godview-tenant-resume`.
+> [!NOTE]
+> **God-View v5 Rebuild (2026-10-17) — see [`issues-identified-17-10-26.md`](issues-identified-17-10-26.md) & [`plans/2026-10-17-god-view-rebuild-plan.md`](plans/2026-10-17-god-view-rebuild-plan.md).**
+> - **Zero Fakes in Production**: Production Sovereign runs with real GCP composition root (`bootstrap.py`) over Firestore (`god-view-memory-db`), BigQuery (`godview_ledger`), Pub/Sub (`godview-nervous-system`), and Vertex AI Agent Engine. `GODVIEW_ENV=gcp` fails closed if any in-memory store is active.
+> - **Section 2.1 Correction**: The stale v4 Sovereign image digest (`god-view-sovereign-00006-mfk` `@sha256:93fae7d6…`) ran on in-memory fakes with zero sense adapters (`app = create_app()`). Replaced by the v5 rebuild container.
+> - **Section 2.2 Correction**: **No Court Agents were deployed in v4** (the previous table reflected planned specs; live Vertex AI had 0 `godview_managed` Reasoning Engines). In v5, ADK specialists on Vertex AI Agent Engine (`min_instances = 0`, `gemini-4-argon` default) are deployed dynamically by the Sovereign / deployer once agent engine slice lands.
+> - **Infrastructure & Edge (Rev 5 & Rev 6)**:
+>   - God-View backends (`god-view-bs-cockpit`, `-sovereign-api`, `-sovereign-public`) use Cloud Armor `god-view-control-policy` (WAF sensitivity 1, verbose logging, 600 req/min/IP rate limit). Tenant backends remain on `god-view-edge-policy` (sensitivity 4; test case T1).
+>   - Sovereign Cloud Run sized to 2 vCPU / 2 GiB (`min=max=1`).
+>   - Database passwords moved to Secret Manager (`godview-pg-readonly-password:latest`) via `secret_key_ref`.
+>   - Monitoring uptime check upgraded to direct Sovereign `.run.app` host with OIDC service agent authentication.
+>   - Audit log sink configured with exclusions for GKE Autopilot churn (`leases`, `configmaps`, `pods.binding`, `endpointslices`).
+>   - Pub/Sub DLQ topic backed by a dedicated subscription `godview-nervous-system-dlq-sub` (7-day retention).
 
 - **Project**: `general-ak` (`769002985772`)
 - **Primary Region / Zone**: `us-central1` / `us-central1-a` (Gemini `gemini-4-argon` default & `gemini-3.8-flash` fallback model calls at `global`; embeddings `text-embedding-005`, Firestore, Agent Engine, Model Armor at `us-central1`)
 - **Terraform State Bucket**: `gs://general-ak-god-view-tfstate` (prefixes: `platform`, `workloads`)
 - **Artifact Registry**: `us-central1-docker.pkg.dev/general-ak/god-view-containers`
 - **Agent Engine Staging Bucket**: `gs://general-ak-god-view-agent-staging`
-- **Owner / Operator Session Window**: `admin@kambleashish.altostrat.com` (active session deadline: 22:00 UTC for new long operations; expires ≈ 22:30 UTC)
+- **Owner / Operator Session Window**: `admin@kambleashish.altostrat.com`
 - **Safety Contract**: Only resources carrying `godview_managed = "true"` are ever modified. Cloud Run updates use `--image`-only deployments (`./infra/deploy/deploy_run.sh`) so Terraform-managed revision configurations (scaling, VPC egress, service accounts, secrets, env vars, ingress) are inherited intact. Zero `allUsers` IAM invoker bindings are used on Cloud Run (§A3).
 
 ---
 
 ## 1. Applied (Terraform Platform & Workloads Roots)
 
-### 1.1 Platform Root (`infra/terraform/platform` — Owner: `infra-platform`, `220/220` Resources Applied)
+### 1.1 Platform Root (`infra/terraform/platform` — Owner: `infra-platform`, `220/220` Baseline + Rev 5 & Rev 6 Updates)
 
 | Stage | Scope | Status | Applied At (UTC) | Key Outputs / Notes |
 | :-- | :-- | :-- | :-- | :-- |
 | Bootstrap | GCS bucket `gs://general-ak-god-view-tfstate` (uniform access, versioning, `prevent_destroy = true`) | **Applied** | `2026-10-16T17:34:42Z` | Imported and updated in-place (`godview_managed = "true"`) |
-| Stage 1 | `01-project-iam` (30 APIs, 5 SAs, WIF), VPC/subnet/PSA/NAT/firewalls/ILB IPs, Artifact Registry `god-view-containers`, 5 buckets, 3 secrets, Firestore `god-view-memory-db` + 4 vector indexes, BigQuery `godview_ledger` + 4 tables, Cloud SQL `god-view-pg` (`godview_lms`, `app_user`, `godview_readonly`), GKE Autopilot `god-view-gke-cluster` + WI, Pub/Sub `godview-nervous-system` + `-dlq` + audit sink, Model Armor `cymbal-text-guard` | **Applied (140/140)** (#161) | `2026-10-17T07:51:52Z` | `sql_private_ip = 10.186.0.3`, `kyc_ilb = 10.10.0.3` (`god-view-kyc-ilb-ip`), `los_ilb = 10.10.0.2` (`god-view-los-ilb-ip`), `gke_dns_endpoint = gke-00dca33da82641e7a02cb81ed031de9e7418-769002985772.us-central1.gke.goog` |
-| Stage 2 | 8 Cloud Run v2 services (`commercial-fleet-credit-svc`, `motor-insurance-svc`, `ai-customer-simulator`, `loan-orchestrator-api`, `customer-loan-portal-web`, `internal-bank-los-web`, `god-view-sovereign`, `god-view-sre-web`), API Gateway `god-view-loan-api-gw`, 5 serverless NEGs, Global LB `god-view-edge` (`35.244.128.165`) + `god-view-edge-cert` (`ACTIVE`), Cloud CDN backend bucket, Cloud Armor `god-view-edge-policy`, DNS `A` records (`cymbal`, `los.cymbal`, `api.cymbal`, `godview` in `ak-demos-com`), IAP bindings, GCE VM `core-banking-cibil-vm` (`10.10.0.5`), Pub/Sub push `godview-sovereign-push` | **Applied (69/69)** (#173) | `2026-10-17T08:19:07Z` | `lb_ip_address = 35.244.128.165`, `api_gateway_hostname = god-view-loan-api-gw-9t9witd8.uc.gateway.dev`, `cbs_vm_internal_ip = 10.10.0.5`, `sovereign_service_url = https://god-view-sovereign-mcj3w7ujpq-uc.a.run.app` |
-| Stage 3 | 5 Cloud Scheduler jobs (`godview-tenant-pause`, `godview-tenant-resume`, `godview-probe-run`, `godview-agent-reflection`, `godview-simulator-tick` in `Asia/Kolkata`), uptime check `sovereign_health` + alert policy `sovereign_heartbeat` + email channel `operator_email`, `$600` Billing Budget `god-view-monthly-budget-600`, Cloud Run Job `god-view-hibernate-job`, Vertex AI Reasoning Engine staging bucket IAM `staging_re_service_agent` | **Applied (11/11)** (#176) | `2026-10-17T08:27:47Z` | `hibernate_job_name = god-view-hibernate-job`; all `220/220` platform resources verified live by `infra-verifier` (#179, #181) |
+| Stage 1 | `01-project-iam` (30 APIs, 5 SAs, WIF), VPC/subnet/PSA/NAT/firewalls/ILB IPs, Artifact Registry `god-view-containers`, 5 buckets, Secret Manager secrets (`cymbal-pg-app-password`, `godview-pg-readonly-password`, `godview-github-*`), Firestore `god-view-memory-db` + 4 vector indexes, BigQuery `godview_ledger` + 4 tables, Cloud SQL `god-view-pg` (`godview_lms`, `app_user`, `godview_readonly`), GKE Autopilot `god-view-gke-cluster` + WI, Pub/Sub `godview-nervous-system` + `-dlq` + audit sink, Model Armor `cymbal-text-guard` | **Applied / Rev 6 Ready** | `2026-10-17T07:51:52Z` (base) | `sql_private_ip = 10.186.0.3`, `kyc_ilb = 10.10.0.3`, `los_ilb = 10.10.0.2`, `gke_dns_endpoint = gke-00dca33da82641e7a02cb81ed031de9e7418-769002985772.us-central1.gke.goog`. Rev 6: Scoped SA IAM roles strictly to §3.8; rotated `godview_readonly` password in Secret Manager. |
+| Stage 2 | 8 Cloud Run v2 services, API Gateway `god-view-loan-api-gw`, 5 serverless NEGs, Global LB `god-view-edge` (`35.244.128.165`) + `god-view-edge-cert` (`ACTIVE`), Cloud CDN backend bucket, Cloud Armor policies (`god-view-control-policy` for God-View backends; `god-view-edge-policy` for tenant), DNS `A` records (`cymbal`, `los.cymbal`, `api.cymbal`, `godview` in `ak-demos-com`), IAP bindings, GCE VM `core-banking-cibil-vm` (`10.10.0.5`), Pub/Sub push `godview-sovereign-push` | **Applied / Rev 6 Ready** | `2026-10-17T08:19:07Z` (base) | `lb_ip_address = 35.244.128.165`, `api_gateway_hostname = god-view-loan-api-gw-9t9witd8.uc.gateway.dev`, `cbs_vm_internal_ip = 10.10.0.5`, `sovereign_service_url = https://god-view-sovereign-mcj3w7ujpq-uc.a.run.app`. Rev 5: `control_policy` sensitivity 1 + LB logging. Rev 6: Sovereign 2 vCPU / 2 GiB, min=max=1, `IAP_BACKEND_SERVICE_IDS`, Secret Manager refs. |
+| Stage 3 | 5 Cloud Scheduler jobs (`godview-tenant-pause`, `godview-tenant-resume`, `godview-probe-run`, `godview-agent-reflection`, `godview-simulator-tick` in `Asia/Kolkata`), uptime check `sovereign_health` (OIDC auth to Sovereign `.run.app` host) + alert policy `sovereign_heartbeat` + email channel `operator_email`, `$600` Billing Budget `god-view-monthly-budget-600`, Cloud Run Job `god-view-hibernate-job`, Vertex AI Reasoning Engine staging bucket IAM `staging_re_service_agent` | **Applied / Rev 6 Ready** | `2026-10-17T08:27:47Z` (base) | `hibernate_job_name = god-view-hibernate-job`. Rev 6: OIDC uptime check + monitoring service agent `roles/run.invoker`; DLQ subscription `godview-nervous-system-dlq-sub` (7d retention); audit sink GKE churn exclusions. |
 
 ### 1.2 Workloads Root (`infra/terraform/workloads` — Applied by `deployer`, `10/10` Resources Applied)
 
@@ -41,68 +47,104 @@
 > [!IMPORTANT]
 > Services are built and deployed **only after** their slice verifier posts `PASS` on the swarm board. Every deployed digest is pinned in `infra/terraform/platform/images.auto.tfvars` or `infra/terraform/workloads/images.auto.tfvars` via `./infra/deploy/build_image.sh <svc> --pin` / `./infra/deploy/pin_image.py`.
 
-### 2.1 Container Services & Workloads (All 11/11 Deployed & Live)
+### 2.1 Container Services & Workloads (Live Baseline & v5 Rebuild Targets)
 
 | Service | Compute Target | Author Slice | Verifier Gate | Image Digest (`@sha256:...`) | Revision / Pod / Instance | Service URL / Internal VIP | Status |
 | :-- | :-- | :-- | :-- | :-- | :-- | :-- | :-- |
-| `loan-orchestrator-api` | Cloud Run (`us-central1`, port 8080) | `tenant-orchestrator` | `agents-verifier` PASS (#159) | `us-central1-docker.pkg.dev/general-ak/god-view-containers/loan-orchestrator-api@sha256:a08923d490e0b84bd294ff776930e980af469b9626090bf2a96691e6c37d74c8` | `loan-orchestrator-api-00002-4st` | `https://loan-orchestrator-api-mcj3w7ujpq-uc.a.run.app` (`https://api.cymbal.ak-demos.com`) | **Deployed & Serving 100%** |
-| `commercial-fleet-credit-svc` | Cloud Run (`us-central1`, port 8080) | `tenant-vm-cbs` | `infra-verifier` PASS (#129) | `us-central1-docker.pkg.dev/general-ak/god-view-containers/commercial-fleet-credit-svc@sha256:85a3ec8d81fafc5b55e608552f8a9503907ca3a48f0e10a4fc32ffbbf732da9b` | `commercial-fleet-credit-svc-00002-j5x` | `https://commercial-fleet-credit-svc-mcj3w7ujpq-uc.a.run.app` (INTERNAL) | **Deployed & Serving 100%** |
-| `motor-insurance-svc` | Cloud Run (`us-central1`, port 8080) | `tenant-vm-cbs` | `infra-verifier` PASS (#129) | `us-central1-docker.pkg.dev/general-ak/god-view-containers/motor-insurance-svc@sha256:4b33f97805bdf798d0395fbaef9cbc9ed225785c9dbbcd1cc741d64252b096ad` | `motor-insurance-svc-00002-k48` | `https://motor-insurance-svc-mcj3w7ujpq-uc.a.run.app` (INTERNAL) | **Deployed & Serving 100%** |
-| `core-banking-cibil-vm` | GCE `e2-micro` (`us-central1-a`, port 8085) | `tenant-vm-cbs` | `infra-verifier` PASS (#129) | `gs://general-ak-god-view-kyc-vault/vm-artifacts/core-banking-cibil-vm-0f8d1eac7558.tar.gz` (`@sha256:e94e9bcffc9ea0fe10cd600051944c4e87d231d75f9073e9e53e7cb90da84f8a`) | `core-banking-cibil-vm` (`systemd cibil-cbs.service`) | `http://10.10.0.5:8085` (Private VPC) | **Payload Deployed & VM Reset** |
-| `ai-customer-simulator` | Cloud Run (`us-central1`, port 8080) | `ai-customer-simulator` | `agents-verifier` PASS (#128) | `us-central1-docker.pkg.dev/general-ak/god-view-containers/ai-customer-simulator@sha256:3bbaf3d170e67cc735944a55c95a6d262661c6e133ec4f76ca3b4d0992245b98` | `ai-customer-simulator-00002-2x7` | `https://ai-customer-simulator-mcj3w7ujpq-uc.a.run.app` (INTERNAL) | **Deployed & Serving 100%** |
-| `customer-loan-portal-web` | Cloud Run (`us-central1`, port 8080) | `frontends-tenant` | `frontend-verifier` PASS (#165) | `us-central1-docker.pkg.dev/general-ak/god-view-containers/customer-loan-portal-web@sha256:01d710e41e20a1358f82ca95e250c7d7d774cc8e404d1d5cd65d5696b9c3d7c7` | `customer-loan-portal-web-00002-9vt` | `https://customer-loan-portal-web-mcj3w7ujpq-uc.a.run.app` (`https://cymbal.ak-demos.com`) | **Deployed & Serving 100%** |
-| `internal-bank-los-web` | Cloud Run (`us-central1`, port 8080) | `frontends-tenant` | `frontend-verifier` PASS (#165) | `us-central1-docker.pkg.dev/general-ak/god-view-containers/internal-bank-los-web@sha256:f2ef782277ed6e9a40483c32eac78877d16fa150719af78e78fc5fd6773ba2d5` | `internal-bank-los-web-00002-qgj` | `https://internal-bank-los-web-mcj3w7ujpq-uc.a.run.app` (`https://los.cymbal.ak-demos.com`) | **Deployed & Serving 100%** |
-| `god-view-sre-web` | Cloud Run (`us-central1`, port 8080) | `frontend-cockpit` | `frontend-verifier` PASS (#144) | `us-central1-docker.pkg.dev/general-ak/god-view-containers/god-view-sre-web@sha256:016809f6dc8719c8f2472a7dc54334f396864b047ce54f8f5628de6a714281e9` | `god-view-sre-web-00002-rgp` | `https://god-view-sre-web-mcj3w7ujpq-uc.a.run.app` (`https://godview.ak-demos.com`) | **Deployed & Serving 100%** |
-| `god-view-sovereign` | Cloud Run (`us-central1`, port 8080) | `sovereign-core` + `adapters-*` + `ledger-invariants` | `backend-verifier` PASS (#170, #185) | `us-central1-docker.pkg.dev/general-ak/god-view-containers/god-view-sovereign@sha256:1504b2f9def9949d4ae16c5a37ed9ed7774a9929347330a8153c468eb4f8dc06` | `god-view-sovereign-00005-zmz` | `https://god-view-sovereign-mcj3w7ujpq-uc.a.run.app` (`https://godview.ak-demos.com/api/*`) | **Deployed & Serving 100%** |
-| `kyc-model-armor-svc` | GKE Autopilot (`cymbal`, port 8080) | `tenant-gke-utilities` | `agents-verifier` PASS (#151) | `us-central1-docker.pkg.dev/general-ak/god-view-containers/kyc-model-armor-svc@sha256:b0c15dd124dd80ddba5ebad4229744941c48812d7b2c74d3d30f97802d1c5dfa` | `pod/kyc-model-armor-svc-59cc4cb697-7972w` (`1/1 Running`) | `http://10.10.0.3:8080` (`god-view-kyc-ilb-ip`) | **Deployed & Running (1/1)** |
-| `underwriting-los-svc` | GKE Autopilot (`cymbal`, port 8080) | `tenant-gke-utilities` | `agents-verifier` PASS (#151) | `us-central1-docker.pkg.dev/general-ak/god-view-containers/underwriting-los-svc@sha256:5eaa5d1d2a737880ebb101ce6328e5b48f134698d6cbf864d9fbf86a45cbe45c` | `pod/underwriting-los-svc-7f87d55f7f-nnxvv` (`1/1 Running`) | `http://10.10.0.2:8080` (`god-view-los-ilb-ip`) | **Deployed & Running (1/1)** |
+| `loan-orchestrator-api` | Cloud Run (`us-central1`, port 8080) | `tenant-orchestrator` | `agents-verifier` PASS | `us-central1-docker.pkg.dev/general-ak/god-view-containers/loan-orchestrator-api@sha256:a08923d490e0b84bd294ff776930e980af469b9626090bf2a96691e6c37d74c8` | `loan-orchestrator-api-00002-4st` | `https://loan-orchestrator-api-mcj3w7ujpq-uc.a.run.app` (`https://api.cymbal.ak-demos.com`) | **Deployed & Serving (Tenant Frozen)** |
+| `commercial-fleet-credit-svc` | Cloud Run (`us-central1`, port 8080) | `tenant-vm-cbs` | `infra-verifier` PASS | `us-central1-docker.pkg.dev/general-ak/god-view-containers/commercial-fleet-credit-svc@sha256:85a3ec8d81fafc5b55e608552f8a9503907ca3a48f0e10a4fc32ffbbf732da9b` | `commercial-fleet-credit-svc-00002-j5x` | `https://commercial-fleet-credit-svc-mcj3w7ujpq-uc.a.run.app` (INTERNAL) | **Deployed & Serving (Tenant Frozen)** |
+| `motor-insurance-svc` | Cloud Run (`us-central1`, port 8080) | `tenant-vm-cbs` | `infra-verifier` PASS | `us-central1-docker.pkg.dev/general-ak/god-view-containers/motor-insurance-svc@sha256:4b33f97805bdf798d0395fbaef9cbc9ed225785c9dbbcd1cc741d64252b096ad` | `motor-insurance-svc-00002-k48` | `https://motor-insurance-svc-mcj3w7ujpq-uc.a.run.app` (INTERNAL) | **Deployed & Serving (Tenant Frozen)** |
+| `core-banking-cibil-vm` | GCE `e2-micro` (`us-central1-a`, port 8085) | `tenant-vm-cbs` | `infra-verifier` PASS | `gs://general-ak-god-view-kyc-vault/vm-artifacts/core-banking-cibil-vm-0f8d1eac7558.tar.gz` (`@sha256:e94e9bcffc9ea0fe10cd600051944c4e87d231d75f9073e9e53e7cb90da84f8a`) | `core-banking-cibil-vm` (`systemd cibil-cbs.service`) | `http://10.10.0.5:8085` (Private VPC) | **Deployed & Serving (Tenant Frozen)** |
+| `ai-customer-simulator` | Cloud Run (`us-central1`, port 8080) | `ai-customer-simulator` | `agents-verifier` PASS | `us-central1-docker.pkg.dev/general-ak/god-view-containers/ai-customer-simulator@sha256:3bbaf3d170e67cc735944a55c95a6d262661c6e133ec4f76ca3b4d0992245b98` | `ai-customer-simulator-00002-2x7` | `https://ai-customer-simulator-mcj3w7ujpq-uc.a.run.app` (INTERNAL) | **Deployed & Serving (Tenant Frozen)** |
+| `customer-loan-portal-web` | Cloud Run (`us-central1`, port 8080) | `frontends-tenant` | `frontend-verifier` PASS | `us-central1-docker.pkg.dev/general-ak/god-view-containers/customer-loan-portal-web@sha256:01d710e41e20a1358f82ca95e250c7d7d774cc8e404d1d5cd65d5696b9c3d7c7` | `customer-loan-portal-web-00002-9vt` | `https://customer-loan-portal-web-mcj3w7ujpq-uc.a.run.app` (`https://cymbal.ak-demos.com`) | **Deployed & Serving (Tenant Frozen)** |
+| `internal-bank-los-web` | Cloud Run (`us-central1`, port 8080) | `frontends-tenant` | `frontend-verifier` PASS | `us-central1-docker.pkg.dev/general-ak/god-view-containers/internal-bank-los-web@sha256:f2ef782277ed6e9a40483c32eac78877d16fa150719af78e78fc5fd6773ba2d5` | `internal-bank-los-web-00002-qgj` | `https://internal-bank-los-web-mcj3w7ujpq-uc.a.run.app` (`https://los.cymbal.ak-demos.com`) | **Deployed & Serving (Tenant Frozen)** |
+| `god-view-sre-web` | Cloud Run (`us-central1`, port 8080) | `cockpit` | Pending `verifier-edge` PASS | `us-central1-docker.pkg.dev/general-ak/god-view-containers/god-view-sre-web@sha256:016809f6dc8719c8f2472a7dc54334f396864b047ce54f8f5628de6a714281e9` (stale v4) | `god-view-sre-web-00002-rgp` | `https://god-view-sre-web-mcj3w7ujpq-uc.a.run.app` (`https://godview.ak-demos.com`) | **Pending v5 3D Globe Deploy** |
+| `god-view-sovereign` | Cloud Run (`us-central1`, port 8080) | `runtime-core` + `discovery` + `sentinels` + `remediation` | Pending `verifier-core` PASS | `us-central1-docker.pkg.dev/general-ak/god-view-containers/god-view-sovereign@sha256:93fae7d66dc8254c794ce8b99d141e6c3fa983196c14175373307fc14ea8ec46` (stale v4) | `god-view-sovereign-00006-mfk` | `https://god-view-sovereign-mcj3w7ujpq-uc.a.run.app` (`https://godview.ak-demos.com/api/*`) | **Pending v5 Real Core Deploy** |
+| `kyc-model-armor-svc` | GKE Autopilot (`cymbal`, port 8080) | `tenant-gke-utilities` | `agents-verifier` PASS | `us-central1-docker.pkg.dev/general-ak/god-view-containers/kyc-model-armor-svc@sha256:b0c15dd124dd80ddba5ebad4229744941c48812d7b2c74d3d30f97802d1c5dfa` | `pod/kyc-model-armor-svc-59cc4cb697-7972w` (`1/1 Running`) | `http://10.10.0.3:8080` (`god-view-kyc-ilb-ip`) | **Deployed & Running (Tenant Frozen)** |
+| `underwriting-los-svc` | GKE Autopilot (`cymbal`, port 8080) | `tenant-gke-utilities` | `agents-verifier` PASS | `us-central1-docker.pkg.dev/general-ak/god-view-containers/underwriting-los-svc@sha256:5eaa5d1d2a737880ebb101ce6328e5b48f134698d6cbf864d9fbf86a45cbe45c` | `pod/underwriting-los-svc-7f87d55f7f-nnxvv` (`1/1 Running`) | `http://10.10.0.2:8080` (`god-view-los-ilb-ip`) | **Deployed & Running (Tenant Frozen)** |
 
 ### 2.2 Vertex AI Agent Engine Court (`us-central1`, `min_instances = 0`, `1 vCPU / 2 GiB`, Default Model `gemini-4-argon` @ `global`)
 
-| Agent ID | Agent Type | Subject | Reasoning Engine Resource | A2A Card Endpoint | Status |
+> [!WARNING]
+> **Audit Finding (Issues Identified §5 G3):** No Court Agents were deployed in v4 (the previous runbook table recorded intended targets, but live GCP inspection showed 0 `godview_managed` Reasoning Engines).
+>
+> In v5, Court Agents are ADK multi-agent specialists (`LlmAgent` with generic instructions, reasoning over evidence packs + `BusinessContext` at runtime). They are deployed to Vertex AI Agent Engine dynamically by `CourtManager.spawn_agent` or by `@deployer` via `./infra/deploy/deploy_agent_engine.py` once `@agents` passes verification. In-process fallback ensures detection and diagnosis function immediately even while engines scale up.
+
+| Agent Archetype | Target Role | Reasoning Engine Deployment | Model | In-Process Fallback | Status |
 | :-- | :-- | :-- | :-- | :-- | :-- |
-| `application__loan-orchestrator-api` | Application | `loan-orchestrator-api` | Deployed | — | Active |
-| `application__kyc-model-armor-svc` | Application | `kyc-model-armor-svc` | Deployed | — | Active |
-| `application__underwriting-los-svc` | Application | `underwriting-los-svc` | Deployed | — | Active |
-| `application__commercial-fleet-credit-svc` | Application | `commercial-fleet-credit-svc` | Deployed | — | Active |
-| `application__motor-insurance-svc` | Application | `motor-insurance-svc` | Deployed | — | Active |
-| `application__core-banking-cibil-vm` | Application | `core-banking-cibil-vm` | Deployed | — | Active |
-| `data__god-view-pg` | Data | `god-view-pg` | Deployed | — | Active |
-| `business_line__vehicle_loan_origination` | Business-Line | `vehicle_loan_origination` | Deployed | — | Active |
-| `change__github.god-view` | Change | `github.god-view` | Deployed | — | Active |
-| `platform__gcp-general-ak` | Platform | `gcp-general-ak` | Deployed | — | Active |
+| `application__<svc>` | Service runtime specialist | Vertex AI Reasoning Engine (`min_instances=0`) | `gemini-4-argon` @ global | Yes | Pending slice PASS & deploy |
+| `data__<store>` | Data and state specialist | Vertex AI Reasoning Engine (`min_instances=0`) | `gemini-4-argon` @ global | Yes | Pending slice PASS & deploy |
+| `business_line__<journey>` | Business journey specialist | Vertex AI Reasoning Engine (`min_instances=0`) | `gemini-4-argon` @ global | Yes | Pending slice PASS & deploy |
+| `change__<repo>` | Software change specialist | Vertex AI Reasoning Engine (`min_instances=0`) | `gemini-4-argon` @ global | Yes | Pending slice PASS & deploy |
+| `platform__<env>` | Cloud platform specialist | Vertex AI Reasoning Engine (`min_instances=0`) | `gemini-4-argon` @ global | Yes | Pending slice PASS & deploy |
 
 ---
 
-## 3. Pending After Re-Login (Exact Ordered Commands)
+## 3. Ordered v5 Deployment Sequence
 
-> [!NOTE]
-> All 3 Platform Terraform stages (`220/220` resources), the GKE Workloads Terraform root (`10/10` resources), all 8 Cloud Run services, both GKE Autopilot services, and the GCE VM (`core-banking-cibil-vm`) are already deployed and live in `general-ak`. The ordered commands below cover:
-> 1. Re-authenticating `gcloud` / ADC if the operator session has expired (`Step 0`).
-> 2. Rebuilding and deploying `god-view-sovereign` once Wave 3 `court-agents` (`godview/harness/` + `godview/agents/`) passes verifier review (`Step 1`).
-> 3. Deploying the 10 Court Agents on Vertex AI Agent Engine (`us-central1`) via `infra/deploy/deploy_agent_engine.py` (`Step 2`).
-> 4. Reconciling `images.auto.tfvars` into Platform Terraform state and running the full smoke, L4 GCP E2E, and L5 chaos drill suites (`Steps 3–4`).
+> [!IMPORTANT]
+> Slices are deployed **only after** their respective verifier posts `PASS` on the swarm board (`@verifier-core` for runtime-core/discovery/sentinels/remediation, `@verifier-edge` for agents/neutrality/cockpit/infra). All production mutations must be performed by `@deployer`.
 
-### Step 0: Re-authenticate `gcloud` and Application Default Credentials
+### Step 0: Verify Operator Session & ADC
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 cd /usr/local/google/home/kambleashish/Documents/Projects/god-view
 
-gcloud auth login admin@kambleashish.altostrat.com
-gcloud auth application-default login
 gcloud config set project general-ak
 gcloud auth print-access-token >/dev/null && echo "ADC + gcloud auth OK"
 ```
 
-### Step 1: Rebuild, Pin, and Deploy `god-view-sovereign` with Wave 3 `godview/harness/` + `godview/agents/`
-*(Run once `@agents-verifier` and `@backend-verifier` post `PASS` for `court-agents`.)*
+### Step 1: Reconcile Platform Infrastructure (Rev 6 Terraform)
+*(Run after `@verifier-edge` confirms infra review PASS.)*
+```bash
+# 1. Import pre-granted monitoring invoker IAM member into state
+terraform -chdir=infra/terraform/platform import \
+  'module.godview.google_cloud_run_v2_service_iam_member.sovereign_invokers["serviceAccount:service-769002985772@gcp-sa-monitoring-notification.iam.gserviceaccount.com"]' \
+  'projects/general-ak/locations/us-central1/services/god-view-sovereign roles/run.invoker serviceAccount:service-769002985772@gcp-sa-monitoring-notification.iam.gserviceaccount.com'
+
+# 2. Plan and apply platform updates
+# NOTE: To avoid reconciling drifted tenant Cloud Run services, use targeted apply:
+terraform -chdir=infra/terraform/platform plan -input=false \
+  -target=module.project_iam \
+  -target=module.data.random_password.pg_readonly \
+  -target=module.data.google_secret_manager_secret.godview_pg_readonly_password \
+  -target=module.data.google_secret_manager_secret_version.godview_pg_readonly_password \
+  -target=module.data.google_secret_manager_secret_iam_member.pg_readonly_pass_sense \
+  -target=module.data.google_sql_user.godview_readonly \
+  -target=module.godview.google_cloud_run_v2_service.sovereign \
+  -target=module.godview.google_cloud_run_v2_service_iam_member.sovereign_invokers \
+  -target=module.godview.google_monitoring_uptime_check_config.sovereign_health \
+  -target=module.godview.google_logging_project_sink.audit_to_nervous_system \
+  -target=module.godview.google_pubsub_topic.nervous_system_dlq \
+  -target=module.godview.google_pubsub_subscription.nervous_system_dlq \
+  -target=module.godview.google_pubsub_subscription_iam_member.dlq_sense_subscriber \
+  -out=/usr/local/google/home/kambleashish/tmp/platform-v5.tfplan
+
+terraform -chdir=infra/terraform/platform apply -input=false /usr/local/google/home/kambleashish/tmp/platform-v5.tfplan
+terraform -chdir=infra/terraform/platform output -json > infra/terraform/platform/outputs.json
+```
+
+### Step 2: Build, Pin, and Deploy v5 Sovereign Control Plane
+*(Run once `@verifier-core` posts PASS for runtime-core, discovery, sentinels, remediation.)*
 ```bash
 SOV_DIGEST="$(./infra/deploy/build_image.sh god-view-sovereign --pin)"
 ./infra/deploy/pin_image.py --root platform --service god-view-hibernate-job --image "${SOV_DIGEST}"
 ./infra/deploy/deploy_run.sh god-view-sovereign "${SOV_DIGEST}"
+
+# Immediate health check verification
+SOV_URL="$(gcloud run services describe god-view-sovereign --project=general-ak --region=us-central1 --format='value(status.url)')"
+curl -s -H "Authorization: Bearer $(gcloud auth print-identity-token)" "${SOV_URL}/public/healthz" | jq .
 ```
 
-### Step 2: Deploy Court Agents on Vertex AI Agent Engine (`us-central1`, `gemini-4-argon` Default)
+### Step 3: Build, Pin, and Deploy v5 Cockpit (3D Globe)
+*(Run once `@verifier-edge` posts PASS for cockpit.)*
+```bash
+COCKPIT_DIGEST="$(./infra/deploy/build_image.sh god-view-sre-web --pin)"
+./infra/deploy/deploy_run.sh god-view-sre-web "${COCKPIT_DIGEST}"
+```
+
+### Step 4: Deploy Vertex AI Agent Engine Court
+*(Run once `@verifier-edge` posts PASS for agents.)*
 ```bash
 SOV_URL="$(gcloud run services describe god-view-sovereign --project=general-ak --region=us-central1 --format='value(status.url)')"
 PYTHONPATH=. uv run --with "google-cloud-aiplatform[agent_engines,adk]" python infra/deploy/deploy_agent_engine.py \
@@ -113,57 +155,17 @@ PYTHONPATH=. uv run --with "google-cloud-aiplatform[agent_engines,adk]" python i
   --staging-bucket gs://general-ak-god-view-agent-staging
 ```
 
-### Step 3: Reconcile `images.auto.tfvars` into Platform Terraform State
+### Step 5: Verification & Acceptance Gates (Verifier-Live)
+*(Run acceptance gates A1-A8 per Rebuild Plan §4.)*
 ```bash
-terraform -chdir=infra/terraform/platform init -input=false
-terraform -chdir=infra/terraform/platform plan -input=false -out=/usr/local/google/home/kambleashish/tmp/platform-images.tfplan
-terraform -chdir=infra/terraform/platform apply -input=false -auto-approve /usr/local/google/home/kambleashish/tmp/platform-images.tfplan
-terraform -chdir=infra/terraform/platform output -json > infra/terraform/platform/outputs.json
-```
-
-### Step 4: Run Smoke Tests, L4 GCP E2E, and L5 Drills
-```bash
-# 1. Verify managed SSL certificate is ACTIVE
+# Verify managed SSL certificate
 gcloud compute ssl-certificates describe god-view-edge-cert --project=general-ak --format='value(managed.status,managed.domainStatus)'
 
-# 2. Run TF Spec §7 smoke tests
-./infra/deploy/smoke.sh --with-mutations
+# Smoke test suite
+./infra/deploy/smoke.sh
 
-# 3. Resume tenant traffic if paused by smoke mutation test
+# Resume tenant traffic if paused
 gcloud scheduler jobs run godview-tenant-resume --location=us-central1 --project=general-ak
-
-# 4. Run L4 GCP E2E suite
-SOV_URL="$(gcloud run services describe god-view-sovereign --project=general-ak --region=us-central1 --format='value(status.url)')"
-GODVIEW_SOVEREIGN_URL="${SOV_URL}" uv run pytest infra/tests/test_gcp_e2e.py -m gcp -v
-
-# 5. Run L5 drill verification suite (inside 09:00-17:00 IST window)
-uv run pytest infra/tests/test_drills.py -m drill -q
-```
-
-### Appendix: Full Idempotent Redeploy Reference (All Services)
-*(Only needed if rebuilding tenant services, GKE utilities, frontends, or the CBS VM from scratch.)*
-```bash
-# Tenant Cloud Run services
-for svc in commercial-fleet-credit-svc motor-insurance-svc loan-orchestrator-api ai-customer-simulator; do
-  IMAGE_DIGEST="$(./infra/deploy/build_image.sh "${svc}" --pin)"
-  ./infra/deploy/deploy_run.sh "${svc}" "${IMAGE_DIGEST}"
-done
-
-# CBS GCE VM payload
-./infra/deploy/build_image.sh core-banking-cibil-vm --pin
-./infra/deploy/deploy_vm_payload.sh --reset
-
-# GKE Autopilot utilities
-for svc in kyc-model-armor-svc underwriting-los-svc; do
-  ./infra/deploy/build_image.sh "${svc}" --pin
-done
-./infra/deploy/apply_workloads.sh
-
-# Three web frontends
-for svc in customer-loan-portal-web internal-bank-los-web god-view-sre-web; do
-  IMAGE_DIGEST="$(./infra/deploy/build_image.sh "${svc}" --pin)"
-  ./infra/deploy/deploy_run.sh "${svc}" "${IMAGE_DIGEST}"
-done
 ```
 
 ---

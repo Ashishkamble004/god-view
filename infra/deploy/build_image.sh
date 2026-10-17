@@ -109,9 +109,10 @@ if [[ "${NEEDS_SHARED}" == "true" && -d "${REPO_ROOT}/shared" ]]; then
   HASH_PATHS+=("${REPO_ROOT}/shared")
 fi
 if [[ "${SVC}" == "god-view-sovereign" || "${SVC}" == "god-view-hibernate-job" ]]; then
-  for sub in adapters ledger invariants agent-skills harness agents; do
-    if [[ -d "${REPO_ROOT}/godview/${sub}" ]]; then
-      HASH_PATHS+=("${REPO_ROOT}/godview/${sub}")
+  for sub in "${REPO_ROOT}/godview"/*; do
+    sub_name="$(basename "${sub}")"
+    if [[ "${sub_name}" != "god-view-sre-web" && -d "${sub}" ]]; then
+      HASH_PATHS+=("${sub}")
     fi
   done
 fi
@@ -147,11 +148,18 @@ if [[ "${SVC}" == "god-view-sovereign" || "${SVC}" == "god-view-hibernate-job" ]
   if [[ -f "${REPO_ROOT}/godview/__init__.py" ]]; then
     cp -a "${REPO_ROOT}/godview/__init__.py" "${STAGE_DIR}/godview/__init__.py"
   fi
-  for sub in adapters ledger invariants agent-skills sovereign harness agents; do
-    if [[ -d "${REPO_ROOT}/godview/${sub}" ]]; then
-      cp -a "${REPO_ROOT}/godview/${sub}" "${STAGE_DIR}/godview/${sub}"
+  for sub in "${REPO_ROOT}/godview"/*; do
+    sub_name="$(basename "${sub}")"
+    if [[ "${sub_name}" != "god-view-sre-web" && -d "${sub}" ]]; then
+      cp -a "${sub}" "${STAGE_DIR}/godview/${sub_name}"
     fi
   done
+  if [[ -f "${REPO_ROOT}/pyproject.toml" ]]; then
+    cp -a "${REPO_ROOT}/pyproject.toml" "${STAGE_DIR}/pyproject.toml"
+  fi
+  if [[ -f "${REPO_ROOT}/uv.lock" ]]; then
+    cp -a "${REPO_ROOT}/uv.lock" "${STAGE_DIR}/uv.lock"
+  fi
   BUILD_CONTEXT="."
   REL_DOCKERFILE="Dockerfile"
   SUBMIT_DIR="${STAGE_DIR}"

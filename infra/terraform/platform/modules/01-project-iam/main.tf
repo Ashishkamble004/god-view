@@ -40,23 +40,27 @@ locals {
   ])
 
   sense_project_roles = toset([
-    "roles/viewer",
-    "roles/cloudasset.viewer",
-    "roles/monitoring.viewer",
-    "roles/cloudtrace.user",
+    "roles/aiplatform.user",
     "roles/logging.viewer",
+    "roles/monitoring.viewer",
+    "roles/compute.viewer",
+    "roles/run.viewer",
+    "roles/pubsub.viewer",
+    "roles/iam.securityReviewer",
+    "roles/apigateway.viewer",
+    "roles/container.viewer",
+    "roles/cloudsql.viewer",
+    "roles/cloudasset.viewer",
     "roles/datastore.user",
     "roles/bigquery.jobUser",
-    "roles/aiplatform.user",
+    "roles/cloudtrace.user",
   ])
 
   act_project_roles = toset([
-    "roles/run.developer",
-    "roles/container.developer",
-    "roles/compute.instanceAdmin.v1",
-    "roles/cloudsql.editor",
     "roles/compute.securityAdmin",
-    "roles/cloudscheduler.admin",
+    "roles/run.admin",
+    "roles/pubsub.editor",
+    "roles/container.developer",
   ])
 
   runtime_project_roles = toset([

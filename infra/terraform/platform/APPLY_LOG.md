@@ -105,3 +105,23 @@
     - invoker IAM check re-enabled on `god-view-sre-web`, `god-view-sovereign`, `internal-bank-los-web` and `loan-orchestrator-api`.
   - Tenant WAF (`god-view-edge-policy`) deliberately **unchanged**: it is God-View test case T1.
   - Known side effect: with Sovereign IAM enforced, the anonymous uptime check on `godview.ak-demos.com/public/healthz` returns 403. It needs an OIDC uptime check plus `roles/run.invoker` for `service-769002985772@gcp-sa-monitoring-notification.iam.gserviceaccount.com`, which is pending owner approval.
+
+- **Rev 6 (`2026-10-17T17:30:00Z`, @infra; God-View v5 Rebuild Infrastructure Spec §3.8)**:
+  - **Module `05-godview`**:
+    - **Uptime check**: Updated `google_monitoring_uptime_check_config.sovereign_health` to probe the direct Sovereign Cloud Run `*.run.app` host with OIDC service agent authentication (`http_check.service_agent_authentication { type = "OIDC_TOKEN" }`), path `/public/healthz`.
+    - **Sovereign IAM invokers**: Added `serviceAccount:service-769002985772@gcp-sa-monitoring-notification.iam.gserviceaccount.com` `roles/run.invoker` to `local.sovereign_invokers` (granted by hand at 17:09Z; imported by deployer).
+    - **Sovereign resources**: Allocated 2 vCPU / 2 GiB (`sovereign_cpu = "2"`, `sovereign_memory = "2Gi"`, `min=max=1`).
+    - **Sovereign environment variables**: Added `GOOGLE_CLOUD_PROJECT = var.project_id`, `GODVIEW_REGIONS = "us-central1"`, `IAP_BACKEND_SERVICE_IDS` (numeric IDs of `god-view-bs-sovereign-api` and `god-view-bs-cockpit` resolved via data sources without cyclic module dependencies), `PERCEPTION_INTERVAL_SECONDS = "300"`, and confirmed `GODVIEW_ENV = "gcp"`.
+    - **Secrets hygiene**: Moved `PG_READONLY_PASSWORD` and `DB_PASSWORD` from plaintext environment variables to Secret Manager `value_source.secret_key_ref` referencing `godview-pg-readonly-password:latest`.
+    - **Log sink hygiene**: Added exclusions to `google_logging_project_sink.audit_to_nervous_system` for high-volume GKE Autopilot noise (`io.k8s.coordination.v1.leases`, `io.k8s.core.v1.configmaps`, `pods.binding`, `endpointslices`).
+    - **Pub/Sub DLQ**: Created `google_pubsub_subscription.nervous_system_dlq` (`godview-nervous-system-dlq-sub`) with 7-day retention (`604800s`), ack retention, and subscriber IAM binding for `godview-sense-sa`. Set topic retention to 7 days.
+  - **Module `03-data`**:
+    - Created Secret Manager secret `godview-pg-readonly-password` and secret version.
+    - Granted `roles/secretmanager.secretAccessor` on `godview-pg-readonly-password` to `godview-sense-sa`.
+    - Rotated Cloud SQL user password via `random_password.pg_readonly` rotation keeper `v5-secret-manager` and updated `google_sql_user.godview_readonly`.
+    - Exported `godview_pg_readonly_password` in `secret_ids`.
+  - **Module `01-project-iam`**:
+    - Scoped `godview-sense-sa` project roles strictly to plan §3.8: removed broad `roles/viewer`; added `compute.viewer`, `run.viewer`, `pubsub.viewer`, `iam.securityReviewer`, `apigateway.viewer`, `container.viewer`, `cloudsql.viewer` alongside `logging.viewer`, `monitoring.viewer`, `datastore.user`, `bigquery.jobUser`, `cloudasset.viewer`, `aiplatform.user`, `cloudtrace.user`.
+    - Scoped `godview-act-sa` project roles strictly to plan §3.8: `roles/compute.securityAdmin`, `roles/run.admin`, `roles/pubsub.editor`, `roles/container.developer` (+ `roles/iam.serviceAccountUser` on `godview-runtime-sa`). Removed unapproved broad roles.
+  - **Module `04-tenant-compute`**:
+    - Unchanged (tenant frozen; Cloud Armor WAF sensitivity 4 fault T1 preserved as God-View test case).

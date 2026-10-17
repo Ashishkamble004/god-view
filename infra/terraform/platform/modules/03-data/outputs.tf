@@ -37,6 +37,7 @@ output "secret_ids" {
     cymbal_pg_app_password        = google_secret_manager_secret.cymbal_pg_app_password.secret_id
     godview_github_app_key        = google_secret_manager_secret.godview_github_app_key.secret_id
     godview_github_webhook_secret = google_secret_manager_secret.godview_github_webhook_secret.secret_id
+    godview_pg_readonly_password  = google_secret_manager_secret.godview_pg_readonly_password.secret_id
   }
 }
 

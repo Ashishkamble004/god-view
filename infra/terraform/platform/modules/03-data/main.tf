@@ -120,11 +120,36 @@ resource "random_password" "pg_app" {
 resource "random_password" "pg_readonly" {
   length  = 24
   special = false
+  keepers = {
+    rotation = "v5-secret-manager"
+  }
 }
 
 resource "random_password" "webhook_secret" {
   length  = 32
   special = false
+}
+
+resource "google_secret_manager_secret" "godview_pg_readonly_password" {
+  project   = var.project_id
+  secret_id = "godview-pg-readonly-password"
+  labels    = local.godview_labels
+
+  replication {
+    auto {}
+  }
+}
+
+resource "google_secret_manager_secret_version" "godview_pg_readonly_password" {
+  secret      = google_secret_manager_secret.godview_pg_readonly_password.id
+  secret_data = random_password.pg_readonly.result
+}
+
+resource "google_secret_manager_secret_iam_member" "pg_readonly_pass_sense" {
+  project   = var.project_id
+  secret_id = google_secret_manager_secret.godview_pg_readonly_password.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${var.sense_sa_email}"
 }
 
 resource "google_secret_manager_secret" "cymbal_pg_app_password" {

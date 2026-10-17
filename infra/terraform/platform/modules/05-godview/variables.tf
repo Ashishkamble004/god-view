@@ -43,19 +43,23 @@ variable "create_budget" {
 }
 
 variable "sovereign_cpu" {
-  type = string
+  type    = string
+  default = "2"
 }
 
 variable "sovereign_memory" {
-  type = string
+  type    = string
+  default = "2Gi"
 }
 
 variable "sovereign_min_instances" {
-  type = number
+  type    = number
+  default = 1
 }
 
 variable "sovereign_max_instances" {
-  type = number
+  type    = number
+  default = 1
 }
 
 variable "cloud_run_cpu" {
