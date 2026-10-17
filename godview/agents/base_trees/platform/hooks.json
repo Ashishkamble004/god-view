@@ -2,25 +2,26 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "k8s.*",
+        "tool_match": "k8s.get_resource",
         "commands": [
-          "python3 scripts/check_dlq_saga_stall.py"
+          "python3 scripts/check_container_restart.py"
         ]
       }
     ],
     "PostToolUse": [
       {
-        "matcher": "*",
+        "tool_match": "k8s.get_resource",
         "commands": [
-          "python3 scripts/check_dlq_saga_stall.py"
+          "python3 scripts/check_container_restart.py",
+          "python3 scripts/check_resource_limits.py"
         ]
       }
     ],
     "Stop": [
       {
-        "matcher": "*",
         "commands": [
-          "python3 scripts/check_dlq_saga_stall.py"
+          "python3 scripts/check_container_restart.py",
+          "python3 scripts/check_resource_limits.py"
         ]
       }
     ]

@@ -1,6 +1,5 @@
-# Data Court Agent — Tool Descriptions & Guidance (c4)
+# Tool Guidance
 
-- `sql.list_tables`: Enumerate schema tables (`loan_applications`, `kyc_documents`, `underwriting_audits`, `insurance_policies`).
-- `sql.list_active_queries`: Inspect active or blocked PostgreSQL queries and lock trees.
-- `obs.query_logs_scoped`: Inspect database error logs and audit trail events.
-- `obs.list_timeseries`: Inspect Cloud SQL CPU, connection count, and replication lag metrics.
+- `sql.list_tables`: List schema tables to verify entity definitions.
+- `sql.list_active_queries`: Inspect active running transactions and execution duration.
+- `logging.query`: Check database server logs for deadlock and connection error events.

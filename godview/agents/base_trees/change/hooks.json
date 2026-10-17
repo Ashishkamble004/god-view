@@ -2,7 +2,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "git.*",
+        "tool_match": "git.list_commits",
         "commands": [
           "python3 scripts/check_commit_regression.py"
         ]
@@ -10,19 +10,18 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "*",
+        "tool_match": "git.list_commits",
         "commands": [
           "python3 scripts/check_commit_regression.py",
-          "python3 scripts/check_cibil_score_offsets.py"
+          "python3 scripts/check_config_drift.py"
         ]
       }
     ],
     "Stop": [
       {
-        "matcher": "*",
         "commands": [
           "python3 scripts/check_commit_regression.py",
-          "python3 scripts/check_cibil_score_offsets.py"
+          "python3 scripts/check_config_drift.py"
         ]
       }
     ]

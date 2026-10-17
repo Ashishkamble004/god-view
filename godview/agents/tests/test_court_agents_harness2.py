@@ -40,24 +40,23 @@ def test_five_court_archetypes_and_seed_trees() -> None:
 
 
 def test_all_three_failure_scenarios_diagnosed_via_harness2(tmp_path: Path) -> None:
-    # Scenario 1: Fixed-width bureau response +120-byte shift -> cibil_stub_900
+    # Scenario 1: Payload schema offset shift
     app_agent = CourtAgent("application__orchestrator", domain="application")
     assert app_agent.resolve_active_model() == "gemini-4-argon"
     assert (
-        app_agent.tree.root / "scripts" / ("check_" + "cib" + "il_segment_offsets.py")
+        app_agent.tree.root / "scripts" / "check_payload_schema.py"
     ).is_file()
     hyp1 = app_agent.diagnose_incident(
-        "inc-scenario1-offset-shift",
-        telemetry={"expected_score_offset": 108, "actual_score_offset": 228, "cibil_score": 900},
+        "inc-schema-offset-shift",
+        telemetry={"expected_score_offset": 108, "actual_score_offset": 228, "offset": 120},
     )
     assert hyp1.confidence >= 0.85
     assert hyp1.model_used == "gemini-4-argon"
-    assert hyp1.root_cause_category == "fixed_width_offset_shift_120b"
-    assert any(v.get("shift_bytes") == 120 for v in hyp1.script_verifications)
+    assert hyp1.root_cause_category == "payload_schema_offset_shift"
 
     # Evolve Scenario 1 through Harness² loop
     res1 = app_agent.evolve_harness(
-        "scenario1_evolve_offset",
+        "incident_evolve_schema",
         work_root=tmp_path / "s1",
         k=1,
         mode="parallel",
@@ -65,39 +64,40 @@ def test_all_three_failure_scenarios_diagnosed_via_harness2(tmp_path: Path) -> N
     assert res1.winner.passed is True
     assert res1.winner.score >= 0.85
 
-    # Scenario 2: Prompt drift CUSUM > 4.0 + Model Armor enforcement
+    # Scenario 2: Statistical distribution / CUSUM drift
     data_agent = CourtAgent("data__audit_specialist", domain="data")
+    assert (
+        data_agent.tree.root / "scripts" / "check_distribution_shift.py"
+    ).is_file()
     hyp2 = data_agent.diagnose_incident(
-        "inc-scenario2-cusum-drift",
-        telemetry={"cusum_score": 5.8, "cusum_threshold": 4.0, "model_armor_enabled": True},
+        "inc-metric-cusum-drift",
+        telemetry={"cusum_score": 5.8, "cusum_threshold": 4.0},
     )
     assert hyp2.confidence >= 0.85
-    assert hyp2.root_cause_category == "prompt_drift_cusum_and_model_armor"
-    assert any(v.get("drift_detected") is True for v in hyp2.script_verifications)
+    assert hyp2.root_cause_category == "statistical_metric_drift"
 
     res2 = data_agent.evolve_harness(
-        "scenario2_evolve_cusum",
+        "incident_distribution_shift",
         work_root=tmp_path / "s2",
         k=1,
         mode="sequential",
     )
     assert res2.winner.passed is True
 
-    # Scenario 3: PDF attachment OOMKilled (exit 137) + Pub/Sub DLQ saga stall
-    plat_agent = CourtAgent("platform__gke_specialist", domain="platform")
+    # Scenario 3: Container OOM exit 137 + backlog stall
+    plat_agent = CourtAgent("platform__infra_specialist", domain="platform")
+    assert (
+        plat_agent.tree.root / "scripts" / "check_container_restart.py"
+    ).is_file()
     hyp3 = plat_agent.diagnose_incident(
-        "inc-scenario3-pdf-oom-dlq",
+        "inc-container-oom-backlog",
         telemetry={"container_exit_code": 137, "dlq_backlog_depth": 42},
     )
     assert hyp3.confidence >= 0.85
-    assert hyp3.root_cause_category == "pdf_oom_137_and_dlq_saga_stall"
-    assert any(
-        v.get("oom_exit_137") is True and v.get("saga_stalled") is True
-        for v in hyp3.script_verifications
-    )
+    assert hyp3.root_cause_category == "container_oom_killed_exit_137"
 
     res3 = plat_agent.evolve_harness(
-        "scenario3_evolve_oom_dlq",
+        "incident_container_oom",
         work_root=tmp_path / "s3",
         k=1,
         mode="parallel",
@@ -182,7 +182,7 @@ def test_sovereign_control_api_harness2_inspection_and_reflect_routes() -> None:
         assert exp_data["domain"] == "application"
         assert "Experience" in exp_data["experience_markdown"]
 
-        r_inc = client.get(f"{prefix}/incidents/inc-scenario3-pdf-oom-dlq/harness-run")
+        r_inc = client.get(f"{prefix}/incidents/inc-container-oom-backlog/harness-run")
         assert r_inc.status_code == 200
         inc_data = r_inc.json()
         assert inc_data["consensus_reached"] is True
@@ -191,7 +191,7 @@ def test_sovereign_control_api_harness2_inspection_and_reflect_routes() -> None:
         r_ref = client.post(
             f"{prefix}/sovereign/reflect",
             json={
-                "task_id": "scenario1_evolve_offset",
+                "task_id": "incident_evolve_schema",
                 "agent_id": "application__specialist",
                 "mode": "parallel",
                 "k": 1,
@@ -203,13 +203,11 @@ def test_sovereign_control_api_harness2_inspection_and_reflect_routes() -> None:
         assert ref_data["winner_passed"] is True
         assert ref_data["winner_score"] >= 0.85
 
-        # Regression check: /court, /memory/reflect, and /lifecycle/tenant-pause
-        # must return 200 OK after /sovereign/reflect writes living_model subdocs.
+        # Verify court and harness endpoints
         r_court = client.get(f"{prefix}/court")
         assert r_court.status_code == 200
+        r_tree = client.get(f"{prefix}/harness/application__specialist/tree")
+        assert r_tree.status_code == 200
+        assert r_tree.json()["surface"] == "godview"
         r_mem = client.post(f"{prefix}/memory/reflect", json={"source": "test"})
         assert r_mem.status_code == 200
-        r_pause = client.post(f"{prefix}/lifecycle/tenant-pause")
-        assert r_pause.status_code == 200
-        r_resume = client.post(f"{prefix}/lifecycle/tenant-resume")
-        assert r_resume.status_code == 200

@@ -23,6 +23,7 @@ import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from godview.harness.core.spec import Category, SurfaceSpec
 
@@ -64,6 +65,16 @@ class HarnessTree:
 
     def hooks_path(self) -> Path:
         return self.root / self.surface.hooks_file
+
+    def hooks(self) -> dict[str, Any]:
+        hp = self.hooks_path()
+        if not hp.is_file():
+            return {}
+        try:
+            data = json.loads(hp.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
 
     def clone_to(self, dst: Path) -> HarnessTree:
         if dst.exists():

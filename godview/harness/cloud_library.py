@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -40,10 +41,11 @@ class CloudSyncedLibrary(Library):
     Storage layout:
       - Local disk: `<root>/<surface>/<domain>/INDEX.md`, `<domain>/EXPERIENCE.md`,
         and `<domain>/harnesses/<task_id>/{EXPERIENCE.md,harness/...}`
-      - GCS bucket (`gs://<project>-god-view-agent-skills/harness2/<domain>/...`):
+      - GCS bucket (`gs://<bucket>/harness2/<domain>/...`):
         mirrors `INDEX.md`, `EXPERIENCE.md`, and every file under `harnesses/<task_id>/`
       - Firestore (`god-view-memory-db`):
-        * `procedural_skills/{domain}__{task_id}`
+        * `skills/{domain}__{task_id}` or `procedural_skills/{domain}__{task_id}`
+        * `harness_trees/{domain}__{task_id}`
         * `court_agents/{domain}/living_model/{task_id}`
     """
 
@@ -54,28 +56,43 @@ class CloudSyncedLibrary(Library):
         *,
         storage_client: SkillsStorageClientProtocol | None = None,
         firestore_client: Any | None = None,
+        auth: Any | None = None,
+        token_provider: Callable[[], str] | None = None,
         bucket_name: str | None = None,
         gcs_prefix: str = "harness2",
     ) -> None:
         super().__init__(root=root, surface=surface)
         self.gcs_prefix = gcs_prefix.strip("/")
-        resolved_bucket = bucket_name or os.environ.get("GODVIEW_SKILLS_BUCKET", "")
+        resolved_bucket = (
+            bucket_name
+            or os.environ.get("AGENT_SKILLS_BUCKET")
+            or os.environ.get("GODVIEW_SKILLS_BUCKET", "")
+        )
         if not resolved_bucket:
-            project_id = os.environ.get("GCP_PROJECT_ID", "").strip()
+            project_id = (
+                os.environ.get("GCP_PROJECT_ID", "").strip()
+                or os.environ.get("GOOGLE_CLOUD_PROJECT", "").strip()
+            )
             resolved_bucket = (
                 f"{project_id}-god-view-agent-skills" if project_id else "god-view-agent-skills"
             )
         self.bucket_name = resolved_bucket
 
+        resolved_token_provider = token_provider
+        if resolved_token_provider is None and auth is not None:
+            if hasattr(auth, "access_token"):
+                resolved_token_provider = auth.access_token
+
         env_mode = os.environ.get("GODVIEW_ENV", "hermetic").lower()
-        gcs_token = os.environ.get("GCS_ACCESS_TOKEN") or os.environ.get("VERTEX_ACCESS_TOKEN")
         if storage_client is not None:
             self.storage_client: SkillsStorageClientProtocol = storage_client
-        elif env_mode != "hermetic" and gcs_token:
-            self.storage_client = GcsSkillsStorageClient(
-                bucket_name=self.bucket_name,
-                access_token=gcs_token,
-            )
+        elif env_mode != "hermetic":
+            try:
+                self.storage_client = GcsSkillsStorageClient(
+                    token_provider=resolved_token_provider,
+                )
+            except Exception:
+                self.storage_client = InMemorySkillsStorageClient()
         else:
             self.storage_client = InMemorySkillsStorageClient()
 
@@ -141,7 +158,7 @@ class CloudSyncedLibrary(Library):
             self.storage_client.upload_text(obj_key, file_path.read_text(encoding="utf-8"))
             self.synced_objects.append(obj_key)
 
-        # 3. Record procedural skills & living_model metadata in Firestore
+        # 3. Record skills, harness_trees & living_model metadata in Firestore
         exp_text = (
             (dest / "EXPERIENCE.md").read_text(encoding="utf-8")
             if (dest / "EXPERIENCE.md").is_file()
@@ -171,7 +188,8 @@ class CloudSyncedLibrary(Library):
             "updated_at_epoch": time.time(),
         }
         if hasattr(self.firestore_client, "set"):
-            self.firestore_client.set("procedural_skills", f"{dom_slug}__{task_slug}", record)
+            self.firestore_client.set("skills", f"{dom_slug}__{task_slug}", record)
+            self.firestore_client.set("harness_trees", f"{dom_slug}__{task_slug}", record)
             if hasattr(self.firestore_client, "set_subdoc"):
                 self.firestore_client.set_subdoc(
                     "court_agents",
@@ -181,7 +199,10 @@ class CloudSyncedLibrary(Library):
                     record,
                 )
         elif hasattr(self.firestore_client, "collection"):
-            self.firestore_client.collection("procedural_skills").document(
+            self.firestore_client.collection("skills").document(
+                f"{dom_slug}__{task_slug}"
+            ).set(record)
+            self.firestore_client.collection("harness_trees").document(
                 f"{dom_slug}__{task_slug}"
             ).set(record)
             self.firestore_client.collection("court_agents").document(dom_slug).collection(

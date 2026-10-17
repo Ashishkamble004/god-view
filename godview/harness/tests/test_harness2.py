@@ -124,27 +124,27 @@ def test_hook_runner_executes_pre_post_and_stop_hooks() -> None:
     runner = HookRunner(tree)
 
     pre_res = runner.run_pre_tool_use(
-        "obs.query_logs_scoped",
+        "logging.query",
         {"task_id": "inc-001"},
-        context={"expected_score_offset": 108, "actual_score_offset": 228, "cibil_score": 900},
+        context={"total_requests": 200, "error_count": 20, "error_threshold": 0.05},
     )
     assert len(pre_res) == 1
     assert pre_res[0].passed
-    assert pre_res[0].parsed_output["shift_bytes"] == 120
-    assert pre_res[0].parsed_output["stub_900_detected"] is True
+    assert pre_res[0].parsed_output["error_rate"] == 0.1
+    assert pre_res[0].parsed_output["breached"] is True
 
     post_res = runner.run_post_tool_use(
-        "obs.query_logs_scoped",
+        "logging.query",
         {"task_id": "inc-001"},
         {"status": "ok"},
-        context={"cusum_score": 6.2, "cusum_threshold": 4.0},
+        context={"total_requests": 100, "error_count": 2, "error_threshold": 0.05},
     )
     assert len(post_res) == 2
     assert all(r.passed for r in post_res)
 
     stop_res = runner.run_stop_hooks(
         {"verdict": "ready"},
-        context={"expected_score_offset": 108, "actual_score_offset": 120, "cibil_score": 900},
+        context={"expected_fields": ["id", "amount"], "actual_fields": ["id", "amount"]},
     )
     assert len(stop_res) == 2
     assert all(r.passed for r in stop_res)
@@ -154,19 +154,12 @@ def test_end_to_end_recursion_parallel_sequential_and_cloud_library_sync(
     tmp_path: Path,
 ) -> None:
     adapter = GodViewCourtAdapter(default_domain="application")
-    # Register an evolving incident where h0 starts at score 0.55 and Round 1 adapts to 1.0
     adapter.register_scenario(
-        "scenario1_evolve_offset",
+        "incident_evolve_schema",
         {
             "domain": "application",
-            "description": (
-                "Fixed-width bureau response shifted by 120 bytes causing cibil_score=900 "
-                "and cibil_stub_900 alerts across loan_applications."
-            ),
-            "expected_score_offset": 108,
-            "actual_score_offset": 120,
-            "cibil_score": 900,
-            "required_script": "check_cibil_score_offsets.py",
+            "description": "Inbound request payload schema drift requiring updated validation.",
+            "required_script": "check_payload_schema.py",
             "require_adaptation_on_h0": True,
         },
     )
@@ -179,7 +172,7 @@ def test_end_to_end_recursion_parallel_sequential_and_cloud_library_sync(
         proposer=proposer,
         library=lib,
         work_root=tmp_path / "runs_par",
-        task_id="scenario1_evolve_offset",
+        task_id="incident_evolve_schema",
         k=1,
     )
     assert res_par.h0.score == 0.55
@@ -197,7 +190,7 @@ def test_end_to_end_recursion_parallel_sequential_and_cloud_library_sync(
         proposer=proposer,
         library=lib,
         work_root=tmp_path / "runs_seq",
-        task_id="scenario2_cusum_drift",
+        task_id="incident_distribution_shift",
         k=1,
     )
     chosen = trivial_selection(res_seq.candidates)
@@ -209,8 +202,8 @@ def test_end_to_end_recursion_parallel_sequential_and_cloud_library_sync(
     adopted_dir = reflect_adoption(
         lib,
         domain="data",
-        task_id="scenario2_cusum_drift",
-        task_md=adapter.task_description("scenario2_cusum_drift"),
+        task_id="incident_distribution_shift",
+        task_md=adapter.task_description("incident_distribution_shift"),
         winner=chosen,
         all_candidates=res_seq.candidates,
         proposer=proposer,

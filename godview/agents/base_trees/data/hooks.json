@@ -2,27 +2,26 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "sql.*",
+        "tool_match": "sql.list_active_queries",
         "commands": [
-          "python3 scripts/check_prompt_drift_cusum.py"
+          "python3 scripts/check_query_latency.py"
         ]
       }
     ],
     "PostToolUse": [
       {
-        "matcher": "*",
+        "tool_match": "sql.list_active_queries",
         "commands": [
-          "python3 scripts/check_prompt_drift_cusum.py",
-          "python3 scripts/check_cibil_score_offsets.py"
+          "python3 scripts/check_query_latency.py",
+          "python3 scripts/check_distribution_shift.py"
         ]
       }
     ],
     "Stop": [
       {
-        "matcher": "*",
         "commands": [
-          "python3 scripts/check_prompt_drift_cusum.py",
-          "python3 scripts/check_cibil_score_offsets.py"
+          "python3 scripts/check_query_latency.py",
+          "python3 scripts/check_distribution_shift.py"
         ]
       }
     ]

@@ -69,14 +69,13 @@ ARCHETYPES: dict[str, ArchetypeSpec] = {
         domain="application",
         display_name="Application Court Specialist",
         description=(
-            "Diagnoses service RPC/HTTP regressions, fixed-width/JSON payload offset shifts "
-            "(cibil_score / cibil_stub_900), and model routing / prompt anomalies."
+            "Diagnoses service RPC/HTTP regressions, status code errors, payload serialization issues, "
+            "route errors, and model routing anomalies."
         ),
         daily_budget_usd=DEFAULT_AGENT_DAILY_BUDGETS_USD["application"],
         primary_capabilities=(
-            "obs.query_logs_scoped",
-            "obs.list_timeseries",
-            "obs.get_trace",
+            "logging.query",
+            "monitoring.query_timeseries",
             "git.list_commits",
         ),
         base_tree_dir=_BASE_TREES_ROOT / "application",
@@ -85,15 +84,15 @@ ARCHETYPES: dict[str, ArchetypeSpec] = {
         domain="data",
         display_name="Data Court Specialist",
         description=(
-            "Diagnoses Cloud SQL and BigQuery data distribution anomalies, two-sided CUSUM drift, "
-            "and relational ordering invariants (step_order_insurance_before_kyc)."
+            "Diagnoses database query latency, lock contention, active transactions, schema migrations, "
+            "and statistical distribution shifts."
         ),
         daily_budget_usd=DEFAULT_AGENT_DAILY_BUDGETS_USD["data"],
         primary_capabilities=(
             "sql.list_tables",
             "sql.list_active_queries",
-            "obs.query_logs_scoped",
-            "obs.list_timeseries",
+            "logging.query",
+            "monitoring.query_timeseries",
         ),
         base_tree_dir=_BASE_TREES_ROOT / "data",
     ),
@@ -101,15 +100,15 @@ ARCHETYPES: dict[str, ArchetypeSpec] = {
         domain="business_line",
         display_name="Business-Line Court Specialist",
         description=(
-            "Monitors end-to-end vehicle_loan_origination saga conformance, Pub/Sub DLQ stalls "
-            "(insurance_no_policy_write), and rupee-at-risk KPI impact."
+            "Monitors end-to-end service journey conformance, queue depth, dead-letter message backlogs, "
+            "step sequence invariants, and journey-level KPIs."
         ),
         daily_budget_usd=DEFAULT_AGENT_DAILY_BUDGETS_USD["business_line"],
         primary_capabilities=(
-            "obs.list_timeseries",
-            "obs.query_logs_scoped",
-            "obs.get_trace",
-            "sql.list_tables",
+            "monitoring.query_timeseries",
+            "logging.query",
+            "pubsub.describe_subscriptions",
+            "pubsub.dlq_depth",
         ),
         base_tree_dir=_BASE_TREES_ROOT / "business_line",
     ),
@@ -118,14 +117,14 @@ ARCHETYPES: dict[str, ArchetypeSpec] = {
         display_name="Change Court Specialist",
         description=(
             "Correlates production incidents with recent Git commits, PR diffs, container "
-            "image rollouts, and configuration drift."
+            "image updates, and configuration drift."
         ),
         daily_budget_usd=DEFAULT_AGENT_DAILY_BUDGETS_USD["change"],
         primary_capabilities=(
             "git.list_commits",
             "git.get_commit",
             "git.get_file_contents",
-            "obs.query_logs_scoped",
+            "logging.query",
         ),
         base_tree_dir=_BASE_TREES_ROOT / "change",
     ),
@@ -133,15 +132,16 @@ ARCHETYPES: dict[str, ArchetypeSpec] = {
         domain="platform",
         display_name="Platform Court Specialist",
         description=(
-            "Diagnoses GKE Autopilot OOMKilled (exit 137) pod crashes, Cloud Run scaling "
-            "limits, VPC/firewall posture, and Model Armor security templates."
+            "Diagnoses host and container lifecycles (including OOM exit code 137), CPU and memory "
+            "saturation, load balancer posture, and security policy rules."
         ),
         daily_budget_usd=DEFAULT_AGENT_DAILY_BUDGETS_USD["platform"],
         primary_capabilities=(
             "k8s.get_resource",
             "k8s.query_logs",
-            "k8s.list_recommendations",
-            "obs.list_timeseries",
+            "logging.query",
+            "monitoring.query_timeseries",
+            "edge.describe_security_policies",
         ),
         base_tree_dir=_BASE_TREES_ROOT / "platform",
     ),

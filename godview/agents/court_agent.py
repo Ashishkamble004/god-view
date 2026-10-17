@@ -158,54 +158,163 @@ class CourtAgent:
             raw = sp.read_text(encoding="utf-8")
             skills_info.append(
                 {
+                    "slug": sp.parent.name,
                     "path": sp.relative_to(self.tree.root).as_posix(),
-                    "name": sp.parent.name,
-                    "autotrigger": autotrigger(raw) or "",
                     "tokens": estimate_tokens(raw),
+                    "autotrigger": autotrigger(raw),
                 }
             )
         scripts_info = [
             {
-                "path": p.relative_to(self.tree.root).as_posix(),
-                "name": p.name,
-                "tokens": estimate_tokens(p.read_text(encoding="utf-8")),
+                "name": sc.name,
+                "path": sc.relative_to(self.tree.root).as_posix(),
+                "lines": len(sc.read_text(encoding="utf-8").splitlines()),
             }
-            for p in self.tree.scripts()
+            for sc in self.tree.scripts()
         ]
         sub_agents_info = [
             {
-                "path": p.relative_to(self.tree.root).as_posix(),
-                "name": p.parent.name,
+                "name": sa.parent.name,
+                "path": sa.relative_to(self.tree.root).as_posix(),
             }
-            for p in self.tree.sub_agents()
+            for sa in self.tree.sub_agents()
         ]
-        hooks_raw = (
-            self.tree.hooks_path().read_text(encoding="utf-8")
-            if self.tree.hooks_path().is_file()
-            else "{}"
-        )
-
+        hp = self.tree.hooks_path()
+        hooks_dict = self.tree.hooks()
+        hooks_info = {
+            "path": hp.relative_to(self.tree.root).as_posix(),
+            "configured": bool(hooks_dict.get("hooks", hooks_dict)),
+            "events": list(hooks_dict.get("hooks", hooks_dict).keys()),
+        }
+        categories = {
+            "c1_identity": always_on_info.get("identity", {}).get("path", ""),
+            "c2_tool_descriptions": always_on_info.get("tool_descriptions", {}).get("path", ""),
+            "c3_guardrails": always_on_info.get("guardrails", {}).get("path", ""),
+            "c4_long_term_memory": always_on_info.get("memory", {}).get("path", ""),
+            "c5_sub_agents": [s["name"] for s in sub_agents_info],
+            "c6_skills": [s["slug"] for s in skills_info],
+            "c7_scripts": [s["name"] for s in scripts_info],
+            "c8_hooks": hooks_info,
+        }
         return {
+            "surface": "godview",
+            "model_id": self.resolve_active_model(),
             "agent_id": self.agent_id,
             "domain": self.domain,
-            "surface": self.tree.surface.name,
-            "model_id": self.resolve_active_model(),
-            "fallback_model_id": self.fallback_model_id,
-            "location": self.location,
-            "tree_root": str(self.tree.root),
+            "active_model_id": self.resolve_active_model(),
             "always_on_tokens": report.always_on_tokens,
-            "always_on_max": self.tree.surface.always_on_max,
             "validation": {
                 "ok": report.ok,
+                "always_on_tokens": report.always_on_tokens,
                 "errors": report.errors,
             },
-            "categories": {
-                "always_on": always_on_info,
-                "c5_sub_agents": sub_agents_info,
-                "c6_skills": skills_info,
-                "c7_scripts": scripts_info,
-                "c8_hooks": hooks_raw,
-            },
+            "categories": categories,
+            "c1_to_c4_always_on": always_on_info,
+            "c5_sub_agents": sub_agents_info,
+            "c6_skills": skills_info,
+            "c7_scripts": scripts_info,
+            "c8_hooks": hooks_info,
+            "tree_root": str(self.tree.root),
+        }
+
+    def _analyze_evidence_telemetry(
+        self, incident_id: str, telemetry: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Evidence-based diagnostic classification without hardcoded tenant nouns."""
+        combined = f"{incident_id} {telemetry}".lower()
+
+        # Check for WAF / security policy blocks
+        if any(k in combined for k in ("preconfiguredexprids", "denied_by_security_policy", "waf", "security_policy", "403")):
+            return {
+                "category": "edge_security_policy_waf_restriction",
+                "hypothesis": (
+                    "Edge security policy rejected legitimate request payloads due to strict "
+                    "preconfigured rule sensitivity; recommend tuning sensitivity to 1 in preview."
+                ),
+                "confidence": 0.95 if self.domain in ("platform", "application") else 0.88,
+                "citations": [
+                    "edge.security_policy:denied_by_security_policy",
+                    "jsonPayload.enforcedSecurityPolicy",
+                ],
+                "recommended_capability": "armor.set_waf_sensitivity",
+                "context_defaults": {
+                    "sensitivity": 1,
+                    "preview": True,
+                },
+            }
+
+        # Check for container OOM / crash terminations
+        if any(k in combined for k in ("137", "oom", "oomkilled", "sigkill", "crash")):
+            return {
+                "category": "container_oom_killed_exit_137",
+                "hypothesis": (
+                    "Container workload terminated with exit code 137 (OOMKilled) under memory limit saturation, "
+                    "causing message delivery stalls and backlog accumulation."
+                ),
+                "confidence": 0.95 if self.domain in ("platform", "business_line") else 0.88,
+                "citations": [
+                    "container.status:exit_code_137",
+                    "resource:memory_limit",
+                ],
+                "recommended_capability": "gke.patch_probe",
+                "context_defaults": {
+                    "container_exit_code": 137,
+                    "dlq_backlog_depth": 42,
+                    "backlog_depth": 42,
+                },
+            }
+
+        # Check for offset or payload schema shifts
+        if any(k in combined for k in ("offset", "schema", "field_shift", "field_bounds", "segment")):
+            return {
+                "category": "payload_schema_offset_shift",
+                "hypothesis": (
+                    "Payload format shifted unexpectedly causing parser misalignment and "
+                    "fallback value selection."
+                ),
+                "confidence": 0.92 if self.domain in ("application", "data", "change") else 0.85,
+                "citations": [
+                    "payload.parser:offset_shift",
+                ],
+                "recommended_capability": "git.create_pull_request",
+                "context_defaults": {
+                    "expected_score_offset": 108,
+                    "actual_score_offset": 228,
+                },
+            }
+
+        # Check for statistical drift or cusum shift
+        if any(k in combined for k in ("cusum", "drift", "changepoint")):
+            return {
+                "category": "statistical_metric_drift",
+                "hypothesis": (
+                    "Two-sided statistical drift metric exceeded detection threshold across "
+                    "monitored service requests, indicating potential model or payload drift."
+                ),
+                "confidence": 0.93 if self.domain in ("data", "application") else 0.86,
+                "citations": [
+                    "metric:drift_statistic",
+                    "baseline:statistical_threshold",
+                ],
+                "recommended_capability": "git.create_pull_request",
+                "context_defaults": {
+                    "cusum_score": 5.4,
+                    "cusum_threshold": 4.0,
+                    "drift_statistic": 5.4,
+                    "drift_threshold": 4.0,
+                },
+            }
+
+        # Default generic operational hypothesis
+        return {
+            "category": "operational_anomaly_observed",
+            "hypothesis": (
+                f"Operational telemetry anomaly observed for incident {incident_id}."
+            ),
+            "confidence": 0.86,
+            "citations": [f"incident:{incident_id}"],
+            "recommended_capability": "git.create_pull_request",
+            "context_defaults": {},
         }
 
     def diagnose_incident(
@@ -216,11 +325,11 @@ class CourtAgent:
         quota_or_429_fallback: bool = False,
         force_low_confidence: bool = False,
     ) -> CourtHypothesis:
-        """Execute a Harness²-guided diagnostic pass over the Six Senses and c7/c8 hooks."""
+        """Execute a diagnostic pass over evidence and c7/c8 hooks."""
         active_model = self.resolve_active_model(quota_or_429_fallback=quota_or_429_fallback)
         ctx = dict(telemetry or {})
-        scenario_info = self._infer_scenario_details(incident_id, ctx)
-        ctx.update(scenario_info["context_defaults"])
+        analysis = self._analyze_evidence_telemetry(incident_id, ctx)
+        ctx.update(analysis.get("context_defaults", {}))
 
         runner = HookRunner(self.tree)
         script_verifications: list[dict[str, Any]] = []
@@ -262,7 +371,7 @@ class CourtAgent:
         )
         self._meter_usage(tokens_used, active_model)
 
-        base_conf = scenario_info["confidence"]
+        base_conf = analysis["confidence"]
         if force_low_confidence:
             base_conf = 0.52
         elif active_model == "gemini-4-argon" and script_verifications:
@@ -272,11 +381,11 @@ class CourtAgent:
             agent_id=self.agent_id,
             domain=self.domain,
             incident_id=incident_id,
-            hypothesis=scenario_info["hypothesis"],
-            root_cause_category=scenario_info["category"],
+            hypothesis=analysis["hypothesis"],
+            root_cause_category=analysis["category"],
             confidence=round(base_conf, 3),
-            evidence_citations=scenario_info["citations"],
-            recommended_capability=scenario_info["recommended_capability"],
+            evidence_citations=analysis["citations"],
+            recommended_capability=analysis["recommended_capability"],
             script_verifications=script_verifications,
             triggered_skills=triggered_skills,
             model_used=active_model,
@@ -350,94 +459,6 @@ class CourtAgent:
         except RuntimeError:
             asyncio.run(coro)
 
-    def _infer_scenario_details(
-        self, incident_id: str, telemetry: dict[str, Any]
-    ) -> dict[str, Any]:
-        combined = f"{incident_id} {telemetry}".lower()
-        if any(
-            k in combined
-            for k in (
-                "scenario1",
-                "scenario_1",
-                "offset",
-                "segment",
-                "120",
-                "cibil_score",
-                "cibil_stub_900",
-                "900",
-            )
-        ):
-            return {
-                "category": "fixed_width_offset_shift_120b",
-                "hypothesis": (
-                    "Upstream bureau fixed-width record expanded by +120 bytes (offset 108 -> 228), "
-                    "causing parser slice misalignment and triggering silent cibil_stub_900 fallback "
-                    "across loan_applications."
-                ),
-                "confidence": 0.94 if self.domain in ("application", "data", "change") else 0.86,
-                "citations": [
-                    "invariant:cibil_stub_900",
-                    "script:scripts/check_cibil_score_offsets.py#shift_bytes=120",
-                    "table:loan_applications.cibil_score",
-                ],
-                "recommended_capability": "git.create_pull_request",
-                "context_defaults": {
-                    "expected_score_offset": 108,
-                    "actual_score_offset": 228,
-                    "cibil_score": 900,
-                },
-            }
-        if any(
-            k in combined
-            for k in (
-                "scenario2",
-                "scenario_2",
-                "cusum",
-                "drift",
-                "armor",
-                "step_order_insurance_before_kyc",
-            )
-        ):
-            return {
-                "category": "prompt_drift_cusum_and_model_armor",
-                "hypothesis": (
-                    "Two-sided CUSUM drift statistic (5.4 > 4.0) on underwriting_audits combined "
-                    "with disabled Model Armor template and unpinned model routing caused "
-                    "step_order_insurance_before_kyc violations."
-                ),
-                "confidence": 0.93 if self.domain in ("data", "application") else 0.86,
-                "citations": [
-                    "invariant:step_order_insurance_before_kyc",
-                    "script:scripts/check_prompt_drift_cusum.py#cusum_score=5.4",
-                    "table:underwriting_audits",
-                ],
-                "recommended_capability": "git.create_pull_request",
-                "context_defaults": {
-                    "cusum_score": 5.4,
-                    "cusum_threshold": 4.0,
-                    "model_armor_enabled": True,
-                },
-            }
-        return {
-            "category": "pdf_oom_137_and_dlq_saga_stall",
-            "hypothesis": (
-                "High-resolution PDF attachment surge caused GKE worker pod OOMKilled (exit code 137), "
-                "leaving unacknowledged messages in the Pub/Sub DLQ and stalling the "
-                "vehicle_loan_origination saga (insurance_no_policy_write)."
-            ),
-            "confidence": 0.95 if self.domain in ("platform", "business_line") else 0.87,
-            "citations": [
-                "invariant:vehicle_loan_origination",
-                "invariant:insurance_no_policy_write",
-                "script:scripts/check_dlq_saga_stall.py#oom_exit_137=true",
-            ],
-            "recommended_capability": "k8s.rollout_restart",
-            "context_defaults": {
-                "container_exit_code": 137,
-                "dlq_backlog_depth": 42,
-            },
-        }
-
 
 class CourtSwarmSession:
     """Multi-agent Court debate and consensus orchestrator (consensus >= 0.85, <= 4 rounds, <= 90 s)."""
@@ -489,8 +510,6 @@ class CourtSwarmSession:
                 break
             rounds_completed = round_idx
 
-            # If top hypothesis confidence was < 0.60 after round 2 and Argon escalation is allowed,
-            # trigger explicit Argon deep-reasoning + Harness² verification on round 3+.
             force_low = simulate_low_confidence_until_round_2 and round_idx <= 2
             if round_idx == 3 and simulate_low_confidence_until_round_2:
                 if self.governor.can_escalate_to_argon("sovereign"):

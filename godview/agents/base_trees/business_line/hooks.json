@@ -2,25 +2,26 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "obs.*",
+        "tool_match": "pubsub.dlq_depth",
         "commands": [
-          "python3 scripts/check_dlq_saga_stall.py"
+          "python3 scripts/check_queue_backlog.py"
         ]
       }
     ],
     "PostToolUse": [
       {
-        "matcher": "*",
+        "tool_match": "pubsub.dlq_depth",
         "commands": [
-          "python3 scripts/check_dlq_saga_stall.py"
+          "python3 scripts/check_queue_backlog.py",
+          "python3 scripts/check_step_sequence.py"
         ]
       }
     ],
     "Stop": [
       {
-        "matcher": "*",
         "commands": [
-          "python3 scripts/check_dlq_saga_stall.py"
+          "python3 scripts/check_queue_backlog.py",
+          "python3 scripts/check_step_sequence.py"
         ]
       }
     ]
