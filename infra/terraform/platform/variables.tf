@@ -133,7 +133,7 @@ variable "traffic_pause_cron" {
 variable "ledger_table_deletion_protection" {
   description = "Enable deletion protection on BigQuery ledger tables (Step 1c)"
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "simulator_tick_cron" {
