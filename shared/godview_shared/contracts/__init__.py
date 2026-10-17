@@ -129,14 +129,15 @@ class JourneyStep(BaseModel):
 
 
 class LedgerJourneyRow(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="ignore")
 
     journey_id: str
     journey_name: str
     started_at: datetime
     ended_at: datetime | None = None
     env_id: str
-    customer_id: str
+    entity_id: str | None = None
+    customer_id: str | None = None
     steps: list[JourneyStep] = Field(default_factory=list)
     observed_sequence: str
     conformance: JourneyConformance
@@ -145,6 +146,16 @@ class LedgerJourneyRow(BaseModel):
     total_duration_ms: int = 0
     is_synthetic: bool = False
     journey_model_version: str = "1.0"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _shim_entity_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "customer_id" in data and "entity_id" not in data:
+                data["entity_id"] = data["customer_id"]
+            elif "entity_id" in data and "customer_id" not in data:
+                data["customer_id"] = data["entity_id"]
+        return data
 
 
 class KpiRollupRow(BaseModel):
@@ -379,7 +390,7 @@ class DiscoveredEntityDoc(BaseModel):
 
 
 class JourneyDoc(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="ignore")
 
     doc_id: str | None = None
     name: str
@@ -647,7 +658,7 @@ class EvidenceBaseline(BaseModel):
 
 
 class EvidenceAffected(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="ignore")
 
     services: list[str] = Field(default_factory=list)
     journeys: list[str] = Field(default_factory=list)
@@ -720,7 +731,7 @@ class ConvergenceRecord(BaseModel):
 
 
 class EpisodicIncidentDoc(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="ignore")
 
     doc_id: str | None = None
     dedupe_key: str | None = None
@@ -792,7 +803,7 @@ class CostFindingDoc(BaseModel):
 
 
 class ApprovalCard(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="ignore")
 
     approval_id: str
     incident_id: str
@@ -876,7 +887,7 @@ class TrustDecision(BaseModel):
 class CapabilityInvokeRequest(BaseModel):
     """Request body for POST /v1/capabilities/{capability_id}:invoke (Decision A3)."""
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="ignore")
 
     agent_id: str
     incident_id: str | None = None

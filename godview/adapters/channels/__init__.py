@@ -106,12 +106,14 @@ class GoogleChatAdapter:
                 }
             },
         ]
-        if card.rupee_impact is not None:
+        impact = getattr(card, "financial_impact", None) or getattr(card, "impact_amount", None)
+        curr = getattr(card, "currency", None) or "USD"
+        if impact is not None and impact != 0:
             widgets.append(
                 {
                     "decoratedText": {
-                        "topLabel": "Estimated Impact (INR)",
-                        "text": f"INR {card.rupee_impact:,} ({card.rupee_impact})",
+                        "topLabel": f"Estimated Impact ({curr})",
+                        "text": f"{curr} {impact:,} ({impact})",
                     }
                 }
             )
@@ -294,11 +296,13 @@ class EmailChannelAdapter:
         """Deliver an `ApprovalCard` via email fallback (Decision A15, SDD §9)."""
         to_addr = recipient or self.default_recipient
         subject = f"[God-View Approval {card.approval_id}] Incident {card.incident_id} ({card.capability})"
+        impact = getattr(card, "financial_impact", None) or getattr(card, "impact_amount", None)
+        curr = getattr(card, "currency", None) or "USD"
         body = (
             f"Narrative: {card.narrative}\n"
             f"Target Resource: {card.target_resource}\n"
             f"Evidence Pack: {card.evidence_pack_id}\n"
-            f"Rupee Impact: {card.rupee_impact}\n"
+            f"Financial Impact: {curr} {impact}\n"
             f"Expires At: {card.expires_at}\n"
             f"Approve: /v1/approvals/{card.approval_id}:approve\n"
             f"Reject:  /v1/approvals/{card.approval_id}:reject\n"

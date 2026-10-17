@@ -14,6 +14,7 @@ TDD §6.2 #3, and SDD §2 & §10:
 
 from __future__ import annotations
 
+import os
 import subprocess
 import uuid
 from pathlib import Path
@@ -63,15 +64,15 @@ async def test_local_adapter_discovers_compose_kind_dsn_prometheus_and_git(tmp_p
             svc_vm: {
                 "build": {"context": f"./services/{svc_vm}"},
                 "environment": {
-                    "PORT": "8085",
+                    "PORT": "8086",
                     "DATABASE_URL": f"postgresql://app_user:super_secret_local_pw@{svc_db}:5432/{db_name}",
                 },
-                "ports": ["8085:8085"],
+                "ports": ["8086:8086"],
                 "depends_on": {svc_db: {"condition": "service_healthy"}},
                 "labels": {
                     "godview_managed": "true",
                     "godview_kind": "gce_vm",
-                    "metrics_port": "8085",
+                    "metrics_port": "8086",
                     "metrics_path": "/metrics",
                 },
             },
@@ -79,7 +80,7 @@ async def test_local_adapter_discovers_compose_kind_dsn_prometheus_and_git(tmp_p
                 "build": {"context": f"./services/{svc_worker}"},
                 "environment": {
                     "PORT": "8080",
-                    "DOWNSTREAM_VM_URL": f"http://{svc_vm}:8085",
+                    "DOWNSTREAM_VM_URL": f"http://{svc_vm}:8086",
                     "DATABASE_URL": f"postgresql://app_user:super_secret_local_pw@{svc_db}:5432/{db_name}",
                 },
                 "ports": ["8082:8080"],
@@ -221,7 +222,7 @@ async def test_local_adapter_discovers_compose_kind_dsn_prometheus_and_git(tmp_p
     assert by_name[svc_gateway].metrics_endpoint == f"http://{svc_gateway}:8080/metrics"
     assert by_name[svc_worker].kind == "gke_workload"
     assert by_name[svc_vm].kind == "gce_vm"
-    assert by_name[svc_vm].metrics_endpoint == f"http://{svc_vm}:8085/metrics"
+    assert by_name[svc_vm].metrics_endpoint == f"http://{svc_vm}:8086/metrics"
     assert by_name[svc_db].kind == "cloud_sql"
     # Password redacted in locator
     assert "super_secret_local_pw" not in by_name[svc_db].locator
@@ -290,19 +291,14 @@ async def test_local_adapter_available_and_unavailable_states_and_hermetic_helpe
     assert h_unavail.state == "unavailable"
 
     # Hermetic helper returns working SenseAdapter instances only when GODVIEW_ENV=='hermetic' (Finding 10)
-    hermetic_adapters = build_hermetic_local_adapters()
-    assert len(hermetic_adapters) >= 1
-    disc = await hermetic_adapters[0].discover()
-    assert len(disc.services) >= 1
-
-    import os
-    from datetime import UTC, datetime
-
-    import httpx
-    from godview_shared.contracts import TrustDecision, TrustViolation
-
     prev_env = os.environ.get("GODVIEW_ENV")
     try:
+        os.environ["GODVIEW_ENV"] = "hermetic"
+        hermetic_adapters = build_hermetic_local_adapters()
+        assert len(hermetic_adapters) >= 1
+        disc = await hermetic_adapters[0].discover()
+        assert len(disc.services) >= 1
+
         os.environ["GODVIEW_ENV"] = "gcp"
         with pytest.raises(RuntimeError, match="GODVIEW_ENV='hermetic'"):
             build_hermetic_local_adapters()
@@ -310,7 +306,12 @@ async def test_local_adapter_available_and_unavailable_states_and_hermetic_helpe
         if prev_env is not None:
             os.environ["GODVIEW_ENV"] = prev_env
         else:
-            os.environ["GODVIEW_ENV"] = "hermetic"
+            os.environ.pop("GODVIEW_ENV", None)
+
+    from datetime import UTC, datetime
+
+    import httpx
+    from godview_shared.contracts import TrustDecision, TrustViolation
 
     # Verify probe.execute defaults closed on undiscovered routes, requires >=L1 TrustDecision for non-GET,
     # and injects W3C baggage synthetic=true + X-Synthetic: true (Finding 1)

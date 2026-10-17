@@ -1235,8 +1235,7 @@ def test_lint_brands_and_lint_neutrality_both_directions(tmp_path) -> None:
         lint_neutrality.scan_neutrality(
             [
                 repo_root / "shared",
-                repo_root / "godview" / "ledger",
-                repo_root / "godview" / "invariants",
+                repo_root / "godview",
             ],
             repo_root=repo_root,
         )

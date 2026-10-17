@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
@@ -183,6 +184,8 @@ class LocalEnvironmentSenseAdapter(SenseAdapter):
         git_repos_dir: str | Path | None = None,
         env_id: str = "local-compose",
         discovered_routes: Sequence[Mapping[str, Any]] | None = None,
+        service_urls: Mapping[str, str] | None = None,
+        ledger: Any | None = None,
         docker_daemon_probe: Callable[[], bool] | None = None,
         kind_binary_probe: Callable[[], bool] | None = None,
         http_transport: httpx.BaseTransport | httpx.AsyncBaseTransport | None = None,
@@ -211,6 +214,8 @@ class LocalEnvironmentSenseAdapter(SenseAdapter):
         )
         self.env_id = env_id
         self._discovered_routes: list[dict[str, Any]] = [dict(r) for r in (discovered_routes or ())]
+        self.service_urls: dict[str, str] = dict(service_urls or {})
+        self._ledger = ledger
         self._docker_probe = docker_daemon_probe or _default_docker_daemon_probe
         self._kind_probe = kind_binary_probe or _default_kind_binary_probe
         self._transport = http_transport
@@ -228,6 +233,7 @@ class LocalEnvironmentSenseAdapter(SenseAdapter):
         return {
             "metrics.scrape": get_capability("metrics.scrape"),
             "probe.execute": get_capability("probe.execute"),
+            "http.probe": get_capability("http.probe"),
         }
 
     async def health(self) -> AdapterHealth:
@@ -323,6 +329,48 @@ class LocalEnvironmentSenseAdapter(SenseAdapter):
                 prom_targets,
             )
 
+            # Probe OpenAPI routes if service has HTTP locator or service_urls entry
+            routes: list[dict[str, Any]] = []
+            target_base_url = self.service_urls.get(svc_name)
+            if not target_base_url and locator.startswith(("http://127.0.0.1", "http://localhost")):
+                target_base_url = locator
+            if not target_base_url and svc_cfg.get("ports"):
+                for p_entry in svc_cfg["ports"]:
+                    p_str = str(p_entry)
+                    if ":" in p_str:
+                        h_port = p_str.split(":")[0].strip()
+                        if h_port.isdigit():
+                            target_base_url = f"http://127.0.0.1:{h_port}"
+                            break
+
+            if target_base_url and kind != "cloud_sql":
+                locator = target_base_url
+                try:
+                    async with httpx.AsyncClient(transport=self._transport, timeout=1.0) as client:
+                        resp = await client.get(f"{target_base_url.rstrip('/')}/openapi.json")
+                        if resp.status_code == 200:
+                            spec_json = resp.json()
+                            for p_path, p_ops in spec_json.get("paths", {}).items():
+                                if isinstance(p_ops, dict):
+                                    for m_method, op_detail in p_ops.items():
+                                        if m_method.lower() in ("get", "post", "put", "delete", "patch") and isinstance(op_detail, dict):
+                                            routes.append(
+                                                {
+                                                    "method": m_method.upper(),
+                                                    "path": p_path,
+                                                    "url": f"{target_base_url.rstrip('/')}/{p_path.lstrip('/')}",
+                                                    "operation_id": op_detail.get("operation_id") or op_detail.get("operationId") or "",
+                                                    "summary": op_detail.get("summary", ""),
+                                                    "description": op_detail.get("description", ""),
+                                                    "probe_safe": op_detail.get("x-godview-probe-safe", True),
+                                                }
+                                            )
+                except Exception:
+                    pass
+
+            if not routes and self._discovered_routes:
+                routes = [dict(r) for r in self._discovered_routes]
+
             doc_id = f"{self.env_id}__{kind}.{svc_name}"
             services.append(
                 DiscoveredServiceDoc(
@@ -333,6 +381,7 @@ class LocalEnvironmentSenseAdapter(SenseAdapter):
                     adapter_family="local",
                     locator=locator,
                     labels=labels,
+                    routes=routes,
                     metrics_endpoint=metrics_endpoint,
                     repo_ref=default_repo_ref,
                     first_seen=now_iso,
@@ -386,6 +435,55 @@ class LocalEnvironmentSenseAdapter(SenseAdapter):
                     last_seen=now_iso,
                 )
             )
+
+        # Extract trace edges from ledger if available (Decision A8)
+        if self._ledger is not None:
+            trace_events: list[dict[str, Any]] = []
+            if hasattr(self._ledger, "get_table"):
+                trace_events = self._ledger.get_table("events") or []
+            elif hasattr(self._ledger, "events"):
+                trace_events = getattr(self._ledger, "events", [])
+
+            events_by_trace: dict[str, list[dict[str, Any]]] = {}
+            for ev in trace_events:
+                tid = ev.get("trace_id") or ev.get("journey_id")
+                if tid:
+                    events_by_trace.setdefault(str(tid), []).append(ev)
+
+            for _tid, ev_list in events_by_trace.items():
+                ev_list.sort(key=lambda x: str(x.get("event_time") or x.get("timestamp") or ""))
+                for i in range(len(ev_list) - 1):
+                    src_s = str(ev_list[i].get("service") or ev_list[i].get("service_name") or ev_list[i].get("source") or "")
+                    dst_s = str(ev_list[i + 1].get("service") or ev_list[i + 1].get("service_name") or ev_list[i + 1].get("source") or "")
+                    if src_s and dst_s and src_s != dst_s:
+                        src_doc_id = (by_name[src_s].doc_id if src_s in by_name else f"{self.env_id}__cloud_run.{src_s}")
+                        dst_doc_id = (by_name[dst_s].doc_id if dst_s in by_name else f"{self.env_id}__cloud_run.{dst_s}")
+                        edge_key = (src_doc_id, dst_doc_id)
+                        if edge_key in seen_edges:
+                            # Upgrade config edge to trace evidence
+                            for existing_e in edges:
+                                if existing_e.src == src_doc_id and existing_e.dst == dst_doc_id:
+                                    existing_e.evidence = "trace"
+                                    existing_e.evidence_kind = "trace"
+                                    existing_e.rps = 1.0
+                                    existing_e.confidence = 0.9
+                                    break
+                        else:
+                            seen_edges.add(edge_key)
+                            edges.append(
+                                DiscoveredEdgeDoc(
+                                    doc_id=f"{src_doc_id}__to__{dst_doc_id}",
+                                    src=src_doc_id,
+                                    dst=dst_doc_id,
+                                    protocol="http",
+                                    evidence="trace",
+                                    evidence_kind="trace",
+                                    rps=1.0,
+                                    confidence=0.9,
+                                    first_seen=now_iso,
+                                    last_seen=now_iso,
+                                )
+                            )
 
         return DiscoveryResult(
             services=services,
@@ -672,6 +770,63 @@ class LocalEnvironmentSenseAdapter(SenseAdapter):
                     else resp.text,
                 }
 
+        if capability_id == "http.probe":
+            url = str(args.get("url", "")).strip()
+            method = str(args.get("method", "GET")).upper()
+            if method not in ("GET", "HEAD"):
+                raise ValueError(
+                    f"Capability 'http.probe' is strictly GET/HEAD-only (got method '{method}')"
+                )
+            if not url:
+                raise ValueError("http.probe requires a non-empty target url")
+
+            raw_headers = dict(args.get("headers") or {})
+            forbidden_prefixes = ("authorization", "metadata-flavor", "cookie", "x-goog-")
+            safe_headers = {
+                k: v
+                for k, v in raw_headers.items()
+                if not any(k.lower().startswith(p) for p in forbidden_prefixes)
+            }
+
+            timeout_s = min(max(float(args.get("timeout_s", 5.0)), 0.5), 15.0)
+            req_kwargs: dict[str, Any] = {
+                "headers": safe_headers,
+                "timeout": timeout_s,
+                "follow_redirects": False,
+            }
+            if getattr(self, "_transport", None) is not None:
+                req_kwargs["transport"] = self._transport
+
+            start = time.monotonic()
+            try:
+                async with httpx.AsyncClient(**req_kwargs) as client:
+                    resp = await client.request(method, url)
+                    latency = (time.monotonic() - start) * 1000.0
+                    body_text = resp.text[:2000]
+                    parsed_json = None
+                    if resp.headers.get("content-type", "").startswith("application/json") and len(resp.content) <= 500_000:
+                        try:
+                            parsed_json = resp.json()
+                        except Exception:
+                            parsed_json = None
+                    return {
+                        "status_code": resp.status_code,
+                        "latency_ms": latency,
+                        "headers": dict(resp.headers),
+                        "body": body_text,
+                        "json": parsed_json,
+                        "error": None,
+                    }
+            except Exception as exc:
+                return {
+                    "status_code": 0,
+                    "latency_ms": (time.monotonic() - start) * 1000.0,
+                    "headers": {},
+                    "body": "",
+                    "json": None,
+                    "error": str(exc),
+                }
+
         raise NotImplementedError(
             f"Adapter '{self.name}' does not implement capability '{capability_id}'"
         )
@@ -703,6 +858,7 @@ class _HermeticFixtureLocalAdapter(SenseAdapter):
         return {
             "metrics.scrape": get_capability("metrics.scrape"),
             "probe.execute": get_capability("probe.execute"),
+            "http.probe": get_capability("http.probe"),
         }
 
     async def health(self) -> AdapterHealth:

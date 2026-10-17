@@ -6,6 +6,7 @@ import copy
 import json
 import logging
 import os
+import re
 from collections.abc import Iterable
 from typing import Any
 
@@ -23,13 +24,16 @@ class DuckDBLedger:
         self._init_tables()
 
     def _init_tables(self) -> None:
-        # Standard generic schema per plan §3.6
+        # Create godview_ledger schema and tables per plan §3.6
+        self._conn.execute("CREATE SCHEMA IF NOT EXISTS godview_ledger;")
         self._conn.execute(
             """
-            CREATE TABLE IF NOT EXISTS events (
+            CREATE TABLE IF NOT EXISTS godview_ledger.events (
                 event_id VARCHAR PRIMARY KEY,
-                event_time TIMESTAMPTZ,
+                event_time TIMESTAMP,
                 env_id VARCHAR,
+                customer_id VARCHAR,
+                entity VARCHAR,
                 journey_id VARCHAR,
                 trace_id VARCHAR,
                 span_id VARCHAR,
@@ -49,9 +53,9 @@ class DuckDBLedger:
                 source VARCHAR,
                 attributes VARCHAR
             );
-            CREATE TABLE IF NOT EXISTS state_transitions (
+            CREATE TABLE IF NOT EXISTS godview_ledger.state_transitions (
                 transition_id VARCHAR PRIMARY KEY,
-                transition_time TIMESTAMPTZ,
+                transition_time TIMESTAMP,
                 env_id VARCHAR,
                 entity VARCHAR,
                 entity_id VARCHAR,
@@ -64,11 +68,11 @@ class DuckDBLedger:
                 is_synthetic BOOLEAN,
                 attributes VARCHAR
             );
-            CREATE TABLE IF NOT EXISTS journeys (
+            CREATE TABLE IF NOT EXISTS godview_ledger.journeys (
                 journey_id VARCHAR PRIMARY KEY,
                 journey_name VARCHAR,
-                started_at TIMESTAMPTZ,
-                ended_at TIMESTAMPTZ,
+                started_at TIMESTAMP,
+                ended_at TIMESTAMP,
                 env_id VARCHAR,
                 customer_id VARCHAR,
                 steps VARCHAR,
@@ -80,26 +84,50 @@ class DuckDBLedger:
                 is_synthetic BOOLEAN,
                 journey_model_version VARCHAR
             );
-            CREATE TABLE IF NOT EXISTS kpi_rollups (
-                window_start TIMESTAMPTZ,
-                window_end TIMESTAMPTZ,
+            CREATE TABLE IF NOT EXISTS godview_ledger.kpi_rollups (
+                rollup_id VARCHAR PRIMARY KEY,
+                window_start TIMESTAMP,
+                window_end TIMESTAMP,
                 env_id VARCHAR,
                 journey_name VARCHAR,
                 kpi VARCHAR,
                 segment VARCHAR,
                 value DOUBLE,
-                baseline_value DOUBLE
+                baseline_value DOUBLE,
+                zscore DOUBLE,
+                cusum DOUBLE,
+                sample_n BIGINT,
+                breach BOOLEAN
             );
+            -- Also create views in main schema for unqualified queries
+            CREATE VIEW IF NOT EXISTS events AS SELECT * FROM godview_ledger.events;
+            CREATE VIEW IF NOT EXISTS state_transitions AS SELECT * FROM godview_ledger.state_transitions;
+            CREATE VIEW IF NOT EXISTS journeys AS SELECT * FROM godview_ledger.journeys;
+            CREATE VIEW IF NOT EXISTS kpi_rollups AS SELECT * FROM godview_ledger.kpi_rollups;
             """
         )
+
+    def _resolve_table_name(self, table: str) -> str:
+        clean = table.strip().replace("`", "")
+        if clean.startswith("godview_ledger."):
+            return clean
+        if "." in clean:
+            # e.g. project.dataset.table -> take last part
+            clean = clean.split(".")[-1]
+        return f"godview_ledger.{clean}"
 
     def insert_rows(self, table: str, rows: Iterable[dict[str, Any]]) -> int:
         row_list = [copy.deepcopy(r) for r in rows]
         if not row_list:
             return 0
 
+        target_table = self._resolve_table_name(table)
         count = 0
         for r in row_list:
+            # Ensure rollup_id exists for kpi_rollups
+            if "kpi_rollups" in target_table and "rollup_id" not in r:
+                r["rollup_id"] = f"rlp-{r.get('kpi', 'k')}-{r.get('window_start', count)}"
+
             cols = list(r.keys())
             placeholders = ", ".join(["?"] * len(cols))
             col_names = ", ".join(cols)
@@ -110,13 +138,14 @@ class DuckDBLedger:
                     vals.append(json.dumps(v))
                 else:
                     vals.append(v)
-            sql = f"INSERT OR REPLACE INTO {table} ({col_names}) VALUES ({placeholders})"
+            sql = f"INSERT OR REPLACE INTO {target_table} ({col_names}) VALUES ({placeholders})"
             self._conn.execute(sql, vals)
             count += 1
         return count
 
     def get_table(self, table: str) -> list[dict[str, Any]]:
-        cursor = self._conn.execute(f"SELECT * FROM {table}")
+        target_table = self._resolve_table_name(table)
+        cursor = self._conn.execute(f"SELECT * FROM {target_table}")
         cols = [desc[0] for desc in cursor.description]
         results = []
         for row in cursor.fetchall():
@@ -131,11 +160,20 @@ class DuckDBLedger:
         if not statement or not statement.strip():
             raise ValueError("SQL statement must not be empty")
 
+        stmt_upper = statement.strip().upper()
+        # Security guard: block DDL / destructive queries
+        destructive_verbs = ("DROP", "ALTER", "TRUNCATE", "DELETE", "UPDATE", "INSERT", "CREATE")
+        for verb in destructive_verbs:
+            if stmt_upper.startswith(verb) or f" {verb} " in stmt_upper:
+                raise ValueError(f"Destructive or DDL SQL ({verb}) is not permitted on DuckDBLedger")
+
+        # Handle BigQuery parameter syntax (@name -> $name for DuckDB)
+        adapted_statement = re.sub(r"@([a-zA-Z_][a-zA-Z0-9_]*)", r"$\1", statement)
+
         if params:
-            # DuckDB supports named or positional parameters
-            cursor = self._conn.execute(statement, params)
+            cursor = self._conn.execute(adapted_statement, params)
         else:
-            cursor = self._conn.execute(statement)
+            cursor = self._conn.execute(adapted_statement)
 
         if not cursor.description:
             return []

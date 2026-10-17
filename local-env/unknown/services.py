@@ -103,7 +103,7 @@ class DeliveryProofResponse(BaseModel):
 # --- App Factories ---
 
 
-def create_intake_app(*, suffix: str = "") -> FastAPI:
+def create_intake_app(*, suffix: str = "", route_service_url: str | None = None) -> FastAPI:
     """Create parcel intake FastAPI application."""
     svc_name = f"svc-pkg-intake-{suffix}" if suffix else "parcel-intake-svc"
     prefix = f"/v1/packages-{suffix}" if suffix else "/v1/parcels"
@@ -113,8 +113,22 @@ def create_intake_app(*, suffix: str = "") -> FastAPI:
         description="Fictional Parcel Logistics Intake Service",
     )
 
+    @app.get("/")
+    def root() -> dict[str, str]:
+        fault = get_service_fault(svc_name)
+        if fault == "404":
+            raise HTTPException(status_code=404, detail="Injected parcel intake route not found")
+        if fault == "500":
+            raise HTTPException(status_code=500, detail="Injected parcel intake service failure")
+        return {"status": "ok", "service": svc_name}
+
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
+        fault = get_service_fault(svc_name)
+        if fault == "404":
+            raise HTTPException(status_code=404, detail="Injected parcel intake route not found")
+        if fault == "500":
+            raise HTTPException(status_code=500, detail="Injected parcel intake service failure")
         return {"status": "ok", "service": svc_name}
 
     @app.get("/metrics", response_class=PlainTextResponse)
@@ -133,6 +147,19 @@ def create_intake_app(*, suffix: str = "") -> FastAPI:
             raise HTTPException(status_code=500, detail="Injected parcel intake service failure")
         if fault == "404":
             raise HTTPException(status_code=404, detail="Injected parcel intake route not found")
+
+        # Cascade call to route service over HTTP
+        if route_service_url:
+            try:
+                route_endpoint = f"{route_service_url.rstrip('/')}{prefix}/route"
+                httpx.post(
+                    route_endpoint,
+                    json={"parcel_id": req.parcel_id, "origin": req.origin, "destination": req.destination},
+                    timeout=2.0,
+                )
+            except Exception:
+                pass
+
         return ParcelIntakeResponse(
             parcel_id=req.parcel_id,
             status="RECEIVED",
@@ -160,7 +187,7 @@ def create_intake_app(*, suffix: str = "") -> FastAPI:
     return app
 
 
-def create_route_app(*, suffix: str = "") -> FastAPI:
+def create_route_app(*, suffix: str = "", dispatch_service_url: str | None = None) -> FastAPI:
     """Create parcel route optimization FastAPI application."""
     svc_name = f"svc-pkg-route-{suffix}" if suffix else "parcel-route-svc"
     prefix = f"/v1/packages-{suffix}" if suffix else "/v1/parcels"
@@ -170,8 +197,22 @@ def create_route_app(*, suffix: str = "") -> FastAPI:
         description="Fictional Parcel Logistics Route Optimization Service",
     )
 
+    @app.get("/")
+    def root() -> dict[str, str]:
+        fault = get_service_fault(svc_name)
+        if fault == "404":
+            raise HTTPException(status_code=404, detail="Injected parcel intake route not found")
+        if fault == "500":
+            raise HTTPException(status_code=500, detail="Injected parcel intake service failure")
+        return {"status": "ok", "service": svc_name}
+
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
+        fault = get_service_fault(svc_name)
+        if fault == "404":
+            raise HTTPException(status_code=404, detail="Injected parcel intake route not found")
+        if fault == "500":
+            raise HTTPException(status_code=500, detail="Injected parcel intake service failure")
         return {"status": "ok", "service": svc_name}
 
     @app.get("/metrics", response_class=PlainTextResponse)
@@ -190,6 +231,19 @@ def create_route_app(*, suffix: str = "") -> FastAPI:
             raise HTTPException(status_code=500, detail="Injected routing engine 500 burst")
         if fault == "404":
             raise HTTPException(status_code=404, detail="Injected route not found")
+
+        # Cascade call to dispatch service over HTTP
+        if dispatch_service_url:
+            try:
+                dispatch_endpoint = f"{dispatch_service_url.rstrip('/')}{prefix}/dispatch"
+                httpx.post(
+                    dispatch_endpoint,
+                    json={"route_id": f"RT-{req.parcel_id}", "courier_id": "CR-101"},
+                    timeout=2.0,
+                )
+            except Exception:
+                pass
+
         return TransitRouteResponse(
             parcel_id=req.parcel_id,
             carrier_code="EXPRESS_GROUND",
@@ -217,7 +271,7 @@ def create_route_app(*, suffix: str = "") -> FastAPI:
     return app
 
 
-def create_dispatch_app(*, suffix: str = "") -> FastAPI:
+def create_dispatch_app(*, suffix: str = "", proof_service_url: str | None = None) -> FastAPI:
     """Create courier dispatch FastAPI application."""
     svc_name = f"svc-pkg-dispatch-{suffix}" if suffix else "parcel-dispatch-svc"
     prefix = f"/v1/packages-{suffix}" if suffix else "/v1/parcels"
@@ -227,8 +281,22 @@ def create_dispatch_app(*, suffix: str = "") -> FastAPI:
         description="Fictional Parcel Logistics Courier Dispatch Service",
     )
 
+    @app.get("/")
+    def root() -> dict[str, str]:
+        fault = get_service_fault(svc_name)
+        if fault == "404":
+            raise HTTPException(status_code=404, detail="Injected parcel intake route not found")
+        if fault == "500":
+            raise HTTPException(status_code=500, detail="Injected parcel intake service failure")
+        return {"status": "ok", "service": svc_name}
+
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
+        fault = get_service_fault(svc_name)
+        if fault == "404":
+            raise HTTPException(status_code=404, detail="Injected parcel intake route not found")
+        if fault == "500":
+            raise HTTPException(status_code=500, detail="Injected parcel intake service failure")
         return {"status": "ok", "service": svc_name}
 
     @app.get("/metrics", response_class=PlainTextResponse)
@@ -245,6 +313,19 @@ def create_dispatch_app(*, suffix: str = "") -> FastAPI:
         fault = get_service_fault(svc_name)
         if fault == "500":
             raise HTTPException(status_code=500, detail="Injected courier dispatch error")
+
+        # Cascade call to proof service over HTTP
+        if proof_service_url:
+            try:
+                proof_endpoint = f"{proof_service_url.rstrip('/')}{prefix}/proof"
+                httpx.post(
+                    proof_endpoint,
+                    json={"parcel_id": "PCL-101", "recipient_name": "Test Recipient", "signature_hash": "hash_valid_8823"},
+                    timeout=2.0,
+                )
+            except Exception:
+                pass
+
         return CourierDispatchResponse(
             route_id=req.route_id,
             courier_id=req.courier_id,
@@ -276,8 +357,22 @@ def create_proof_app(*, suffix: str = "") -> FastAPI:
         description="Fictional Parcel Logistics Proof of Delivery Service",
     )
 
+    @app.get("/")
+    def root() -> dict[str, str]:
+        fault = get_service_fault(svc_name)
+        if fault == "404":
+            raise HTTPException(status_code=404, detail="Injected parcel intake route not found")
+        if fault == "500":
+            raise HTTPException(status_code=500, detail="Injected parcel intake service failure")
+        return {"status": "ok", "service": svc_name}
+
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
+        fault = get_service_fault(svc_name)
+        if fault == "404":
+            raise HTTPException(status_code=404, detail="Injected parcel intake route not found")
+        if fault == "500":
+            raise HTTPException(status_code=500, detail="Injected parcel intake service failure")
         return {"status": "ok", "service": svc_name}
 
     @app.get("/metrics", response_class=PlainTextResponse)
@@ -374,11 +469,20 @@ def start_parcel_stack(*, suffix: str = "") -> dict[str, RunningService]:
     dispatch_name = f"svc-pkg-dispatch-{suffix}" if suffix else "parcel-dispatch-svc"
     proof_name = f"svc-pkg-proof-{suffix}" if suffix else "parcel-proof-svc"
 
+    intake_port = find_free_port()
+    route_port = find_free_port()
+    dispatch_port = find_free_port()
+    proof_port = find_free_port()
+
+    proof_url = f"http://127.0.0.1:{proof_port}"
+    dispatch_url = f"http://127.0.0.1:{dispatch_port}"
+    route_url = f"http://127.0.0.1:{route_port}"
+
     services = {
-        intake_name: RunningService(intake_name, create_intake_app(suffix=suffix), find_free_port()),
-        route_name: RunningService(route_name, create_route_app(suffix=suffix), find_free_port()),
-        dispatch_name: RunningService(dispatch_name, create_dispatch_app(suffix=suffix), find_free_port()),
-        proof_name: RunningService(proof_name, create_proof_app(suffix=suffix), find_free_port()),
+        intake_name: RunningService(intake_name, create_intake_app(suffix=suffix, route_service_url=route_url), intake_port),
+        route_name: RunningService(route_name, create_route_app(suffix=suffix, dispatch_service_url=dispatch_url), route_port),
+        dispatch_name: RunningService(dispatch_name, create_dispatch_app(suffix=suffix, proof_service_url=proof_url), dispatch_port),
+        proof_name: RunningService(proof_name, create_proof_app(suffix=suffix), proof_port),
     }
     for svc in services.values():
         svc.start()
