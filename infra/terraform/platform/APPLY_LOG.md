@@ -154,7 +154,7 @@
   - Added environment variables to `google_cloud_run_v2_service.sovereign`:
     - `GODVIEW_SOVEREIGN_URL`: `var.sovereign_service_url` (`https://god-view-sovereign-mcj3w7ujpq-uc.a.run.app`) for OIDC audience verification.
     - `SERVICE_URL`: alias pointing to the Sovereign service URL.
-    - `GODVIEW_SERVICE_PRINCIPALS`: exact project-qualified comma-separated service account emails: `sense_sa_email`, `act_sa_email`, `runtime_sa_email`, `deploy_sa_email`, Monitoring SA, Pub/Sub SA, Cloud Scheduler SA, and AI Platform Reasoning Engine SA.
+    - `GODVIEW_SERVICE_PRINCIPALS`: exact project-qualified comma-separated service account emails: `sense_sa_email`, `act_sa_email`, and Monitoring notification SA (`service-769002985772@gcp-sa-monitoring-notification.iam.gserviceaccount.com`). Tenant runtime SA, deploy SA, and internal GCP agent identities excluded per verifier-edge #99.
 
 ## v5 deploy log
 

@@ -30,11 +30,6 @@ variable "runtime_sa_email" {
   type = string
 }
 
-variable "deploy_sa_email" {
-  type    = string
-  default = ""
-}
-
 variable "sovereign_service_url" {
   type        = string
   description = "Public / Cloud Run URL for Sovereign (OIDC audience)"

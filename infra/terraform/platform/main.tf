@@ -89,7 +89,6 @@ module "godview" {
   sense_sa_email                       = module.project_iam.sense_sa_email
   act_sa_email                         = module.project_iam.act_sa_email
   runtime_sa_email                     = module.project_iam.runtime_sa_email
-  deploy_sa_email                      = module.project_iam.deploy_sa_email
   sovereign_service_url                = var.sovereign_service_url
   operator_email                       = var.operator_email
   billing_account_id                   = var.billing_account_id

@@ -259,16 +259,11 @@ resource "google_cloud_run_v2_service" "sovereign" {
       }
       env {
         name = "GODVIEW_SERVICE_PRINCIPALS"
-        value = join(",", compact([
+        value = join(",", [
           var.sense_sa_email,
           var.act_sa_email,
-          var.runtime_sa_email,
-          var.deploy_sa_email,
           "service-${var.project_number}@gcp-sa-monitoring-notification.iam.gserviceaccount.com",
-          "service-${var.project_number}@gcp-sa-pubsub.iam.gserviceaccount.com",
-          "service-${var.project_number}@gcp-sa-cloudscheduler.iam.gserviceaccount.com",
-          "service-${var.project_number}@gcp-sa-aiplatform-re.iam.gserviceaccount.com",
-        ]))
+        ])
       }
       env {
         name  = "GODVIEW_BUDGET_APPLICATION_USD"
