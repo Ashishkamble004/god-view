@@ -147,6 +147,15 @@
   - In `google_monitoring_uptime_check_config.sovereign_health`, updated `monitored_resource` from `uptime_url` to `cloud_run_revision` (`labels = { project_id, location = "us-central1", service_name = "god-view-sovereign" }`), enabling valid OIDC service agent authentication. Removed `validate_ssl` (only supported on `uptime_url` checks).
   - In `google_monitoring_alert_policy.sovereign_heartbeat`, aligned condition filter to `resource.type="cloud_run_revision"` and aggregation `group_by_fields = ["resource.label.service_name"]`.
 
+### Rev 8 — 2026-10-17 — Firestore TTL Policy & Sovereign OIDC / Service Principals Environment
+- **Module `03-data`**:
+  - Added `google_firestore_field.change_events_ttl` with `ttl_config {}` on collection `change_events` and field `expires_at` in database `god-view-memory-db` (G9 TTL enforcement).
+- **Module `05-godview`**:
+  - Added environment variables to `google_cloud_run_v2_service.sovereign`:
+    - `GODVIEW_SOVEREIGN_URL`: `var.sovereign_service_url` (`https://god-view-sovereign-mcj3w7ujpq-uc.a.run.app`) for OIDC audience verification.
+    - `SERVICE_URL`: alias pointing to the Sovereign service URL.
+    - `GODVIEW_SERVICE_PRINCIPALS`: exact project-qualified comma-separated service account emails: `sense_sa_email`, `act_sa_email`, `runtime_sa_email`, `deploy_sa_email`, Monitoring SA, Pub/Sub SA, Cloud Scheduler SA, and AI Platform Reasoning Engine SA.
+
 ## v5 deploy log
 
 - **2026-10-17T17:52:45Z**

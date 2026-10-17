@@ -250,6 +250,27 @@ resource "google_cloud_run_v2_service" "sovereign" {
         value = "300"
       }
       env {
+        name  = "GODVIEW_SOVEREIGN_URL"
+        value = var.sovereign_service_url != "" ? var.sovereign_service_url : "https://god-view-sovereign-${var.project_number}.${var.region}.run.app"
+      }
+      env {
+        name  = "SERVICE_URL"
+        value = var.sovereign_service_url != "" ? var.sovereign_service_url : "https://god-view-sovereign-${var.project_number}.${var.region}.run.app"
+      }
+      env {
+        name = "GODVIEW_SERVICE_PRINCIPALS"
+        value = join(",", compact([
+          var.sense_sa_email,
+          var.act_sa_email,
+          var.runtime_sa_email,
+          var.deploy_sa_email,
+          "service-${var.project_number}@gcp-sa-monitoring-notification.iam.gserviceaccount.com",
+          "service-${var.project_number}@gcp-sa-pubsub.iam.gserviceaccount.com",
+          "service-${var.project_number}@gcp-sa-cloudscheduler.iam.gserviceaccount.com",
+          "service-${var.project_number}@gcp-sa-aiplatform-re.iam.gserviceaccount.com",
+        ]))
+      }
+      env {
         name  = "GODVIEW_BUDGET_APPLICATION_USD"
         value = tostring(var.token_budget_daily_application_usd)
       }

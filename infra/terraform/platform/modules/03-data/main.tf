@@ -299,6 +299,17 @@ resource "google_firestore_index" "skill_trigger" {
   }
 }
 
+# --- Firestore TTL Policy on change_events.expires_at (G9) ---
+
+resource "google_firestore_field" "change_events_ttl" {
+  project    = var.project_id
+  database   = google_firestore_database.memory.name
+  collection = "change_events"
+  field      = "expires_at"
+
+  ttl_config {}
+}
+
 # --- BigQuery Business Event Ledger (dataset + 4 tables) ---
 
 resource "google_bigquery_dataset" "godview_ledger" {

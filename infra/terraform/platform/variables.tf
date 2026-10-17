@@ -249,6 +249,12 @@ variable "iap_allowed_members" {
   default     = ["user:admin@kambleashish.altostrat.com"]
 }
 
+variable "sovereign_service_url" {
+  description = "Public / Cloud Run URL for Sovereign (OIDC audience)"
+  type        = string
+  default     = "https://god-view-sovereign-mcj3w7ujpq-uc.a.run.app"
+}
+
 variable "alert_email_address" {
   description = "Ops email address for Monitoring notification channel"
   type        = string
