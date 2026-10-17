@@ -31,6 +31,7 @@ class MockContext:
         self.bus = InMemoryPubSub()
         self.trust_gate = TrustGate(docs=self.docs, bus=self.bus)
         self.observed_resources = {"edge-security-policy"}
+        self.env_mode = "hermetic"
         mock_armor = MagicMock()
         mock_armor.execute = AsyncMock(
             return_value=ExecutionResult(

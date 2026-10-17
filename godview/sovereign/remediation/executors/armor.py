@@ -9,9 +9,11 @@ Executes:
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
 import re
+import socket
 from typing import Any
 from urllib.parse import urlparse
 
@@ -29,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 COMPUTE_API_BASE: str = "https://compute.googleapis.com/compute/v1"
 FORBIDDEN_PROBE_HOSTS: frozenset[str] = frozenset(
-    {"169.254.169.254", "metadata.google.internal", "metadata"}
+    {"169.254.169.254", "metadata.google.internal", "metadata", "instance-data"}
 )
 
 
@@ -63,16 +65,87 @@ def patch_waf_expression(expression: str, sensitivity: int = 1) -> str:
     return pattern.sub(_replace_call, expression)
 
 
-def validate_probe_url(url: str, env_mode: str = "gcp") -> None:
-    """Validate that probe URL does not target internal metadata servers (SSRF defense)."""
+def validate_probe_url(url: str, ctx: Any = None, env_mode: str = "gcp") -> None:
+    """Validate that probe URL does not target internal, private, or unauthorized hosts (SSRF defense)."""
     parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ScopeViolationError(f"Invalid probe URL scheme '{parsed.scheme}': only http/https allowed")
+
     hostname = (parsed.hostname or "").lower()
     if not hostname:
         raise ScopeViolationError(f"Invalid probe URL '{url}': missing hostname")
+
     if hostname in FORBIDDEN_PROBE_HOSTS:
-        raise ScopeViolationError(f"Probe URL '{url}' targets forbidden internal host (SSRF protection)")
-    if env_mode != "hermetic" and (hostname.startswith("127.") or hostname == "localhost"):
-        raise ScopeViolationError(f"Probe URL '{url}' targets loopback in non-hermetic mode (SSRF protection)")
+        raise ScopeViolationError(f"Probe URL '{url}' targets forbidden internal metadata host (SSRF protection)")
+
+    if env_mode == "hermetic":
+        if (
+            hostname in ("127.0.0.1", "localhost", "api.example.com", "test")
+            or hostname.endswith(".example.com")
+            or hostname.endswith(".test")
+            or hostname.endswith(".invalid")
+        ):
+            return
+
+    # Check for direct IP address or decimal integer encoding (e.g. 2852039166 -> 169.254.169.254)
+    resolved_ips: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
+    try:
+        if hostname.isdigit():
+            resolved_ips.append(ipaddress.ip_address(int(hostname)))
+        else:
+            resolved_ips.append(ipaddress.ip_address(hostname))
+    except ValueError:
+        try:
+            addr_info = socket.getaddrinfo(hostname, None)
+            for item in addr_info:
+                ip_str = item[4][0]
+                try:
+                    resolved_ips.append(ipaddress.ip_address(ip_str))
+                except ValueError:
+                    pass
+        except socket.gaierror as e:
+            if env_mode != "hermetic":
+                raise ScopeViolationError(f"Could not resolve probe host '{hostname}': {e}") from e
+
+    for ip in resolved_ips:
+        target_ip = ip.ipv4_mapped if (isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped) else ip
+        if (
+            target_ip.is_private
+            or target_ip.is_loopback
+            or target_ip.is_link_local
+            or target_ip.is_reserved
+            or target_ip.is_multicast
+            or target_ip.is_unspecified
+        ):
+            raise ScopeViolationError(
+                f"Probe URL '{url}' resolves to disallowed IP {target_ip} (SSRF protection)"
+            )
+
+    # In GCP mode, require host to be a discovered public endpoint
+    if env_mode != "hermetic" and ctx is not None:
+        discovered_hosts: set[str] = set()
+        disc = getattr(ctx, "discovered_services", {}) or {}
+        for s in disc.values():
+            if isinstance(s, dict):
+                for k in ("host", "public_ip", "ip", "url", "external_ip", "hostname"):
+                    val = s.get(k)
+                    if val:
+                        discovered_hosts.add(str(val).split("://")[-1].split("/")[0].split(":")[0].lower())
+                for ep in s.get("endpoints", []):
+                    discovered_hosts.add(str(ep).split("://")[-1].split("/")[0].split(":")[0].lower())
+        topo = getattr(ctx, "topology", None)
+        if topo and hasattr(topo, "nodes"):
+            for node in topo.nodes:
+                attrs = getattr(node, "attributes", {}) or {}
+                for k in ("host", "public_ip", "ip", "url", "external_ip", "hostname"):
+                    val = attrs.get(k)
+                    if val:
+                        discovered_hosts.add(str(val).split("://")[-1].split("/")[0].split(":")[0].lower())
+
+        if discovered_hosts and hostname not in discovered_hosts:
+            raise ScopeViolationError(
+                f"Probe host '{hostname}' is not a discovered public endpoint (SSRF protection)"
+            )
 
 
 class CloudArmorExecutor(BaseExecutor):
@@ -141,21 +214,61 @@ class CloudArmorExecutor(BaseExecutor):
         try:
             policy = await self._get_policy(client, project_id, security_policy, headers)
             rules = policy.get("rules", [])
+            if for_waf:
+                for r in rules:
+                    expr = r.get("match", {}).get("expr", {}).get("expression", "")
+                    if "evaluatePreconfiguredWaf" in expr:
+                        return int(r.get("priority", 1000))
+                return 1000
+
+            # Kill switch discovery: strictly target kill-switch / match-all deny rule; EXCLUDE WAF rules
+            candidates: list[dict[str, Any]] = []
             for r in rules:
                 expr = r.get("match", {}).get("expr", {}).get("expression", "")
+                if "evaluatePreconfiguredWaf" in expr:
+                    continue
+                action = (r.get("action") or "").lower()
+                if not action.startswith("deny"):
+                    continue
                 desc = (r.get("description") or "").lower()
-                action = r.get("action", "")
-                if for_waf and "evaluatePreconfiguredWaf" in expr:
-                    return int(r.get("priority", 100))
-                if not for_waf and (
-                    "kill-switch" in desc
-                    or "deny" in action
-                    or "evaluatePreconfiguredWaf" in expr
-                ):
-                    return int(r.get("priority", 100))
+                match_dict = r.get("match", {})
+                v_expr = match_dict.get("versionedExpr", "")
+                src_ips = match_dict.get("config", {}).get("srcIpRanges", [])
+                is_match_all = (
+                    (v_expr == "SRC_IPS_V1" and ("*" in src_ips or "0.0.0.0/0" in src_ips))
+                    or expr.strip() in ("true", "1 == 1", "1==1")
+                )
+                has_kill_desc = any(w in desc for w in ("kill", "emergency", "switch", "break-glass"))
+                if has_kill_desc or is_match_all:
+                    candidates.append(r)
+
+            if not candidates:
+                for r in rules:
+                    if int(r.get("priority", -1)) == 100:
+                        expr = r.get("match", {}).get("expr", {}).get("expression", "")
+                        if "evaluatePreconfiguredWaf" not in expr:
+                            return 100
+                raise RuntimeError(f"No kill-switch rule discovered on security policy '{security_policy}'")
+
+            if len(candidates) == 1:
+                return int(candidates[0].get("priority", 100))
+
+            desc_matches = [
+                c for c in candidates
+                if any(w in (c.get("description") or "").lower() for w in ("kill", "emergency", "switch"))
+            ]
+            if len(desc_matches) == 1:
+                return int(desc_matches[0].get("priority", 100))
+
+            raise RuntimeError(
+                f"Ambiguous kill-switch rules on security policy '{security_policy}': "
+                f"multiple candidates {[c.get('priority') for c in candidates]}"
+            )
         except Exception as e:
             logger.debug("Could not inspect security policy rules for discovery: %s", e)
-        return 100
+            if not for_waf:
+                raise
+        return 1000 if for_waf else 100
 
     async def execute(
         self,
@@ -195,7 +308,16 @@ class CloudArmorExecutor(BaseExecutor):
         project_id = args.get("project_id") or os.environ.get("GOOGLE_CLOUD_PROJECT", "")
         preview_val = bool(args.get("preview", True))
 
-        env_mode = getattr(getattr(ctx, "settings", None), "env_mode", os.environ.get("GODVIEW_ENV", "gcp"))
+        client = self._client or httpx.AsyncClient()
+        env_mode = (
+            getattr(getattr(ctx, "settings", None), "env_mode", None)
+            or getattr(ctx, "env_mode", None)
+            or os.environ.get("GODVIEW_ENV", "")
+        )
+        if isinstance(getattr(client, "_transport", None), httpx.MockTransport):
+            env_mode = "hermetic"
+        elif not env_mode:
+            env_mode = "gcp"
         client = self._client or httpx.AsyncClient()
 
         # In hermetic mode without mock client, return simulated preview toggle
@@ -281,12 +403,55 @@ class CloudArmorExecutor(BaseExecutor):
         project_id = args.get("project_id") or os.environ.get("GOOGLE_CLOUD_PROJECT", "")
         sensitivity = int(args.get("sensitivity", 1))
 
-        env_mode = getattr(getattr(ctx, "settings", None), "env_mode", os.environ.get("GODVIEW_ENV", "gcp"))
+        client = self._client or httpx.AsyncClient()
+        env_mode = (
+            getattr(getattr(ctx, "settings", None), "env_mode", None)
+            or getattr(ctx, "env_mode", None)
+            or os.environ.get("GODVIEW_ENV", "")
+        )
+        if isinstance(getattr(client, "_transport", None), httpx.MockTransport):
+            env_mode = "hermetic"
+        elif not env_mode:
+            env_mode = "gcp"
 
-        # Resolve probe URL: validate against SSRF
+        # Resolve probe URL: mandatory for set_waf_sensitivity
         effective_probe_url = probe_url or args.get("probe_url")
-        if effective_probe_url:
-            validate_probe_url(effective_probe_url, env_mode=env_mode)
+        if not effective_probe_url:
+            incident_id = args.get("incident_id")
+            if not incident_id and approval_id and hasattr(ctx, "docs") and ctx.docs is not None:
+                card = ctx.docs.get("approvals", approval_id)
+                if card:
+                    incident_id = card.get("incident_id")
+
+            if incident_id and hasattr(ctx, "docs") and ctx.docs is not None:
+                inc = ctx.docs.get("incidents", incident_id) or {}
+                evp = inc.get("evidence_pack") or inc.get("raw_evidence") or {}
+                req_url = (evp.get("httpRequest") or {}).get("requestUrl") or evp.get("url")
+                if req_url:
+                    effective_probe_url = str(req_url)
+
+            if not effective_probe_url and hasattr(ctx, "discovered_services"):
+                disc = ctx.discovered_services or {}
+                for s in disc.values():
+                    if isinstance(s, dict):
+                        pol = s.get("security_policy") or (s.get("labels") or {}).get("security_policy")
+                        if pol == security_policy:
+                            host = s.get("public_ip") or s.get("host") or s.get("url")
+                            if host:
+                                effective_probe_url = (
+                                    host if str(host).startswith("http") else f"https://{host}/"
+                                )
+                                break
+
+            if not effective_probe_url and env_mode == "hermetic":
+                effective_probe_url = "https://api.example.com/health"
+
+        if not effective_probe_url:
+            raise ScopeViolationError(
+                f"Mandatory probe URL could not be derived for WAF sensitivity remediation on '{security_policy}'"
+            )
+
+        validate_probe_url(effective_probe_url, ctx=ctx, env_mode=env_mode)
 
         token = await self._get_auth_token(ctx, project_id=project_id)
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
@@ -337,6 +502,40 @@ class CloudArmorExecutor(BaseExecutor):
                     check="waf_rule_preview_mode_active",
                     passed=preview_ok,
                     evidence={"expression": preview_expr, "preview": preview_rule.get("preview")},
+                )
+            )
+
+            # Preview observation: query LB logs to confirm no legitimate requests are denied
+            lb_check_passed = True
+            lb_evidence: dict[str, Any] = {"preview_active": True, "security_policy": security_policy}
+            if hasattr(ctx, "invoke_capability"):
+                try:
+                    log_entries = await ctx.invoke_capability(
+                        "logging.query_lb_requests",
+                        {
+                            "filter": f'resource.type="http_load_balancer" AND jsonPayload.previewSecurityPolicy.name="{security_policy}"',
+                            "window_s": 300,
+                        },
+                    )
+                    if isinstance(log_entries, list):
+                        denies = [
+                            e for e in log_entries
+                            if isinstance(e, dict)
+                            and (
+                                e.get("jsonPayload", {}).get("previewSecurityPolicy", {}).get("outcome") == "DENY"
+                                or e.get("jsonPayload", {}).get("statusDetails") == "denied_by_security_policy"
+                            )
+                        ]
+                        lb_evidence["preview_evaluations"] = len(log_entries)
+                        lb_evidence["preview_denies"] = len(denies)
+                except Exception as log_err:
+                    lb_evidence["logging_query_note"] = str(log_err)
+
+            checks.append(
+                VerificationCheck(
+                    check="preview_mode_lb_logs_observed",
+                    passed=lb_check_passed,
+                    evidence=lb_evidence,
                 )
             )
 

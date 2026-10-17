@@ -47,7 +47,7 @@ def _get_caller_identity(request: Request, header_email: str | None = None) -> s
         return test_hdr
     if header_email:
         return header_email.split(":")[-1].strip()
-    return "service@godview.test"
+    return "service@local.hermetic"
 
 
 def build_router(ctx: Any) -> APIRouter:
@@ -62,13 +62,29 @@ def build_router(ctx: Any) -> APIRouter:
     ) -> Any:
         if ctx and hasattr(ctx, "auth") and ctx.auth is not None:
             verify_iap = getattr(ctx.auth, "verify_iap_jwt", None)
-            if callable(verify_iap) and verify_iap(request):
-                return verify_iap(request)
+            if callable(verify_iap):
+                try:
+                    res = verify_iap(request)
+                    if res:
+                        return res
+                except Exception:
+                    pass
             verify_oidc = getattr(ctx.auth, "verify_google_oidc", None)
-            if callable(verify_oidc) and verify_oidc(request):
-                return verify_oidc(request)
-        env_mode = getattr(getattr(ctx, "settings", None), "env_mode", "gcp")
-        if env_mode == "hermetic" or x_goog_authenticated_user_email or request.headers.get("x-godview-test-principal"):
+            if callable(verify_oidc):
+                try:
+                    res = verify_oidc(request)
+                    if res:
+                        return res
+                except Exception:
+                    pass
+            require_svc = getattr(ctx.auth, "require_service", None)
+            if callable(require_svc):
+                try:
+                    return await require_svc(request)
+                except Exception:
+                    pass
+        env_mode = getattr(getattr(ctx, "settings", None), "env_mode", getattr(ctx, "env_mode", "gcp"))
+        if env_mode == "hermetic":
             return _get_caller_identity(request, x_goog_authenticated_user_email)
         raise HTTPException(status_code=401, detail="Unauthorized: authenticated service or operator required")
 
@@ -105,7 +121,9 @@ def build_router(ctx: Any) -> APIRouter:
     async def _handle_invoke(
         cap_id: str,
         body: CapabilityInvokeRequest,
+        caller: Any = None,
     ) -> dict[str, Any]:
+        card_raw = None
         # If approval_id is supplied, verify binding against stored approval card
         effective_args = dict(body.args)
         if body.approval_id is not None and hasattr(ctx, "docs") and ctx.docs is not None:
@@ -132,6 +150,20 @@ def build_router(ctx: Any) -> APIRouter:
                         )
                     effective_args = dict(card_args)
 
+        # Derive verified agent_id
+        effective_agent_id = body.agent_id
+        if body.approval_id is not None and card_raw is not None:
+            effective_agent_id = card_raw.get("agent_id") or body.agent_id
+        elif isinstance(caller, str) and ("operator" in caller):
+            effective_agent_id = "operator"
+        elif hasattr(caller, "email") or hasattr(caller, "principal"):
+            principal = str(getattr(caller, "email", None) or getattr(caller, "principal", None))
+            effective_agent_id = "operator" if "operator" in principal else principal
+        else:
+            env_mode = getattr(getattr(ctx, "settings", None), "env_mode", getattr(ctx, "env_mode", "gcp"))
+            if env_mode != "hermetic" and body.agent_id in ("operator", "sovereign", "root"):
+                raise HTTPException(status_code=403, detail="Cannot claim privileged agent_id without operator authentication")
+
         try:
             result: ExecutionResult = await dispatcher.invoke(
                 ctx=ctx,
@@ -139,7 +171,7 @@ def build_router(ctx: Any) -> APIRouter:
                 capability_id=cap_id,
                 target_resource=body.target_resource,
                 args=effective_args,
-                agent_id=body.agent_id,
+                agent_id=effective_agent_id,
                 approval_id=body.approval_id,
                 novel_skill_first_step=body.novel_skill_first_step,
             )
@@ -156,22 +188,23 @@ def build_router(ctx: Any) -> APIRouter:
     @router.post("/capabilities/invoke")
     async def invoke_capability_root(
         body: CapabilityInvokeRequest,
-        caller: Annotated[Any, Depends(service_or_operator_dep)] = None,
+        caller: Any = Depends(service_or_operator_dep),  # noqa: B008
     ) -> dict[str, Any]:
         """Dispatch capability execution through TrustGate and registered executors."""
         cap_id = body.capability_id
         if not cap_id:
             raise HTTPException(status_code=400, detail="Missing 'capability_id' in invocation body")
-        return await _handle_invoke(cap_id, body)
+        return await _handle_invoke(cap_id, body, caller)
 
     @router.post("/capabilities/{capability_id}:invoke")
+    @router.post("/capabilities/{capability_id}/invoke")
     async def invoke_capability_path(
         capability_id: str,
         body: CapabilityInvokeRequest,
-        caller: Annotated[Any, Depends(service_or_operator_dep)] = None,
+        caller: Any = Depends(service_or_operator_dep),  # noqa: B008
     ) -> dict[str, Any]:
         """Dispatch named capability execution through TrustGate and registered executors."""
-        return await _handle_invoke(capability_id, body)
+        return await _handle_invoke(capability_id, body, caller)
 
     return router
 

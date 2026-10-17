@@ -106,12 +106,13 @@ async def test_armor_executor_set_waf_sensitivity_preview_first_and_verify(
         # Second patch: preview=False
         assert patch_history[1]["preview"] is False
 
-        # Verification checks recorded
-        assert len(result.verification) == 3
+        # Verification checks recorded (preview active, LB logs observed, enforced, probe)
+        assert len(result.verification) == 4
         check_names = [v.check for v in result.verification]
         assert "waf_rule_preview_mode_active" in check_names
-        assert "post_enforce_probe_bypasses_waf_block" in check_names
+        assert "preview_mode_lb_logs_observed" in check_names
         assert "waf_rule_enforced_with_sensitivity" in check_names
+        assert "post_enforce_probe_bypasses_waf_block" in check_names
 
         # Final state
         assert result.after["preview"] is False
@@ -287,3 +288,58 @@ async def test_armor_executor_ssrf_forbidden_url() -> None:
             },
             target_resource="edge-security-policy",
         )
+
+
+@pytest.mark.unit
+async def test_armor_executor_ssrf_advanced_encodings() -> None:
+    """Alternate SSRF encodings (decimal IP, IPv6 loopback, RFC1918) must all be rejected."""
+    from godview.sovereign.remediation.executors.armor import validate_probe_url
+    from godview.sovereign.remediation.types import ScopeViolationError
+
+    # Decimal representation of 169.254.169.254
+    with pytest.raises(ScopeViolationError, match="disallowed IP|SSRF"):
+        validate_probe_url("http://2852039166/probe", env_mode="gcp")
+
+    # IPv6 loopback
+    with pytest.raises(ScopeViolationError, match="disallowed IP|SSRF"):
+        validate_probe_url("http://[::1]/probe", env_mode="gcp")
+
+    # Private RFC1918 address
+    with pytest.raises(ScopeViolationError, match="disallowed IP|SSRF"):
+        validate_probe_url("http://10.1.2.3/probe", env_mode="gcp")
+
+
+@pytest.mark.unit
+async def test_discover_rule_priority_disambiguates_kill_switch_from_waf() -> None:
+    """Kill-switch discovery must specifically select the kill-switch rule and never match WAF rules."""
+    executor = CloudArmorExecutor()
+
+    policy_data = {
+        "rules": [
+            {
+                "priority": 1000,
+                "action": "deny(403)",
+                "match": {"expr": {"expression": "evaluatePreconfiguredWaf('sqli-v33-stable')"}},
+                "description": "OWASP CRS protection",
+            },
+            {
+                "priority": 100,
+                "action": "deny(403)",
+                "match": {"versionedExpr": "SRC_IPS_V1", "config": {"srcIpRanges": ["*"]}},
+                "description": "Emergency Kill Switch",
+            },
+        ]
+    }
+
+    async def handle_request(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=policy_data)
+
+    transport = httpx.MockTransport(handle_request)
+    async with httpx.AsyncClient(transport=transport) as client:
+        # For WAF: discovers priority 1000
+        waf_pri = await executor._discover_rule_priority(client, "test-proj", "edge-security-policy", {}, for_waf=True)
+        assert waf_pri == 1000
+
+        # For Kill Switch: discovers priority 100 (never 1000)
+        kill_pri = await executor._discover_rule_priority(client, "test-proj", "edge-security-policy", {}, for_waf=False)
+        assert kill_pri == 100

@@ -40,7 +40,8 @@ async def get_act_sa_access_token(
         or getattr(ctx, "env_mode", None)
         or os.environ.get("GODVIEW_ENV", "")
     )
-    if env_mode in ("hermetic", "test", "local") or not env_mode:
+    is_mock_client = client is not None and isinstance(getattr(client, "_transport", None), httpx.MockTransport)
+    if env_mode == "hermetic" or is_mock_client:
         return "hermetic-act-sa-access-token"
 
     # If ctx.auth has impersonation directly implemented
@@ -58,8 +59,8 @@ async def get_act_sa_access_token(
         token_fn = getattr(ctx.auth, "access_token", None)
         if callable(token_fn):
             base_token = str(token_fn())
-    if not base_token or base_token.startswith("hermetic-") or "test" in base_token:
-        return "hermetic-act-sa-access-token"
+    if not base_token:
+        raise RuntimeError(f"Base Sovereign credentials unavailable to impersonate {get_act_sa_email(project_id)}")
 
     act_sa = get_act_sa_email(project_id)
     url = f"{IAM_CREDENTIALS_BASE}/projects/-/serviceAccounts/{act_sa}:generateAccessToken"
@@ -99,7 +100,8 @@ async def get_act_sa_id_token(
         or getattr(ctx, "env_mode", None)
         or os.environ.get("GODVIEW_ENV", "")
     )
-    if env_mode in ("hermetic", "test", "local") or not env_mode:
+    is_mock_client = client is not None and isinstance(getattr(client, "_transport", None), httpx.MockTransport)
+    if env_mode == "hermetic" or is_mock_client:
         return f"hermetic-act-sa-id-token-for-{audience}"
 
     if hasattr(ctx, "auth") and ctx.auth is not None:
@@ -115,8 +117,8 @@ async def get_act_sa_id_token(
         token_fn = getattr(ctx.auth, "access_token", None)
         if callable(token_fn):
             base_token = str(token_fn())
-    if not base_token or base_token.startswith("hermetic-") or "test" in base_token:
-        return f"hermetic-act-sa-id-token-for-{audience}"
+    if not base_token:
+        raise RuntimeError(f"Base Sovereign credentials unavailable to mint ID token for {get_act_sa_email(project_id)}")
 
     act_sa = get_act_sa_email(project_id)
     url = f"{IAM_CREDENTIALS_BASE}/projects/-/serviceAccounts/{act_sa}:generateIdToken"

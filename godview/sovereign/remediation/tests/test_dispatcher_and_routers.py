@@ -32,6 +32,7 @@ class MockContext:
         self.agents = InMemoryAgentEngine()
         self.trust_gate = TrustGate(docs=self.docs, bus=self.bus)
         self.dispatcher = RemediationDispatcher()
+        self.env_mode = "hermetic"
 
 
 class DummyExecutor(BaseExecutor):
@@ -258,3 +259,32 @@ async def test_operator_pause_resume_hibernate() -> None:
         # Agent min_instances cooled to 0
         agent_doc = ctx.agents.get_agent("application__svc-01")
         assert agent_doc["deployment_spec"]["min_instances"] == 0
+
+
+@pytest.mark.unit
+async def test_gcp_mode_rejects_spoofed_auth_headers() -> None:
+    """In GCP mode without valid IAP/OIDC verification, header fallback is rejected with 401."""
+    ctx = MockContext()
+    ctx.env_mode = "gcp"
+
+    app = FastAPI()
+    app.include_router(build_operator_router(ctx))
+    app.include_router(build_capabilities_router(ctx))
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # Operator route rejects spoofed header in GCP mode
+        resp_op = await client.post(
+            "/operator/kill-switch",
+            json={"enabled": True},
+            headers={"X-Goog-Authenticated-User-Email": "attacker@evil.com"},
+        )
+        assert resp_op.status_code == 401
+
+        # Capabilities route rejects spoofed header in GCP mode
+        resp_cap = await client.post(
+            "/capabilities/invoke",
+            json={"capability_id": "logging.query", "agent_id": "operator", "target_resource": "res"},
+            headers={"X-Goog-Authenticated-User-Email": "attacker@evil.com"},
+        )
+        assert resp_cap.status_code == 401

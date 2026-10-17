@@ -168,8 +168,8 @@ def validate_resource_scope(
         )
 
     # For observed resources:
-    # Operator / Sovereign root actions have global management scope across observed resources
-    if agent_id in ("sovereign", "operator", "root"):
+    # Verified operator actions have management scope across observed resources
+    if agent_id == "operator":
         return True
 
     required_level = spec.min_level

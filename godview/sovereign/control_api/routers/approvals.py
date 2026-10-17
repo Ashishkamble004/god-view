@@ -14,14 +14,16 @@ from __future__ import annotations
 
 import inspect
 import logging
+import os
 from datetime import UTC, datetime
-from typing import Annotated, Any, Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from godview_shared.contracts import ApprovalCard, TrustViolation
 from pydantic import BaseModel, Field
 
 from godview.sovereign.remediation.registry import RemediationDispatcher
+from godview.sovereign.remediation.types import ExecutionResult
 from godview.sovereign.trust_ladder import TrustGate
 
 logger = logging.getLogger(__name__)
@@ -49,7 +51,7 @@ class ApprovalDecisionRequest(BaseModel):
     reason: str | None = None
 
 
-def _get_operator_email(operator: Any, header_email: str | None = None) -> str:
+def _get_operator_email(operator: Any) -> str:
     if operator is not None:
         if isinstance(operator, str):
             email = operator
@@ -63,12 +65,16 @@ def _get_operator_email(operator: Any, header_email: str | None = None) -> str:
         if clean:
             return clean
 
-    if header_email:
-        clean = header_email.split(":")[-1].strip()
-        if clean:
-            return clean
+    raise HTTPException(status_code=401, detail="Cannot determine authenticated operator email")
 
-    return "operator@godview.test"
+
+def _get_env_mode(ctx: Any) -> str:
+    settings = getattr(ctx, "settings", None)
+    if settings is not None and hasattr(settings, "env_mode"):
+        return str(settings.env_mode)
+    if hasattr(ctx, "env_mode") and ctx.env_mode:
+        return str(ctx.env_mode)
+    return os.environ.get("GODVIEW_ENV", "gcp")
 
 
 def build_router(ctx: Any) -> APIRouter:
@@ -81,15 +87,18 @@ def build_router(ctx: Any) -> APIRouter:
         if ctx and hasattr(ctx, "auth") and ctx.auth is not None:
             require_op = getattr(ctx.auth, "require_operator", None)
             if callable(require_op):
-                return await require_op(request)
-        # Test / hermetic fallback
-        header_email = (
-            request.headers.get("x-goog-authenticated-user-email")
-            or request.headers.get("x-godview-test-principal")
-        )
-        env_mode = getattr(getattr(ctx, "settings", None), "env_mode", "gcp")
-        if env_mode == "hermetic" or header_email:
-            return _get_operator_email(None, header_email)
+                try:
+                    return await require_op(request)
+                except HTTPException:
+                    pass
+        env_mode = _get_env_mode(ctx)
+        if env_mode == "hermetic":
+            header_email = (
+                request.headers.get("x-goog-authenticated-user-email")
+                or request.headers.get("x-godview-test-principal")
+                or "operator@local.hermetic"
+            )
+            return _get_operator_email(header_email)
         raise HTTPException(status_code=401, detail="Unauthorized: valid operator identity required")
 
     async def service_or_operator_dep(
@@ -102,13 +111,20 @@ def build_router(ctx: Any) -> APIRouter:
             verify_oidc = getattr(ctx.auth, "verify_google_oidc", None)
             if callable(verify_oidc) and verify_oidc(request):
                 return verify_oidc(request)
-        header_email = (
-            request.headers.get("x-goog-authenticated-user-email")
-            or request.headers.get("x-godview-test-principal")
-        )
-        env_mode = getattr(getattr(ctx, "settings", None), "env_mode", "gcp")
-        if env_mode == "hermetic" or header_email:
-            return _get_operator_email(None, header_email)
+            require_svc = getattr(ctx.auth, "require_service", None)
+            if callable(require_svc):
+                try:
+                    return await require_svc(request)
+                except HTTPException:
+                    pass
+        env_mode = _get_env_mode(ctx)
+        if env_mode == "hermetic":
+            header_email = (
+                request.headers.get("x-goog-authenticated-user-email")
+                or request.headers.get("x-godview-test-principal")
+                or "service@local.hermetic"
+            )
+            return _get_operator_email(header_email)
         # In live mode without credentials, fail closed
         raise HTTPException(status_code=401, detail="Unauthorized: authenticated service or operator required")
 
@@ -206,7 +222,7 @@ def build_router(ctx: Any) -> APIRouter:
     @router.post("/approvals")
     async def create_approval(
         body: ApprovalCreateRequest,
-        caller: Annotated[Any, Depends(service_or_operator_dep)] = None,
+        caller: Any = Depends(service_or_operator_dep),  # noqa: B008
     ) -> dict[str, Any]:
         """Create an approval request card (TTL 30 min, single use)."""
         card: ApprovalCard = trust_gate.create_approval_request(
@@ -228,12 +244,11 @@ def build_router(ctx: Any) -> APIRouter:
     @router.post("/approvals/{approval_id}:approve")
     async def approve_card(
         approval_id: str,
-        request: Request,
         body: ApprovalDecisionRequest | None = None,
-        operator: Annotated[Any, Depends(operator_dep)] = None,
+        operator: Any = Depends(operator_dep),  # noqa: B008
     ) -> dict[str, Any]:
         """Approve an approval card with operator identity, then immediately execute the approved remediation."""
-        actor = _get_operator_email(operator, request.headers.get("x-goog-authenticated-user-email"))
+        actor = _get_operator_email(operator)
         try:
             updated_card, audit = trust_gate.decide_approval(
                 approval_id,
@@ -251,15 +266,34 @@ def build_router(ctx: Any) -> APIRouter:
 
             # Execute the approved remediation using the card's stored parameters
             card_args = getattr(updated_card, "args", {}) or {}
-            exec_result = await dispatcher.invoke(
-                ctx=ctx,
-                trust_gate=trust_gate,
-                capability_id=updated_card.capability,
-                target_resource=updated_card.target_resource,
-                args=card_args,
-                agent_id=updated_card.agent_id,
-                approval_id=approval_id,
-            )
+            exec_result: ExecutionResult | None = None
+            try:
+                exec_result = await dispatcher.invoke(
+                    ctx=ctx,
+                    trust_gate=trust_gate,
+                    capability_id=updated_card.capability,
+                    target_resource=updated_card.target_resource,
+                    args=card_args,
+                    agent_id=updated_card.agent_id,
+                    approval_id=approval_id,
+                )
+            except Exception as exec_err:
+                logger.error("Remediation execution failed after approval: %s", exec_err)
+                exec_result = ExecutionResult(
+                    ok=False,
+                    before={},
+                    after={},
+                    verification=[],
+                    error=str(exec_err),
+                )
+                try:
+                    trust_gate.record_bad_outcome(
+                        agent_id=updated_card.agent_id,
+                        capability_id=updated_card.capability,
+                        failure_reason=str(exec_err),
+                    )
+                except Exception as rec_err:
+                    logger.warning("Failed to record bad outcome: %s", rec_err)
 
             # Write ExecutionResult onto the card in docs store
             docs_store = getattr(ctx, "docs", None)
@@ -274,11 +308,16 @@ def build_router(ctx: Any) -> APIRouter:
                 incident_mgr = getattr(ctx, "incident_manager", None) or getattr(ctx, "incidents", None)
                 if incident_mgr and hasattr(incident_mgr, "close_incident"):
                     try:
-                        incident_mgr.close_incident(
+                        res = incident_mgr.close_incident(
                             updated_card.incident_id,
-                            resolved_by=f"remediation:{updated_card.capability}",
-                            resolution_summary=f"Remediation executed and verified: {updated_card.narrative}",
+                            reason=f"Remediation executed and verified: {updated_card.narrative}",
+                            outcome="resolved",
+                            operator=actor,
+                            remediation_capability=updated_card.capability,
+                            resolution_summary=f"Remediation {updated_card.capability} verified on {updated_card.target_resource}",
                         )
+                        if inspect.isawaitable(res):
+                            await res
                     except Exception as inc_err:
                         logger.warning("Failed to close incident %s: %s", updated_card.incident_id, inc_err)
 
@@ -297,12 +336,11 @@ def build_router(ctx: Any) -> APIRouter:
     @router.post("/approvals/{approval_id}:reject")
     async def reject_card(
         approval_id: str,
-        request: Request,
         body: ApprovalDecisionRequest | None = None,
-        operator: Annotated[Any, Depends(operator_dep)] = None,
+        operator: Any = Depends(operator_dep),  # noqa: B008
     ) -> dict[str, Any]:
         """Reject an approval card with operator identity."""
-        actor = _get_operator_email(operator, request.headers.get("x-goog-authenticated-user-email"))
+        actor = _get_operator_email(operator)
         try:
             updated_card, audit = trust_gate.decide_approval(
                 approval_id,

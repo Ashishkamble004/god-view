@@ -155,7 +155,7 @@ def test_global_kill_switch_drains_one_inflight_and_auto_expires_new_approvals()
         trust_level_required=3,
         narrative="Rollback regression",
         evidence_pack_id="evp-20261016-0009",
-        rupee_impact=500000,
+        financial_impact=500000.0,
         reversal_recipe={"capability": "git.create_rollback_pr"},
     )
     assert card.decision == "expired"
@@ -170,7 +170,7 @@ def test_global_kill_switch_drains_one_inflight_and_auto_expires_new_approvals()
         trust_level_required=3,
         narrative="Rollback regression",
         evidence_pack_id="evp-20261016-0010",
-        rupee_impact=500000,
+        financial_impact=500000.0,
         reversal_recipe={"capability": "git.create_rollback_pr"},
     )
     assert card_normal.decision == "pending"

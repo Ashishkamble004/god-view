@@ -16,10 +16,10 @@ import logging
 import os
 import uuid
 from datetime import UTC, datetime
-from typing import Annotated, Any
+from typing import Any
 
 import httpx
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from godview_shared.contracts import NervousSystemEvent
 from pydantic import BaseModel
 
@@ -58,26 +58,21 @@ class HibernateRequest(BaseModel):
     reason: str | None = None
 
 
-def _get_operator_email(operator: Any, header_email: str | None = None) -> str:
-    if operator is not None:
-        if isinstance(operator, str):
-            email = operator
-        elif hasattr(operator, "email"):
-            email = str(operator.email)
-        elif hasattr(operator, "principal"):
-            email = str(operator.principal)
-        else:
-            email = str(operator)
-        clean = email.split(":")[-1].strip()
-        if clean:
-            return clean
-
-    if header_email:
-        clean = header_email.split(":")[-1].strip()
-        if clean:
-            return clean
-
-    return "operator@godview.test"
+def _get_operator_email(operator: Any) -> str:
+    if operator is None:
+        raise HTTPException(status_code=401, detail="Unauthorized: valid operator identity required")
+    if isinstance(operator, str):
+        email = operator
+    elif hasattr(operator, "email"):
+        email = str(operator.email)
+    elif hasattr(operator, "principal"):
+        email = str(operator.principal)
+    else:
+        email = str(operator)
+    clean = email.split(":")[-1].strip()
+    if clean:
+        return clean
+    raise HTTPException(status_code=401, detail="Unauthorized: valid operator identity required")
 
 
 def _get_env_mode(ctx: Any) -> str:
@@ -174,17 +169,22 @@ def build_router(ctx: Any) -> APIRouter:
 
     async def operator_dep(
         request: Request,
-        x_goog_authenticated_user_email: Annotated[
-            str | None, Header(alias="X-Goog-Authenticated-User-Email")
-        ] = None,
     ) -> Any:
         if ctx and hasattr(ctx, "auth") and ctx.auth is not None:
             require_op = getattr(ctx.auth, "require_operator", None)
             if callable(require_op):
-                return await require_op(request)
+                try:
+                    return await require_op(request)
+                except HTTPException:
+                    pass
         env_mode = _get_env_mode(ctx)
-        if env_mode == "hermetic" or x_goog_authenticated_user_email:
-            return _get_operator_email(None, x_goog_authenticated_user_email)
+        if env_mode == "hermetic":
+            header_email = (
+                request.headers.get("x-goog-authenticated-user-email")
+                or request.headers.get("x-godview-test-principal")
+                or "operator@local.hermetic"
+            )
+            return header_email.split(":")[-1].strip()
         raise HTTPException(status_code=401, detail="Unauthorized: valid operator identity required")
 
     trust_gate: TrustGate
@@ -231,7 +231,7 @@ def build_router(ctx: Any) -> APIRouter:
 
     @router.get("/operator/state")
     async def get_operator_state(
-        operator: Annotated[Any, Depends(operator_dep)] = None,
+        operator: Any = Depends(operator_dep),  # noqa: B008
     ) -> dict[str, Any]:
         """Fetch current operator controls state (kill switch, pause, hibernate)."""
         docs_store = getattr(ctx, "docs", None)
@@ -249,7 +249,7 @@ def build_router(ctx: Any) -> APIRouter:
     @router.post("/operator/kill-switch")
     async def toggle_kill_switch(
         body: KillSwitchRequest,
-        operator: Annotated[Any, Depends(operator_dep)] = None,
+        operator: Any = Depends(operator_dep),  # noqa: B008
     ) -> dict[str, Any]:
         """Toggle kill switch by adjusting Cloud Armor rule preview on observed public backend."""
         actor = _get_operator_email(operator)
@@ -318,7 +318,7 @@ def build_router(ctx: Any) -> APIRouter:
     @router.post("/operator/pause")
     async def pause_tenant(
         body: PauseRequest | None = None,
-        operator: Annotated[Any, Depends(operator_dep)] = None,
+        operator: Any = Depends(operator_dep),  # noqa: B008
     ) -> dict[str, Any]:
         """Pause tenant operations via discovered OpenAPI admin action."""
         actor = _get_operator_email(operator)
@@ -376,7 +376,7 @@ def build_router(ctx: Any) -> APIRouter:
     @router.post("/operator/resume")
     async def resume_tenant(
         body: PauseRequest | None = None,
-        operator: Annotated[Any, Depends(operator_dep)] = None,
+        operator: Any = Depends(operator_dep),  # noqa: B008
     ) -> dict[str, Any]:
         """Resume tenant operations via discovered OpenAPI admin action."""
         actor = _get_operator_email(operator)
@@ -432,36 +432,66 @@ def build_router(ctx: Any) -> APIRouter:
     @router.post("/operator/hibernate")
     async def toggle_hibernate(
         body: HibernateRequest,
-        operator: Annotated[Any, Depends(operator_dep)] = None,
+        operator: Any = Depends(operator_dep),  # noqa: B008
     ) -> dict[str, Any]:
-        """Hibernate or wake the platform: run Cloud Scheduler hibernate job via act SA and scale agents."""
+        """Hibernate or wake the platform: run Cloud Run hibernate job via act SA and scale agents."""
         actor = _get_operator_email(operator)
-        project_id = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
-        location = os.environ.get("GODVIEW_REGIONS", "us-central1").split(",")[0].strip()
-        job_name = body.job_name or os.environ.get("HIBERNATE_JOB_NAME") or "godview-hibernate"
-        if not job_name.startswith("projects/"):
-            job_name = f"projects/{project_id}/locations/{location}/jobs/{job_name}"
-
         env_mode = _get_env_mode(ctx)
 
+        project_id = (
+            os.environ.get("GOOGLE_CLOUD_PROJECT", "")
+            or getattr(ctx, "project_id", "")
+            or (getattr(ctx, "settings", None) and getattr(ctx.settings, "gcp_project_id", ""))
+        )
+        location = (
+            (getattr(ctx, "settings", None) and getattr(ctx.settings, "region", ""))
+            or os.environ.get("GODVIEW_REGIONS", "us-central1").split(",")[0].strip()
+            or "us-central1"
+        )
+
+        if env_mode == "hermetic":
+            project_id = project_id or "hermetic"
+            location = location or "us-central1"
+        elif not project_id:
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot trigger hibernate: GOOGLE_CLOUD_PROJECT is required outside hermetic mode",
+            )
+
+        discovered_job = None
+        disc = getattr(ctx, "discovered_services", {}) or {}
+        for s in disc.values():
+            if isinstance(s, dict):
+                s_name = s.get("name") or s.get("id") or ""
+                labels = s.get("labels") or {}
+                if "hibernate" in str(s_name) or labels.get("godview_role") == "hibernate":
+                    discovered_job = str(s_name)
+                    break
+
+        raw_job = body.job_name or os.environ.get("HIBERNATE_JOB_NAME") or discovered_job or "god-view-hibernate-job"
+        if raw_job.startswith("projects/"):
+            job_name = raw_job
+        else:
+            job_name = f"projects/{project_id}/locations/{location}/jobs/{raw_job}"
+
         if body.enabled:
-            # 1. Trigger Cloud Scheduler hibernate job via act SA
+            # 1. Trigger Cloud Run v2 hibernate job via act SA
             if env_mode != "hermetic":
                 try:
                     token = await get_act_sa_access_token(ctx, project_id=project_id)
                     headers = {"Authorization": f"Bearer {token}"}
                     client = getattr(ctx, "http_client", None) or httpx.AsyncClient()
-                    run_url = f"{SCHEDULER_API_BASE}/{job_name}:run"
+                    run_url = f"https://run.googleapis.com/v2/{job_name}:run"
                     resp = await client.post(run_url, headers=headers, timeout=15.0)
                     if resp.status_code not in (200, 204):
                         raise HTTPException(
                             status_code=502,
-                            detail=f"Cloud Scheduler hibernate job run failed with status {resp.status_code}: {resp.text}",
+                            detail=f"Cloud Run hibernate job run failed with status {resp.status_code}: {resp.text}",
                         )
                 except httpx.HTTPError as exc:
                     raise HTTPException(
                         status_code=502,
-                        detail=f"Failed to trigger Cloud Scheduler hibernate job: {exc}",
+                        detail=f"Failed to trigger Cloud Run hibernate job: {exc}",
                     ) from exc
 
             # 2. Scale agents to 0
