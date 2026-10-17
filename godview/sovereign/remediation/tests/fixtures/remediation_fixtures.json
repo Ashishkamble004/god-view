@@ -1,0 +1,71 @@
+{
+  "cloud_armor": {
+    "security_policy": "god-view-edge-policy",
+    "rule_1000": {
+      "priority": 1000,
+      "action": "deny(403)",
+      "preview": false,
+      "match": {
+        "expr": {
+          "expression": "evaluatePreconfiguredWaf('sqli-v33-stable') || evaluatePreconfiguredWaf('xss-v33-stable') || evaluatePreconfiguredWaf('lfi-v33-stable') || evaluatePreconfiguredWaf('rfi-v33-stable')"
+        }
+      },
+      "description": "OWASP CRS protection"
+    },
+    "rule_100": {
+      "priority": 100,
+      "action": "deny(403)",
+      "preview": true,
+      "match": {
+        "versionedExpr": "SRC_IPS_V1",
+        "config": {
+          "srcIpRanges": ["*"]
+        }
+      },
+      "description": "Emergency Kill Switch"
+    }
+  },
+  "cloud_run": {
+    "service_name": "svc-origination-901",
+    "ingress": "INGRESS_TRAFFIC_ALL",
+    "iam_policy": {
+      "bindings": [
+        {
+          "role": "roles/run.invoker",
+          "members": ["allUsers"]
+        }
+      ]
+    },
+    "template": {
+      "scaling": {
+        "minInstanceCount": 0,
+        "maxInstanceCount": 5
+      },
+      "timeout": "15s"
+    }
+  },
+  "pubsub": {
+    "dlq_topic": "godview-nervous-system-dlq",
+    "target_topic": "godview-nervous-system",
+    "subscription": "godview-nervous-system-dlq-sub",
+    "messages": [
+      {
+        "ackId": "ack-101",
+        "message": {
+          "data": "eyJldmVudCI6ICJjaGFuZ2VfZXZlbnQifQ==",
+          "attributes": {"source": "audit"}
+        }
+      }
+    ]
+  },
+  "kubernetes": {
+    "deployment": "workload-api",
+    "namespace": "default",
+    "containers": [
+      {
+        "name": "workload-api",
+        "image": "gcr.io/test/workload:v1"
+      }
+    ]
+  }
+}

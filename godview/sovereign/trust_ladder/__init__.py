@@ -25,10 +25,21 @@ from godview_shared.contracts import (
     TrustRecord,
     TrustViolation,
 )
-from godview_shared.fakes import InMemoryFirestore, InMemoryPubSub
 
 from godview.sovereign.court_manager.token_governor import TokenBudgetGovernor
 from godview.sovereign.nervous_system import NervousSystemRouter
+
+PLATFORM_ACTION_PREFIXES: tuple[str, ...] = (
+    "armor.",
+    "run.",
+    "gke.",
+    "pubsub.",
+    "k8s.",
+)
+
+
+def _is_platform_action(action_type: str) -> bool:
+    return any(action_type.startswith(p) for p in PLATFORM_ACTION_PREFIXES)
 
 N1_RECOMMENDATIONS_FOR_L2: int = 3
 N2_APPROVED_EXECUTIONS_FOR_L3: int = 5
@@ -40,14 +51,19 @@ class TrustGate:
 
     def __init__(
         self,
-        firestore: InMemoryFirestore,
-        pubsub: InMemoryPubSub,
+        firestore: Any = None,
+        pubsub: Any = None,
         token_governor: TokenBudgetGovernor | None = None,
+        *,
+        docs: Any = None,
+        bus: Any = None,
+        clock: Any = None,
     ) -> None:
-        self._firestore = firestore
-        self._pubsub = pubsub
+        self._firestore = docs if docs is not None else firestore
+        self._pubsub = bus if bus is not None else pubsub
         self._token_governor = token_governor
-        self._router = NervousSystemRouter(pubsub=pubsub)
+        self._clock = clock
+        self._router = NervousSystemRouter(pubsub=self._pubsub) if self._pubsub is not None else None
         self.global_kill_switch: bool = False
         self._inflight_steps: list[str] = []
         self._queued_steps: list[str] = []
@@ -59,16 +75,44 @@ class TrustGate:
     def _record_id(agent_id: str, action_type: str) -> str:
         return f"{agent_id}__{action_type}"
 
-    def get_or_create_record(self, agent_id: str, action_type: str) -> TrustRecord:
-        """Fetch or initialize the TrustRecord for (agent_id, action_type)."""
+    def get_or_create_record(
+        self,
+        agent_id: str,
+        action_type: str,
+        *,
+        pre_promote_platform: bool = True,
+    ) -> TrustRecord:
+        """Fetch or initialize the TrustRecord for (agent_id, action_type).
+
+        Pre-promotes platform actions to L2 on the proving ground (Plan §3.4 item 5).
+        """
         doc_id = self._record_id(agent_id, action_type)
-        raw = self._firestore.get("trust_records", doc_id)
-        if raw is not None:
-            return TrustRecord.model_validate(raw)
+        if self._firestore is not None:
+            raw = self._firestore.get("trust_records", doc_id)
+            if raw is not None:
+                return TrustRecord.model_validate(raw)
+
+        initial_level = 2 if (pre_promote_platform and _is_platform_action(action_type)) else 0
+        now_iso = datetime.now(tz=UTC).isoformat()
+        history = []
+        if initial_level > 0:
+            history.append(
+                TrustHistoryEntry.model_validate(
+                    {
+                        "from": 0,
+                        "to": initial_level,
+                        "at": now_iso,
+                        "reason": "Proving ground pre-promoted to L2 for platform actions",
+                    }
+                )
+            )
+
         rec = TrustRecord(
             agent_id=agent_id,
             action_type=action_type,
-            level=0,
+            level=initial_level,
+            history=history,
+            last_promoted_at=now_iso if initial_level > 0 else None,
         )
         return self._save_record(rec)
 
@@ -506,7 +550,7 @@ class TrustGate:
             rupee_impact=rupee_impact,
             reversal_recipe=reversal_recipe or {"capability": capability_id},
             requested_at=now.isoformat(),
-            expires_at=(now + timedelta(minutes=15)).isoformat(),
+            expires_at=(now + timedelta(minutes=30)).isoformat(),
             decision=decision,
             decided_by="system:kill-switch" if self.global_kill_switch else None,
             decided_at=now.isoformat() if self.global_kill_switch else None,
@@ -599,6 +643,11 @@ class TrustGate:
             reversal_recipe=reversal_recipe or {"capability": action},
         )
         self._audit_records[audit_id] = doc
+        if self._firestore is not None:
+            try:
+                self._firestore.set("audit_records", audit_id, doc.model_dump(mode="json"))
+            except Exception:
+                pass
         return doc
 
 
