@@ -2,7 +2,7 @@
 
 Covers TDD §2.4 (SentinelDefinition, EvidencePack), §4 (10 s cadence, 8 check classes,
 same-hour baselines excluding probe rows, shadow vs enforced invariants, planned
-operator action suppression, KNN recall, and A2A wake emission).
+operator action suppression, KNN recall, and A2A wake dispatch).
 """
 
 from __future__ import annotations
@@ -87,7 +87,13 @@ async def test_eight_check_classes_and_evidence_pack_wake() -> None:
         },
     )
 
-    engine = SentinelEngine(firestore=fs, bigquery=bq, pubsub=ps, agent_engine=ae)
+    engine = SentinelEngine(
+        firestore=fs,
+        bigquery=bq,
+        pubsub=ps,
+        agent_engine=ae,
+        embed_fn=lambda _: vec,
+    )
     assert engine.cadence_s == 10
 
     # Register all 8 check classes
@@ -145,8 +151,15 @@ async def test_shadow_sentinel_and_planned_operator_action_suppression() -> None
     ps = InMemoryPubSub()
     ae = InMemoryAgentEngine()
     ae.deploy_agent("application__svc-alpha-01", "application", min_instances=0)
+    vec = [1.0] + [0.0] * 767
 
-    engine = SentinelEngine(firestore=fs, bigquery=bq, pubsub=ps, agent_engine=ae)
+    engine = SentinelEngine(
+        firestore=fs,
+        bigquery=bq,
+        pubsub=ps,
+        agent_engine=ae,
+        embed_fn=lambda _: vec,
+    )
 
     # Shadow sentinel
     shadow_snt = _make_sentinel(

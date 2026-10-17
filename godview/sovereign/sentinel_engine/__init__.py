@@ -365,20 +365,20 @@ class SentinelEngine:
                     )
 
 
-                if self._firestore is not None and hasattr(self._firestore, "get"):
-                    agent_raw = self._firestore.get("court_agents", snt.target_agent_id)
-                    if agent_raw is not None:
-                        self._firestore.set(
-                            "court_agents",
-                            snt.target_agent_id,
-                            {
-                                "wakes_7d": int(agent_raw.get("wakes_7d", 0)) + 1,
-                                "last_wake_at": now_iso,
-                            },
-                            merge=True,
-                        )
-
-                report.wakes_sent.append(evp)
+                if was_opened:
+                    if self._firestore is not None and hasattr(self._firestore, "get"):
+                        agent_raw = self._firestore.get("court_agents", snt.target_agent_id)
+                        if agent_raw is not None:
+                            self._firestore.set(
+                                "court_agents",
+                                snt.target_agent_id,
+                                {
+                                    "wakes_7d": int(agent_raw.get("wakes_7d", 0)) + 1,
+                                    "last_wake_at": now_iso,
+                                },
+                                merge=True,
+                            )
+                    report.wakes_sent.append(evp)
 
         return report
 

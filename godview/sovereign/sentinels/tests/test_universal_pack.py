@@ -79,7 +79,7 @@ async def test_t1_lb_requests_denied_by_security_policy_and_negative() -> None:
     """T1 Repro: Cloud Armor WAF blocking legitimate JSON POSTs and OAuth callbacks."""
     invoker = CapabilityInvoker()
 
-    # Fixture: Cloud Logging entries showing WAF block on JSON POST and OAuth callback
+    # Fixture: Cloud Logging entries showing WAF block on JSON POST and OAuth callback (no invented requestHeaders)
     t1_log_entries = [
         {
             "timestamp": "2026-10-17T12:05:01Z",
@@ -88,10 +88,11 @@ async def test_t1_lb_requests_denied_by_security_policy_and_negative() -> None:
                 "requestUrl": "https://api.example.com/v1/orders/apply",
                 "status": 403,
                 "remoteIp": "35.192.10.5",
+                "requestSize": 512,
+                "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
             },
             "jsonPayload": {
                 "statusDetails": "denied_by_security_policy",
-                "requestHeaders": {"content-type": "application/json"},
                 "enforcedSecurityPolicy": {
                     "name": "edge-security-policy",
                     "priority": 1000,
@@ -107,6 +108,7 @@ async def test_t1_lb_requests_denied_by_security_policy_and_negative() -> None:
                 "requestUrl": "https://login.example.com/_gcp_gatekeeper/authenticate?state=xyz",
                 "status": 403,
                 "remoteIp": "35.192.10.5",
+                "requestSize": 128,
             },
             "jsonPayload": {
                 "statusDetails": "denied_by_security_policy",
@@ -136,9 +138,10 @@ async def test_t1_lb_requests_denied_by_security_policy_and_negative() -> None:
     res = await evaluator.evaluate(sentinel, ctx)
     assert res.breached is True
     assert res.observed >= 1.0
-    assert "owasp-crs-v030301-id942432-sqli" in (res.signature or "")
+    assert "anomaly-sqli-pl4" in (res.signature or "")
     assert res.severity_override == "sev1"
     assert len(res.evidence_samples) >= 1
+    assert res.details.get("preconfigured_expr_ids") == ["owasp-crs-v030301-id942432-sqli"]
 
     # Negative test: healthy 200 traffic raises no breach
     healthy_log_entries = [
@@ -158,6 +161,169 @@ async def test_t1_lb_requests_denied_by_security_policy_and_negative() -> None:
     res_clean = await evaluator.evaluate(sentinel, ctx)
     assert res_clean.breached is False
     assert res_clean.observed == 0.0
+
+
+@pytest.mark.unit
+async def test_waf_classifier_six_case_matrix() -> None:
+    """Adversarial Review §2(ii): 6-case test matrix for WAF classifier."""
+    evaluator = get_evaluator("lb_requests")
+
+    # Case 1: T1 Replay with canary denial -> sev1 incident
+    invoker_c1 = CapabilityInvoker()
+    t1_replay_entries = [
+        {
+            "timestamp": f"2026-10-17T12:05:{i:02d}Z",
+            "httpRequest": {
+                "requestMethod": "POST",
+                "requestUrl": "https://api.example.com/v1/orders/submit",
+                "status": 403,
+                "remoteIp": f"35.192.10.{i % 6 + 1}",
+                "requestSize": 384,
+                "userAgent": "Mozilla/5.0",
+            },
+            "jsonPayload": {
+                "statusDetails": "denied_by_security_policy",
+                "enforcedSecurityPolicy": {
+                    "name": "edge-security-policy",
+                    "priority": 1000,
+                    "outcome": "DENY",
+                    "preconfiguredExprIds": ["owasp-crs-v030301-id942432-sqli"],
+                },
+            },
+        }
+        for i in range(12)
+    ]
+    invoker_c1.register_handler("logging.query_lb_requests", lambda args: t1_replay_entries)
+    invoker_c1.register_handler(
+        "http.probe",
+        lambda args: {"status_code": 403, "latency_ms": 35.0} if "?a=b-c-d" in args.get("url", "") else {"status_code": 200},
+    )
+    ctx_c1 = EvaluatorContext(invoker=invoker_c1)
+    snt_c1 = build_lb_requests_sentinel("edge-security-policy", host="api.example.com", path_prefix="/v1")
+    res_c1 = await evaluator.evaluate(snt_c1, ctx_c1)
+    assert res_c1.breached is True
+    assert res_c1.severity_override == "sev1"
+    assert "anomaly-sqli-pl4" in (res_c1.signature or "")
+
+    # Case 2: Scanner traffic: 300 denies from 1 IP across 120 paths -> NO incident, posture note recorded
+    invoker_c2 = CapabilityInvoker()
+    scanner_entries = [
+        {
+            "timestamp": f"2026-10-17T12:00:{i % 60:02d}Z",
+            "httpRequest": {
+                "requestMethod": "GET",
+                "requestUrl": f"https://api.example.com/scan_path_{i}",
+                "status": 403,
+                "remoteIp": "198.51.100.99",
+                "userAgent": "sqlmap/1.6#stable",
+            },
+            "jsonPayload": {
+                "statusDetails": "denied_by_security_policy",
+                "enforcedSecurityPolicy": {
+                    "name": "edge-security-policy",
+                    "priority": 1000,
+                    "outcome": "DENY",
+                    "preconfiguredExprIds": ["owasp-crs-v030301-id941100-xss"],
+                },
+            },
+        }
+        for i in range(50)
+    ]
+    invoker_c2.register_handler("logging.query_lb_requests", lambda args: scanner_entries)
+    invoker_c2.register_handler("http.probe", lambda args: {"status_code": 200, "latency_ms": 20.0})
+    ctx_c2 = EvaluatorContext(invoker=invoker_c2)
+    snt_c2 = build_lb_requests_sentinel("edge-security-policy", host="api.example.com")
+    res_c2 = await evaluator.evaluate(snt_c2, ctx_c2)
+    assert res_c2.breached is False
+    assert "WAF active:" in res_c2.details.get("posture_note", "")
+
+    # Case 3: Mixed: T1 benign + Scanner together -> one incident, attack samples excluded from legit count
+    invoker_c3 = CapabilityInvoker()
+    mixed_entries = t1_replay_entries + scanner_entries
+    invoker_c3.register_handler("logging.query_lb_requests", lambda args: mixed_entries)
+    invoker_c3.register_handler(
+        "http.probe",
+        lambda args: {"status_code": 403, "latency_ms": 30.0} if "?a=b-c-d" in args.get("url", "") else {"status_code": 200},
+    )
+    ctx_c3 = EvaluatorContext(invoker=invoker_c3)
+    snt_c3 = build_lb_requests_sentinel("edge-security-policy", host="api.example.com")
+    res_c3 = await evaluator.evaluate(snt_c3, ctx_c3)
+    assert res_c3.breached is True
+    assert res_c3.details.get("attack_count", 0) > 0
+    assert res_c3.details.get("legit_count", 0) > 0
+
+    # Case 4: IAP 403s with outcome: ACCEPT -> NO WAF incident; iap_or_backend_403 counted
+    invoker_c4 = CapabilityInvoker()
+    iap_403_entries = [
+        {
+            "timestamp": "2026-10-17T12:05:01Z",
+            "httpRequest": {
+                "requestMethod": "GET",
+                "requestUrl": "https://internal.example.com/admin",
+                "status": 403,
+                "remoteIp": "35.192.10.5",
+            },
+            "jsonPayload": {
+                "statusDetails": "response_sent_by_backend",
+                "enforcedSecurityPolicy": {
+                    "name": "edge-security-policy",
+                    "priority": 1000,
+                    "outcome": "ACCEPT",
+                },
+            },
+        }
+    ]
+    invoker_c4.register_handler("logging.query_lb_requests", lambda args: iap_403_entries)
+    invoker_c4.register_handler("http.probe", lambda args: {"status_code": 200, "latency_ms": 20.0})
+    ctx_c4 = EvaluatorContext(invoker=invoker_c4)
+    snt_c4 = build_lb_requests_sentinel("edge-security-policy", host="internal.example.com")
+    res_c4 = await evaluator.evaluate(snt_c4, ctx_c4)
+    assert res_c4.breached is False
+    assert res_c4.details.get("iap_or_backend_403_count", 0) == 1
+
+    # Case 5: Post-fix convergence: canary passes and legit denies drop to 0 -> incident clear
+    invoker_c5 = CapabilityInvoker()
+    invoker_c5.register_handler("logging.query_lb_requests", lambda args: [])
+    invoker_c5.register_handler("http.probe", lambda args: {"status_code": 200, "latency_ms": 25.0})
+    ctx_c5 = EvaluatorContext(invoker=invoker_c5)
+    snt_c5 = build_lb_requests_sentinel("edge-security-policy", host="api.example.com")
+    res_c5 = await evaluator.evaluate(snt_c5, ctx_c5)
+    assert res_c5.breached is False
+    assert res_c5.observed == 0.0
+
+    # Case 6: Unknown environment: randomised host and route names with contract route -> identical decisions
+    invoker_c6 = CapabilityInvoker()
+    rand_entries = [
+        {
+            "timestamp": "2026-10-17T12:05:01Z",
+            "httpRequest": {
+                "requestMethod": "POST",
+                "requestUrl": "https://xyz-service-99.example.org/api/v2/parcels/dispatch",
+                "status": 403,
+                "remoteIp": "192.0.2.45",
+                "requestSize": 256,
+            },
+            "jsonPayload": {
+                "statusDetails": "denied_by_security_policy",
+                "enforcedSecurityPolicy": {
+                    "name": "sec-pol-prod",
+                    "priority": 2000,
+                    "outcome": "DENY",
+                    "preconfiguredExprIds": ["owasp-crs-v030301-id942432-sqli"],
+                },
+            },
+        }
+    ]
+    invoker_c6.register_handler("logging.query_lb_requests", lambda args: rand_entries)
+    invoker_c6.register_handler(
+        "http.probe",
+        lambda args: {"status_code": 403, "latency_ms": 30.0} if "?a=b-c-d" in args.get("url", "") else {"status_code": 200},
+    )
+    ctx_c6 = EvaluatorContext(invoker=invoker_c6)
+    snt_c6 = build_lb_requests_sentinel("sec-pol-prod", host="xyz-service-99.example.org")
+    res_c6 = await evaluator.evaluate(snt_c6, ctx_c6)
+    assert res_c6.breached is True
+    assert "sec-pol-prod:2000:anomaly-sqli-pl4" in (res_c6.signature or "")
 
 
 @pytest.mark.unit

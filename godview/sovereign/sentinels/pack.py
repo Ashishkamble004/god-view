@@ -19,11 +19,11 @@ from godview_shared.contracts import (
 )
 
 
-def _agent_id_for_service(service_name: str, kind: str = "cloud_run") -> str:
+def _agent_id_for_service(service_name: str, kind: str = "cloud_run", env_id: str = "env") -> str:
     """Generate canonical target agent ID without hardcoding domain roles."""
     clean_name = re.sub(r"[^a-zA-Z0-9_-]", "_", service_name)
     if kind in ("lb_frontend", "backend_service", "security_policy", "platform"):
-        return "platform__env"
+        return f"platform__{env_id}"
     return f"application__{clean_name}"
 
 
@@ -97,10 +97,9 @@ def build_posture_sentinel(
             "all_users": False,
         }
     elif resource_kind in ("backend_service", "lb_backend"):
-        default_baseline = {
-            "iap_enabled": True,
-            "require_security_policy": True,
-        }
+        # Do not force iap_enabled: True as an opinionated default;
+        # allow tfstate or first-seen to establish baseline so public backends don't false-positive
+        default_baseline = {}
 
     effective_baseline = {**default_baseline, **(baseline or {})}
 
@@ -396,10 +395,24 @@ def compile_universal_sentinels(
     edges: list[dict[str, Any] | Any] | None = None,
     business_contexts: dict[str, Any] | None = None,
     tfstate: dict[str, Any] | None = None,
+    env_id: str = "env",
 ) -> list[SentinelDefinition]:
     """Auto-compile universal sentinels for all discovered services, edges, and invariants."""
     compiled: list[SentinelDefinition] = []
     seen_ids: set[str] = set()
+
+    detected_env_id = env_id
+    for svc in services:
+        labels = svc.get("labels") if isinstance(svc, dict) else getattr(svc, "labels", None)
+        if isinstance(labels, dict):
+            if labels.get("env_id"):
+                detected_env_id = str(labels["env_id"])
+                break
+            if labels.get("environment"):
+                detected_env_id = str(labels["environment"])
+                break
+
+    platform_agent_id = f"platform__{detected_env_id}"
 
     def add(snt: SentinelDefinition) -> None:
         if snt.sentinel_id not in seen_ids:
@@ -415,15 +428,26 @@ def compile_universal_sentinels(
 
         # 1. Posture sentinel for compute & edge resources
         if kind in ("cloud_run", "backend_service", "security_policy", "gke_workload"):
-            add(build_posture_sentinel(name, resource_kind=kind))
+            add(
+                build_posture_sentinel(
+                    name,
+                    resource_kind=kind,
+                    target_agent_id=_agent_id_for_service(name, kind, detected_env_id),
+                )
+            )
 
         # 2. Golden signals sentinel for compute services
         if kind in ("cloud_run", "gke_workload", "gce_instance", "gce_vm"):
-            add(build_golden_signals_sentinel(name))
+            add(
+                build_golden_signals_sentinel(
+                    name,
+                    target_agent_id=_agent_id_for_service(name, kind, detected_env_id),
+                )
+            )
 
         # 3. Load balancer requests sentinel: compile ONE per security policy or public LB frontend/host (not per backend)
         if kind == "security_policy":
-            add(build_lb_requests_sentinel(name))
+            add(build_lb_requests_sentinel(name, target_agent_id=platform_agent_id))
         elif kind == "lb_frontend":
             front_host = None
             if isinstance(svc, dict):
@@ -438,7 +462,7 @@ def compile_universal_sentinels(
                     front_host = urllib.parse.urlparse(svc.endpoint).hostname
                 except Exception:
                     pass
-            add(build_lb_requests_sentinel(name, host=front_host))
+            add(build_lb_requests_sentinel(name, host=front_host, target_agent_id=platform_agent_id))
 
         # 4. Probe sentinel for public endpoints and probe-safe entrypoints
         candidate_urls: list[str] = []
@@ -489,15 +513,22 @@ def compile_universal_sentinels(
                 if _is_safe_public_url(str(r_url)):
                     candidate_urls.append(str(r_url))
             path = r.get("path") if isinstance(r, dict) else getattr(r, "path", None)
-            if path and str(path).startswith("/assets/") and raw_ep:
+            is_asset_path = bool(
+                re.search(
+                    r"\.(?:png|jpg|jpeg|svg|webp|ico|gif|css|js)$",
+                    str(path or ""),
+                    re.IGNORECASE,
+                )
+            ) or str(path or "").startswith("/assets/")
+            if path and is_asset_path and raw_ep:
                 candidate_urls.append(f"{str(raw_ep).rstrip('/')}/{str(path).lstrip('/')}")
 
         for target_url in candidate_urls:
-            add(build_probe_sentinel(target_url))
+            add(build_probe_sentinel(target_url, target_agent_id=platform_agent_id))
 
         # 5. PubSub health sentinel for subscriptions
         if kind == "pubsub_subscription":
-            add(build_pubsub_health_sentinel(name))
+            add(build_pubsub_health_sentinel(name, target_agent_id=platform_agent_id))
 
         # 6. Invariants compiled from BusinessContext
         biz_ctx = svc.get("business_context") if isinstance(svc, dict) else getattr(svc, "business_context", None)

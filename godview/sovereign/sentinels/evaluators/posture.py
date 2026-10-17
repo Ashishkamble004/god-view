@@ -177,6 +177,33 @@ class PostureEvaluator(BaseSentinelEvaluator):
 
             iap_cfg = target.get("iap") or {}
             iap_enabled = bool(iap_cfg.get("enabled"))
+            sec_policy = target.get("security_policy") or target.get("securityPolicy")
+
+            # If no baseline from spec or tfstate, retrieve or record first-seen snapshot
+            if not baseline and ctx.firestore is not None and hasattr(ctx.firestore, "get"):
+                saved_bl = ctx.firestore.get("posture_baselines", resource_id)
+                if saved_bl and isinstance(saved_bl, dict):
+                    baseline = saved_bl.get("baseline", {})
+                    baseline_source = saved_bl.get("baseline_source", "first_seen")
+                else:
+                    first_seen = {
+                        "iap_enabled": iap_enabled,
+                        "require_security_policy": bool(sec_policy),
+                    }
+                    baseline = first_seen
+                    baseline_source = "first_seen"
+                    try:
+                        ctx.firestore.set(
+                            "posture_baselines",
+                            resource_id,
+                            {"baseline": first_seen, "baseline_source": "first_seen"},
+                        )
+                    except Exception:
+                        pass
+
+            if not baseline_source:
+                baseline_source = "first_seen"
+
             if baseline.get("iap_enabled") is True and not iap_enabled:
                 drift_items.append(
                     {
@@ -187,7 +214,6 @@ class PostureEvaluator(BaseSentinelEvaluator):
                     }
                 )
 
-            sec_policy = target.get("security_policy") or target.get("securityPolicy")
             if not sec_policy and baseline.get("require_security_policy", False):
                 drift_items.append(
                     {
