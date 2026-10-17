@@ -424,19 +424,48 @@ def compile_universal_sentinels(
         if kind in ("lb_frontend", "backend_service", "security_policy"):
             add(build_lb_requests_sentinel(name))
 
-        # 4. Probe sentinel for public endpoints and entrypoints
+        # 4. Probe sentinel for public endpoints and probe-safe entrypoints
         candidate_urls: list[str] = []
+        is_public_entrypoint = (
+            kind in ("lb_frontend", "api_gateway", "gateway")
+            or getattr(svc, "tier", None) == "edge"
+            or (isinstance(svc, dict) and svc.get("tier") == "edge")
+            or getattr(svc, "is_public", False)
+            or (isinstance(svc, dict) and svc.get("is_public", False))
+        )
+
+        def _is_safe_public_url(u: str, is_public: bool = is_public_entrypoint) -> bool:
+            # Do NOT probe internal-only .run.app URLs unless explicitly on a public entrypoint
+            if ".run.app" in u and not is_public:
+                return False
+            return u.startswith(("http://", "https://"))
+
         raw_ep = getattr(svc, "endpoint", None) or (svc.get("endpoint") if isinstance(svc, dict) else None)
-        if raw_ep:
+        if raw_ep and _is_safe_public_url(str(raw_ep)):
             candidate_urls.append(str(raw_ep))
         locator = getattr(svc, "locator", None) or (svc.get("locator") if isinstance(svc, dict) else None)
-        if locator and str(locator).startswith(("http://", "https://")):
+        if locator and _is_safe_public_url(str(locator)):
             candidate_urls.append(str(locator))
-        routes = getattr(svc, "routes", []) or (svc.get("routes") if isinstance(svc, dict) else [])
+
+        if isinstance(svc, dict):
+            raw_routes = svc.get("routes")
+        else:
+            raw_routes = getattr(svc, "routes", None)
+        routes = raw_routes if isinstance(raw_routes, list) else []
         for r in routes:
             r_url = r.get("url") if isinstance(r, dict) else getattr(r, "url", None)
-            if r_url and str(r_url).startswith(("http://", "https://")):
-                candidate_urls.append(str(r_url))
+            is_probe_safe = (
+                (isinstance(r, dict) and (r.get("probe_safe") is True or r.get("x-godview-probe-safe") is True))
+                or getattr(r, "probe_safe", False)
+                or getattr(r, "x_godview_probe_safe", False)
+                or (r_url and not str(r_url).endswith(".run.app") and ".run.app" not in str(r_url))
+            )
+            if r_url and (is_probe_safe or is_public_entrypoint):
+                if _is_safe_public_url(str(r_url)):
+                    candidate_urls.append(str(r_url))
+            path = r.get("path") if isinstance(r, dict) else getattr(r, "path", None)
+            if path and str(path).startswith("/assets/") and raw_ep:
+                candidate_urls.append(f"{str(raw_ep).rstrip('/')}/{str(path).lstrip('/')}")
 
         for target_url in candidate_urls:
             add(build_probe_sentinel(target_url))
@@ -446,30 +475,31 @@ def compile_universal_sentinels(
             add(build_pubsub_health_sentinel(name))
 
         # 6. Invariants compiled from BusinessContext
-        biz_ctx = getattr(svc, "business_context", None) or (
-            svc.get("business_context") if isinstance(svc, dict) else None
-        )
+        biz_ctx = svc.get("business_context") if isinstance(svc, dict) else getattr(svc, "business_context", None)
         if biz_ctx:
-            invariants = getattr(biz_ctx, "invariants", []) or (
-                biz_ctx.get("invariants", []) if isinstance(biz_ctx, dict) else []
+            raw_invariants = (
+                biz_ctx.get("invariants") if isinstance(biz_ctx, dict) else getattr(biz_ctx, "invariants", None)
             )
+            invariants = raw_invariants if isinstance(raw_invariants, list) else []
             for i, inv in enumerate(invariants):
                 stmt = inv.get("check") or inv.get("statement") if isinstance(inv, dict) else str(inv)
                 inv_id = f"{name}_inv_{i+1}"
                 if stmt:
                     add(build_invariant_sentinel(inv_id, stmt, state="shadow"))
 
-            journeys = getattr(biz_ctx, "journeys", []) or (
-                biz_ctx.get("journeys", []) if isinstance(biz_ctx, dict) else []
+            raw_journeys = (
+                biz_ctx.get("journeys") if isinstance(biz_ctx, dict) else getattr(biz_ctx, "journeys", None)
             )
+            journeys = raw_journeys if isinstance(raw_journeys, list) else []
             for j in journeys:
                 j_name = j.get("name") if isinstance(j, dict) else str(j)
                 if j_name:
                     add(build_journey_conformance_sentinel(j_name))
 
-            kpis = getattr(biz_ctx, "kpis", []) or (
-                biz_ctx.get("kpis", []) if isinstance(biz_ctx, dict) else []
+            raw_kpis = (
+                biz_ctx.get("kpis") if isinstance(biz_ctx, dict) else getattr(biz_ctx, "kpis", None)
             )
+            kpis = raw_kpis if isinstance(raw_kpis, list) else []
             for k in kpis:
                 k_name = k.get("name") if isinstance(k, dict) else str(k)
                 if k_name:

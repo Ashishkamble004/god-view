@@ -13,8 +13,8 @@ Implements TDD §2.4, §3.3 & §4:
 
 from __future__ import annotations
 
-import hashlib
-import math
+import logging
+import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -40,13 +40,7 @@ from godview_shared.contracts import (
 from godview.sovereign.incidents.models import IncidentDoc
 from godview.sovereign.sentinels.models import SentinelEvaluation
 
-
-def _embed_symptom_768(text: str) -> list[float]:
-    """Deterministic 768-dim unit-normalized vector for similarity recall."""
-    digest = hashlib.sha256(text.encode("utf-8")).digest()
-    raw = [((digest[i % len(digest)] / 255.0) - 0.5) for i in range(768)]
-    norm = math.sqrt(sum(v * v for v in raw)) or 1.0
-    return [v / norm for v in raw]
+logger = logging.getLogger(__name__)
 
 
 class IncidentManager:
@@ -77,11 +71,46 @@ class IncidentManager:
         self._trust_gate = trust_gate
         self._clock = clock or getattr(ctx, "clock", None) or (lambda: datetime.now(tz=UTC))
         self.auto_close_ticks = auto_close_ticks
-        self._embed_fn = embed_fn or _embed_symptom_768
+        self._embed_fn = embed_fn
 
         self._active_incidents: dict[str, IncidentDoc] = {}
-        self._inc_seq: int = 0
-        self._evp_seq: int = 0
+        self._load_active_incidents_from_store()
+
+    def _get_embedding(self, text: str) -> list[float] | None:
+        """Return embedding vector from provided embed_fn or ctx.llm; otherwise None."""
+        if self._embed_fn is not None:
+            try:
+                return self._embed_fn(text)
+            except Exception:
+                return None
+        llm = getattr(self._ctx, "llm", None)
+        if llm is not None and hasattr(llm, "embed_sync"):
+            try:
+                return llm.embed_sync(text)
+            except Exception:
+                return None
+        return None
+
+    def _load_active_incidents_from_store(self) -> None:
+        """Load open incidents from Firestore/document store into _active_incidents."""
+        if self._firestore is None or not hasattr(self._firestore, "list_docs"):
+            return
+        try:
+            docs = self._firestore.list_docs("incidents")
+            for d in docs:
+                if d.get("outcome") == "open":
+                    try:
+                        inc = IncidentDoc.model_validate(d)
+                        if inc.dedupe_key:
+                            self._active_incidents[inc.dedupe_key] = inc
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    def load_active_incidents(self) -> None:
+        """Explicit entrypoint to synchronize active incidents from store."""
+        self._load_active_incidents_from_store()
 
     def make_dedupe_key(self, sentinel_class: str, resource_id: str, signature: str) -> str:
         """Construct canonical dedupe key: `class:resource:signature`."""
@@ -90,14 +119,14 @@ class IncidentManager:
         return f"{sentinel_class}:{res_clean}:{sig_clean}"
 
     def _generate_incident_id(self, now: datetime) -> str:
-        self._inc_seq += 1
-        date_str = now.strftime("%Y%m%d")
-        return f"inc-{date_str}-{self._inc_seq:04d}"
+        date_str = now.strftime("%Y%m%d%H%M%S")
+        rand_suffix = uuid.uuid4().hex[:6]
+        return f"inc-{date_str}-{rand_suffix}"
 
     def _generate_evp_id(self, now: datetime) -> str:
-        self._evp_seq += 1
-        date_str = now.strftime("%Y%m%d")
-        return f"evp-{date_str}-{self._evp_seq:04d}"
+        date_str = now.strftime("%Y%m%d%H%M%S")
+        rand_suffix = uuid.uuid4().hex[:6]
+        return f"evp-{date_str}-{rand_suffix}"
 
     def _get_topology_neighbourhood(self, resource_id: str) -> dict[str, Any]:
         """Fetch upstream and downstream topology neighbours if discovery docs exist."""
@@ -128,12 +157,33 @@ class IncidentManager:
         evp_id = self._generate_evp_id(now)
         window_s = sentinel.check.window_s or sentinel.wake_condition.window_s or 300
 
-        # Correlated changes from Firestore change_events
+        target_agent = sentinel.target_agent_id
+        res_id = eval_result.resource_id or sentinel.source_ref
+
+        # Correlated changes from Firestore change_events (strictly filtered by resource and <=30m window)
         correlated_changes: list[EvidenceCorrelatedChange] = []
         if self._firestore is not None and hasattr(self._firestore, "list_docs"):
             try:
                 change_docs = self._firestore.list_docs("change_events")
-                for chg in change_docs[:5]:
+                for chg in change_docs:
+                    chg_res = str(chg.get("target_resource") or chg.get("service") or chg.get("resource_id") or "")
+                    chg_affected = [str(a) for a in chg.get("affected_services", [])]
+                    res_match = (
+                        (res_id and (res_id in chg_res or chg_res in res_id))
+                        or any(res_id in a for a in chg_affected)
+                    )
+                    if not res_match:
+                        continue
+
+                    chg_time_str = chg.get("occurred_at")
+                    if chg_time_str:
+                        try:
+                            chg_dt = datetime.fromisoformat(str(chg_time_str))
+                            if abs((now - chg_dt).total_seconds()) > 1800:
+                                continue
+                        except Exception:
+                            pass
+
                     correlated_changes.append(
                         EvidenceCorrelatedChange(
                             change_event_id=chg.get("_id") or chg.get("doc_id", "chg-0"),
@@ -142,18 +192,20 @@ class IncidentManager:
                             business_summary=str(chg.get("business_summary", "Recent change")),
                         )
                     )
+                    if len(correlated_changes) >= 5:
+                        break
             except Exception:
                 pass
 
-        # Vector recall over precedent incidents & skills
+        # Vector recall over precedent incidents & skills (only if real embedding is available)
         symptom_text = (
             f"Sentinel {sentinel.sentinel_id} ({sentinel.sentinel_class}) breached: "
             f"signature={eval_result.signature} observed={eval_result.observed}"
         )
-        query_vec = self._embed_fn(symptom_text)
+        query_vec = self._get_embedding(symptom_text)
         episodic_hits: list[Any] = []
         skill_hits: list[Any] = []
-        if self._firestore is not None and hasattr(self._firestore, "find_nearest"):
+        if query_vec is not None and self._firestore is not None and hasattr(self._firestore, "find_nearest"):
             try:
                 episodic_hits = self._firestore.find_nearest(
                     "episodic_incidents",
@@ -190,7 +242,7 @@ class IncidentManager:
             ],
         )
 
-        # Golden signals summary
+        # Golden signals summary (honest metrics without synthetic defaults)
         all_non_probe: list[dict[str, Any]] = []
         if self._bigquery is not None and hasattr(self._bigquery, "get_table"):
             try:
@@ -206,7 +258,7 @@ class IncidentManager:
             durations = sorted(
                 float(r["duration_ms"]) for r in all_non_probe if r.get("duration_ms") is not None
             )
-            p95_ms = durations[int(len(durations) * 0.95)] if durations else 120.0
+            p95_ms = durations[int(len(durations) * 0.95)] if durations else 0.0
             error_rate = len(error_rows) / len(all_non_probe)
             if sentinel.sentinel_class == "golden_signal_gate" or len(error_rows) > 0:
                 gs_status = (
@@ -217,20 +269,20 @@ class IncidentManager:
             else:
                 gs_status = "green"
         else:
-            p95_ms = float(eval_result.details.get("p95_ms", 120.0))
+            p95_ms = float(eval_result.details.get("p95_ms", 0.0))
             error_rate = float(eval_result.details.get("error_rate", 0.0))
-            gs_status = "red" if (error_rate >= 0.05 or p95_ms >= 5000.0) else "green"
+            gs_status = "red" if (error_rate >= 0.05 or (p95_ms >= 5000.0 and p95_ms > 0.0)) else "green"
 
-        target_agent = sentinel.target_agent_id
-        res_id = eval_result.resource_id or sentinel.source_ref
-
-        # Budget from token governor
-        tokens_rem = 50000
-        can_esc = True
-        if self._token_governor is not None and hasattr(self._token_governor, "get_remaining_tokens"):
+        # Budget from token governor (or 0 if unconfigured)
+        tokens_rem = 0
+        can_esc = False
+        gov = self._token_governor or getattr(self._ctx, "token_governor", None)
+        if gov is None and self._ctx is not None and hasattr(self._ctx, "court_manager"):
+            gov = getattr(self._ctx.court_manager, "token_governor", None)
+        if gov is not None and hasattr(gov, "get_remaining_tokens"):
             try:
-                tokens_rem = self._token_governor.get_remaining_tokens(target_agent)
-                can_esc = self._token_governor.can_escalate_to_argon(target_agent)
+                tokens_rem = gov.get_remaining_tokens(target_agent)
+                can_esc = gov.can_escalate_to_argon(target_agent)
             except Exception:
                 pass
 
@@ -437,7 +489,7 @@ class IncidentManager:
             consecutive_breaches=sentinel.consecutive_breaches or 1,
             clear_ticks=0,
             raw_evidence=raw_ev,
-            symptom_embedding=self._embed_fn(symptom),
+            symptom_embedding=self._get_embedding(symptom),
         )
 
         self._active_incidents[dedupe_key] = incident
@@ -450,14 +502,19 @@ class IncidentManager:
         self,
         sentinel: SentinelDefinition,
         now: datetime,
+        resource_id: str | None = None,
     ) -> list[IncidentDoc]:
         """Track clear evaluation ticks and auto-close incidents clear for N ticks."""
         now_iso = now.isoformat()
         closed_incidents: list[IncidentDoc] = []
+        spec = sentinel.check.spec or {}
+        res = resource_id or spec.get("resource_id") or sentinel.source_ref or "global"
+        res_clean = res.replace(":", "_")
+        target_prefix = f"{sentinel.sentinel_class}:{res_clean}:"
+
         matching_keys = [
             k for k in self._active_incidents
-            if k.startswith(f"{sentinel.sentinel_class}:{sentinel.source_ref}:")
-            or k.startswith(f"{sentinel.sentinel_class}:")
+            if k.startswith(target_prefix)
         ]
 
         for k in matching_keys:
@@ -487,6 +544,7 @@ class IncidentManager:
         incident_id: str,
         *,
         reason: str = "",
+        outcome: str = "resolved",
         operator: str | None = None,
     ) -> IncidentDoc:
         """Manually close an incident."""
@@ -519,9 +577,15 @@ class IncidentManager:
         if target is None:
             raise KeyError(f"Unknown incident '{incident_id}'")
 
-        target.outcome = "false_positive" if "false_positive" in reason.lower() else "resolved"
+        target.outcome = outcome
         target.closed_at = now_iso
         target.root_cause = reason or target.root_cause or "Closed by operator"
+        if operator:
+            if operator not in target.participants:
+                target.participants.append(operator)
+            target.raw_evidence["closed_by"] = operator
+        if reason:
+            target.raw_evidence["close_reason"] = reason
 
         if target_key and target_key in self._active_incidents:
             del self._active_incidents[target_key]
@@ -530,10 +594,11 @@ class IncidentManager:
         await self._emit_incident_event("incident.closed", target)
         return target
 
-    def on_change_event(self, event: dict[str, Any]) -> None:
+    def on_change_event(self, event: Any) -> None:
         """Hook called on nervous-system push events (audit logs, deploys, tfstate)."""
         now_iso = self._clock().isoformat()
-        chg_id = event.get("doc_id") or event.get("change_event_id") or f"chg-{self._clock().strftime('%Y%m%d%H%M%S')}"
+        evt_dict = event.model_dump(mode="json") if hasattr(event, "model_dump") else (event if isinstance(event, dict) else {})
+        chg_id = evt_dict.get("doc_id") or evt_dict.get("change_event_id") or f"chg-{self._clock().strftime('%Y%m%d%H%M%S')}"
 
         # Persist to Firestore change_events
         if self._firestore is not None and hasattr(self._firestore, "set"):
@@ -541,23 +606,24 @@ class IncidentManager:
                 "change_events",
                 chg_id,
                 {
-                    **event,
+                    **evt_dict,
                     "doc_id": chg_id,
-                    "occurred_at": event.get("occurred_at") or now_iso,
+                    "occurred_at": evt_dict.get("occurred_at") or now_iso,
                 },
             )
 
         # Correlate with active incidents
-        affected_services = event.get("affected_services", [])
+        affected_services = evt_dict.get("affected_services", [])
+        target_res = evt_dict.get("target_resource") or evt_dict.get("service") or ""
         for inc in self._active_incidents.values():
-            if any(svc in inc.dedupe_key for svc in affected_services):
+            if (target_res and target_res in inc.dedupe_key) or any(svc in inc.dedupe_key for svc in affected_services):
                 correlated = inc.raw_evidence.setdefault("correlated_changes", [])
                 correlated.append(
                     {
                         "change_event_id": chg_id,
-                        "kind": event.get("kind", "audit"),
-                        "occurred_at": event.get("occurred_at") or now_iso,
-                        "business_summary": event.get("business_summary", ""),
+                        "kind": evt_dict.get("kind", "audit"),
+                        "occurred_at": evt_dict.get("occurred_at") or now_iso,
+                        "business_summary": evt_dict.get("business_summary", ""),
                     }
                 )
 

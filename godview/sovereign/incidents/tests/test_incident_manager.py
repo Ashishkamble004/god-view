@@ -143,7 +143,170 @@ async def test_manual_close_and_change_event_correlation() -> None:
     closed = await mgr.close_incident(
         inc.doc_id,
         reason="Remediated via Cloud Run IAM restoration",
+        outcome="resolved",
         operator="operator@example.com",
     )
     assert closed.outcome == "resolved"
     assert "Remediated" in str(closed.root_cause)
+    assert closed.raw_evidence.get("closed_by") == "operator@example.com"
+
+
+@pytest.mark.unit
+async def test_record_clear_isolation_across_resources() -> None:
+    """Verifies that record_clear on resource A never auto-closes incidents on resource B."""
+    fs = InMemoryFirestore()
+    ps = InMemoryPubSub()
+    mgr = IncidentManager(firestore=fs, bus=ps, auto_close_ticks=2)
+    now = datetime(2026, 10, 17, 12, 0, 0, tzinfo=UTC)
+
+    # Sentinel A on resource-alpha
+    snt_a = _make_dummy_sentinel(sentinel_id="snt-posture-alpha", sentinel_class="posture", source_ref="resource-alpha")
+    eval_a = SentinelEvaluation(
+        observed=1.0,
+        breached=True,
+        signature="posture_drift_ingress",
+        resource_id="resource-alpha",
+        severity_override="sev2",
+    )
+    inc_a, opened_a = await mgr.record_breach(snt_a, eval_a, now)
+    assert opened_a is True
+    assert inc_a.outcome == "open"
+
+    # Sentinel B on resource-beta of the SAME sentinel class ("posture")
+    snt_b = _make_dummy_sentinel(sentinel_id="snt-posture-beta", sentinel_class="posture", source_ref="resource-beta")
+
+    # Clear sentinel B for 5 ticks
+    for _ in range(5):
+        closed = await mgr.record_clear(snt_b, now, resource_id="resource-beta")
+        assert len(closed) == 0
+
+    # Incident A on resource-alpha must still be open with 0 clear ticks!
+    assert inc_a.outcome == "open"
+    assert inc_a.clear_ticks == 0
+
+    # Now clear sentinel A for 2 ticks -> incident A closes
+    await mgr.record_clear(snt_a, now, resource_id="resource-alpha")
+    assert inc_a.clear_ticks == 1
+    closed_a = await mgr.record_clear(snt_a, now, resource_id="resource-alpha")
+    assert len(closed_a) == 1
+    assert closed_a[0].doc_id == inc_a.doc_id
+    assert closed_a[0].outcome == "resolved"
+
+
+@pytest.mark.unit
+async def test_incident_manager_restart_persistence() -> None:
+    """Verifies that open incidents survive process restart and deduplicate properly."""
+    fs = InMemoryFirestore()
+    ps = InMemoryPubSub()
+    now = datetime(2026, 10, 17, 12, 0, 0, tzinfo=UTC)
+
+    # 1. Process 1 opens an incident
+    mgr1 = IncidentManager(firestore=fs, bus=ps, auto_close_ticks=3)
+    snt = _make_dummy_sentinel(source_ref="svc-gateway")
+    eval_b = SentinelEvaluation(
+        observed=1.0,
+        breached=True,
+        signature="http_5xx_spike",
+        resource_id="svc-gateway",
+    )
+    inc1, opened1 = await mgr1.record_breach(snt, eval_b, now)
+    assert opened1 is True
+
+    # 2. Process 2 restarts (new IncidentManager instance connected to same store)
+    mgr2 = IncidentManager(firestore=fs, bus=ps, auto_close_ticks=3)
+    # Open incident must be loaded into memory
+    assert inc1.dedupe_key in mgr2._active_incidents
+    loaded_inc = mgr2.get_incident(inc1.doc_id)
+    assert loaded_inc is not None
+    assert loaded_inc.outcome == "open"
+
+    # 3. Another breach on same signature updates existing incident across restart
+    inc2, opened2 = await mgr2.record_breach(snt, eval_b, now)
+    assert opened2 is False
+    assert inc2.doc_id == inc1.doc_id
+
+    # 4. Auto-close across 3 ticks resolves it in store
+    for _ in range(2):
+        assert len(await mgr2.record_clear(snt, now, resource_id="svc-gateway")) == 0
+    closed_list = await mgr2.record_clear(snt, now, resource_id="svc-gateway")
+    assert len(closed_list) == 1
+    assert closed_list[0].outcome == "resolved"
+
+    # In store it must be resolved
+    store_doc = fs.get("incidents", inc1.doc_id)
+    assert store_doc["outcome"] == "resolved"
+
+
+@pytest.mark.unit
+async def test_honest_evidence_pack_and_zero_fake_defaults() -> None:
+    """Verifies EvidencePack honesty: strict change correlation window, no fake 50k tokens, no SHA-256 fake embeddings."""
+    fs = InMemoryFirestore()
+    now = datetime(2026, 10, 17, 12, 0, 0, tzinfo=UTC)
+
+    # Seed change events:
+    # 1. Matching resource within 10m -> MUST correlate
+    fs.set(
+        "change_events",
+        "chg-valid",
+        {
+            "doc_id": "chg-valid",
+            "target_resource": "svc-orders",
+            "kind": "deploy",
+            "occurred_at": "2026-10-17T11:55:00Z",  # 5 min ago
+            "business_summary": "Orders deploy v2.1",
+        },
+    )
+    # 2. Matching resource but 2 hours ago -> MUST NOT correlate (>30m)
+    fs.set(
+        "change_events",
+        "chg-stale",
+        {
+            "doc_id": "chg-stale",
+            "target_resource": "svc-orders",
+            "kind": "config",
+            "occurred_at": "2026-10-17T10:00:00Z",  # 2 hours ago
+            "business_summary": "Stale config change",
+        },
+    )
+    # 3. Unrelated resource within 5m -> MUST NOT correlate
+    fs.set(
+        "change_events",
+        "chg-unrelated",
+        {
+            "doc_id": "chg-unrelated",
+            "target_resource": "svc-billing",
+            "kind": "deploy",
+            "occurred_at": "2026-10-17T11:58:00Z",
+            "business_summary": "Billing deploy",
+        },
+    )
+
+    mgr = IncidentManager(firestore=fs)
+    snt = _make_dummy_sentinel(source_ref="svc-orders")
+    eval_b = SentinelEvaluation(
+        observed=1.0,
+        breached=True,
+        signature="latency_high",
+        resource_id="svc-orders",
+    )
+
+    inc, _ = await mgr.record_breach(snt, eval_b, now)
+    evp = inc.evidence_pack
+    if hasattr(evp, "model_dump"):
+        evp_dict = evp.model_dump(mode="json")
+    else:
+        evp_dict = evp
+
+    # Correlated changes must ONLY contain chg-valid
+    chgs = evp_dict.get("correlated_changes", [])
+    assert len(chgs) == 1
+    assert chgs[0]["change_event_id"] == "chg-valid"
+
+    # Budget tokens must be 0 (honest, not fake 50k default)
+    assert evp_dict["budget"]["agent_tokens_remaining"] == 0
+    assert evp_dict["budget"]["escalation_allowed"] is False
+
+    # Vector recall must be empty when no embedding model provided (honest, no SHA-256 fake)
+    assert evp_dict["recall"]["episodic"] == []
+    assert evp_dict["recall"]["skills"] == []
+    assert inc.symptom_embedding is None

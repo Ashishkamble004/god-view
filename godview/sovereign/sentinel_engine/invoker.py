@@ -8,6 +8,7 @@ Provides:
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 from collections.abc import Callable
@@ -30,7 +31,7 @@ class CapabilityInvoker:
         self._handlers[capability_id] = handler
 
     async def invoke(self, capability_id: str, args: dict[str, Any] | None = None) -> Any:
-        """Invoke a capability with arguments, ensuring per-call error isolation."""
+        """Invoke a capability with arguments, ensuring per-call timeout and error isolation."""
         call_args = args or {}
 
         # 1. Custom / registered handler takes precedence
@@ -39,8 +40,11 @@ class CapabilityInvoker:
             try:
                 res = handler(call_args)
                 if inspect.isawaitable(res):
-                    return await res
+                    return await asyncio.wait_for(res, timeout=5.0)
                 return res
+            except TimeoutError:
+                logger.warning("Capability handler for '%s' timed out", capability_id)
+                return {"error": f"Capability '{capability_id}' timed out after 5.0s"}
             except Exception as exc:
                 logger.warning(
                     "Capability handler for '%s' raised error: %s", capability_id, exc
@@ -55,8 +59,11 @@ class CapabilityInvoker:
                     if hasattr(adapter, "execute_capability"):
                         res = adapter.execute_capability(capability_id, call_args)
                         if inspect.isawaitable(res):
-                            return await res
+                            return await asyncio.wait_for(res, timeout=5.0)
                         return res
+            except TimeoutError:
+                logger.warning("Adapter capability '%s' timed out", capability_id)
+                return {"error": f"Capability '{capability_id}' timed out after 5.0s"}
             except Exception as exc:
                 logger.warning(
                     "Adapter '%s' failed executing capability '%s': %s",

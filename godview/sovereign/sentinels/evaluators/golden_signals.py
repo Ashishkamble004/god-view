@@ -38,15 +38,31 @@ class GoldenSignalsEvaluator(BaseSentinelEvaluator):
         p95_threshold_ms = float(spec.get("p95_threshold_ms", 5000.0))
         error_rate_threshold = float(spec.get("error_rate_threshold", 0.05))
 
-        # Query Cloud Monitoring timeseries
+        # Query Cloud Monitoring timeseries with standard percentile aligner
         ts_data = await ctx.invoke_capability(
             "monitoring.query_timeseries",
             {
                 "service_name": service_name,
                 "window_s": window_s,
-                "filter": f'resource.labels.service_name="{service_name}"',
+                "filter": (
+                    f'metric.type="run.googleapis.com/request_latencies" '
+                    f'AND resource.labels.service_name="{service_name}"'
+                ),
+                "aligner": "ALIGN_PERCENTILE_95",
+                "per_series_aligner": "ALIGN_PERCENTILE_95",
             },
         )
+        if ts_data is None or (isinstance(ts_data, dict) and "error" in ts_data):
+            err = (
+                ts_data.get("error", "No metric data")
+                if isinstance(ts_data, dict)
+                else "No metric data returned"
+            )
+            return SentinelEvaluation(
+                observed=0.0,
+                breached=False,
+                details={"status": "unknown", "error": err, "service_name": service_name},
+            )
 
         p95_ms = 0.0
         error_count_5xx = 0

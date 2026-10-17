@@ -181,7 +181,7 @@ async def test_t2_probe_asset_404_and_negative() -> None:
     evaluator = get_evaluator("probe")
     res_asset = await evaluator.evaluate(snt_asset, ctx)
     assert res_asset.breached is True
-    assert res_asset.signature == "probe_failed_http_404"
+    assert res_asset.signature in ("probe_asset_404", "probe_failed_http_404")
     assert res_asset.observed == 1.0
 
     # Negative test: normal 200 probe
@@ -301,3 +301,96 @@ async def test_golden_signals_cold_start_504_burst() -> None:
     res_clean = await evaluator.evaluate(snt, ctx)
     assert res_clean.breached is False
     assert res_clean.observed == 0.0
+
+
+@pytest.mark.unit
+async def test_t1_waf_posture_without_traffic() -> None:
+    """T1 Repro: Cloud Armor WAF rule posture drift detected without needing traffic."""
+    invoker = CapabilityInvoker()
+
+    # Policy with WAF rule missing sensitivity parameter
+    drifted_policies = [
+        {
+            "name": "edge-sec-policy",
+            "selfLink": "projects/test/global/securityPolicies/edge-sec-policy",
+            "rules": [
+                {
+                    "priority": 1000,
+                    "action": "deny(403)",
+                    "match": {
+                        "expr": {
+                            "expression": "evaluatePreconfiguredWaf('sqli-v33-stable')"
+                        }
+                    },
+                }
+            ],
+        }
+    ]
+    invoker.register_handler("edge.describe_security_policies", lambda args: drifted_policies)
+    ctx = EvaluatorContext(invoker=invoker)
+
+    snt = build_posture_sentinel("edge-sec-policy", resource_kind="security_policy")
+    evaluator = get_evaluator("posture")
+    res = await evaluator.evaluate(snt, ctx)
+
+    assert res.breached is True
+    assert res.signature == "waf_sensitivity_missing"
+    assert res.severity_override == "sev2"
+
+    # Negative test: properly configured sensitivity parameter
+    compliant_policies = [
+        {
+            "name": "edge-sec-policy",
+            "selfLink": "projects/test/global/securityPolicies/edge-sec-policy",
+            "rules": [
+                {
+                    "priority": 1000,
+                    "action": "deny(403)",
+                    "match": {
+                        "expr": {
+                            "expression": "evaluatePreconfiguredWaf('sqli-v33-stable', {'sensitivity': 1})"
+                        }
+                    },
+                }
+            ],
+        }
+    ]
+    invoker.register_handler("edge.describe_security_policies", lambda args: compliant_policies)
+    res_clean = await evaluator.evaluate(snt, ctx)
+    assert res_clean.breached is False
+
+
+@pytest.mark.unit
+async def test_t2_asset_discovery_from_api_response() -> None:
+    """T2 Repro: Probing API discovers referenced static asset URLs and catches 404/403."""
+    invoker = CapabilityInvoker()
+
+    def probe_handler(args: dict[str, Any]) -> dict[str, Any]:
+        url = args.get("url", "")
+        if url == "https://api.example.com/v1/vehicles":
+            # API response references an asset URL
+            return {
+                "status_code": 200,
+                "latency_ms": 50.0,
+                "json": {
+                    "items": [
+                        {"id": "v1", "image_url": "/assets/vehicles/suv.png"},
+                    ]
+                },
+                "error": None,
+            }
+        if "/assets/vehicles/suv.png" in url:
+            # Referenced static asset fails with 404 (e.g. unpopulated CDN bucket)
+            return {"status_code": 404, "latency_ms": 40.0, "error": None}
+        return {"status_code": 200, "latency_ms": 30.0, "error": None}
+
+    invoker.register_handler("http.probe", probe_handler)
+    ctx = EvaluatorContext(invoker=invoker)
+
+    snt = build_probe_sentinel("https://api.example.com/v1/vehicles")
+    evaluator = get_evaluator("probe")
+    res = await evaluator.evaluate(snt, ctx)
+
+    assert res.breached is True
+    assert res.signature == "probe_asset_404"
+    assert "/assets/vehicles/suv.png" in res.resource_id

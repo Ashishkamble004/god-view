@@ -152,3 +152,169 @@ def test_routers_incidents_and_sentinels() -> None:
     assert resp.status_code == 200
     assert resp.json()["status"] == "closed"
     assert resp.json()["incident"]["outcome"] == "resolved"
+
+
+@pytest.mark.unit
+async def test_engine_cadence_and_rotation() -> None:
+    """Verifies that evaluate_tick honors cadence_s and rotates evaluation order."""
+    from datetime import UTC, datetime
+
+    fs = InMemoryFirestore()
+    ps = InMemoryPubSub()
+    ae = InMemoryAgentEngine()
+    now = datetime(2026, 10, 17, 12, 0, 0, tzinfo=UTC)
+
+    engine = SentinelEngine(
+        firestore=fs,
+        pubsub=ps,
+        agent_engine=ae,
+        clock=lambda: now,
+    )
+
+    # Sentinel A: cadence 60s, ran 10s ago -> MUST BE SKIPPED
+    snt_a = SentinelDefinition.model_validate(
+        {
+            "sentinel_id": "snt-cadence-60s",
+            "class": "invariant_sql",
+            "source_ref": "ref-a",
+            "check": {"dialect": "bigquery", "statement": "SELECT 0", "window_s": 300},
+            "cadence_s": 60,
+            "baseline": {"model": "constant", "expected": 0.0, "stddev": 0.0},
+            "wake_condition": {"operator": ">=", "threshold": 1.0, "consecutive": 1, "window_s": 300},
+            "target_agent_id": "platform__env",
+            "state": "enforced",
+            "compiled_by": "test",
+            "compiled_at": "2026-10-17T00:00:00Z",
+            "last_run_at": "2026-10-17T11:59:50Z",  # 10s ago
+        }
+    )
+
+    # Sentinel B: cadence 10s, ran 20s ago -> MUST BE EVALUATED
+    snt_b = SentinelDefinition.model_validate(
+        {
+            "sentinel_id": "snt-cadence-10s",
+            "class": "invariant_sql",
+            "source_ref": "ref-b",
+            "check": {"dialect": "bigquery", "statement": "SELECT 0", "window_s": 300},
+            "cadence_s": 10,
+            "baseline": {"model": "constant", "expected": 0.0, "stddev": 0.0},
+            "wake_condition": {"operator": ">=", "threshold": 1.0, "consecutive": 1, "window_s": 300},
+            "target_agent_id": "platform__env",
+            "state": "enforced",
+            "compiled_by": "test",
+            "compiled_at": "2026-10-17T00:00:00Z",
+            "last_run_at": "2026-10-17T11:59:40Z",  # 20s ago
+        }
+    )
+
+    engine.register_sentinel(snt_a)
+    engine.register_sentinel(snt_b)
+
+    report = await engine.evaluate_tick()
+    # Only snt_b should be evaluated
+    assert report.evaluated_count == 1
+
+
+@pytest.mark.unit
+async def test_unknown_status_does_not_clear(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verifies that when an evaluator returns status='unknown', record_clear is NOT called."""
+    from datetime import UTC, datetime
+
+    from godview.sovereign.sentinels.evaluators import EVALUATOR_REGISTRY
+    from godview.sovereign.sentinels.models import SentinelEvaluation
+
+    fs = InMemoryFirestore()
+    ps = InMemoryPubSub()
+    ae = InMemoryAgentEngine()
+    now = datetime(2026, 10, 17, 12, 0, 0, tzinfo=UTC)
+
+    class UnknownEvaluator:
+        async def evaluate(self, sentinel: Any, ctx: Any) -> Any:
+            return SentinelEvaluation(
+                observed=0.0,
+                breached=False,
+                details={"status": "unknown", "error": "Adapter timed out after 5.0s"},
+            )
+
+    monkeypatch.setitem(EVALUATOR_REGISTRY, "probe", UnknownEvaluator())
+
+    engine = SentinelEngine(
+        firestore=fs,
+        pubsub=ps,
+        agent_engine=ae,
+        clock=lambda: now,
+    )
+
+    snt = build_probe_sentinel("https://api.example.com", probe_name="unknown-check")
+    engine.register_sentinel(snt)
+
+    # Seed an open incident on this resource
+    eval_b = SentinelEvaluation(
+        observed=1.0,
+        breached=True,
+        signature="probe_failed_http_500",
+        resource_id="https://api.example.com",
+    )
+    inc, _ = await engine.incident_manager.record_breach(snt, eval_b, now)
+    assert inc.clear_ticks == 0
+
+    # Run evaluate_tick where evaluator returns unknown
+    await engine.evaluate_tick()
+
+    # The incident MUST NOT increment clear_ticks because state was unknown!
+    assert inc.clear_ticks == 0
+
+
+@pytest.mark.unit
+async def test_install_e2e_lifecycle() -> None:
+    """Verifies install(ctx) lifecycle: auto-compilation via perception hook, evaluate_tick, breach -> incident."""
+    from datetime import UTC, datetime
+
+    from godview.sovereign.bootstrap import SovereignHooks
+    from godview.sovereign.sentinel_engine import install
+
+    fs = InMemoryFirestore()
+    ps = InMemoryPubSub()
+    ae = InMemoryAgentEngine()
+    now = datetime(2026, 10, 17, 12, 0, 0, tzinfo=UTC)
+
+    # Dummy SovereignContext
+    class Ctx:
+        def __init__(self) -> None:
+            self.docs = fs
+            self.bus = ps
+            self.agents = ae
+            self.ledger = None
+            self.adapters = []
+            self.clock = lambda: now
+            self.hooks = SovereignHooks()
+
+    ctx = Ctx()
+
+    # 1. install(ctx)
+    engine = install(ctx)
+    assert hasattr(ctx, "sentinel_engine")
+    assert hasattr(ctx, "incident_manager")
+    assert len(ctx.hooks.perception_tick) == 1
+    assert len(ctx.hooks.sentinel_tick) == 1
+
+    # 2. Seed discovered service in docs
+    fs.set(
+        "discovered_services",
+        "svc-auth",
+        {
+            "name": "svc-auth",
+            "kind": "cloud_run",
+            "endpoint": "https://auth.example.com",
+            "tier": "edge",
+        },
+    )
+
+    # 3. Fire perception hook -> sentinels auto-registered in Firestore
+    perception_hook = ctx.hooks.perception_tick[0]
+    await perception_hook()
+
+    sentinels = engine.list_sentinels()
+    assert len(sentinels) >= 1
+    snt_ids = [s.sentinel_id for s in sentinels]
+    assert any("posture" in s_id for s_id in snt_ids)

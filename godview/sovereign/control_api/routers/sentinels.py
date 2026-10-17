@@ -38,9 +38,15 @@ class ProbeRunRequest(BaseModel):
 def _get_service_auth_dep(ctx: Any) -> Callable[..., Any]:
     """Retrieve require_service auth dependency from SovereignContext if configured."""
     auth = getattr(ctx, "auth", None)
+    settings = getattr(ctx, "settings", None)
+    svc_url = (
+        getattr(settings, "service_url", "https://godview.internal")
+        if settings
+        else "https://godview.internal"
+    )
     if auth is not None and hasattr(auth, "require_service"):
         try:
-            return auth.require_service(audience="godview")
+            return auth.require_service(audience=svc_url)
         except TypeError:
             return auth.require_service
 
@@ -50,6 +56,18 @@ def _get_service_auth_dep(ctx: Any) -> Callable[..., Any]:
     return _optional_service
 
 
+def _get_operator_dep(ctx: Any) -> Callable[..., Any]:
+    """Retrieve require_operator auth dependency from SovereignContext if configured."""
+    auth = getattr(ctx, "auth", None)
+    if auth is not None and hasattr(auth, "require_operator"):
+        return auth.require_operator
+
+    async def _optional_operator() -> dict[str, str]:
+        return {"email": "operator@godview.internal", "role": "operator"}
+
+    return _optional_operator
+
+
 def build_router(ctx: Any) -> APIRouter:
     """Build and return FastAPI router for `/sentinels` and `/probes/run`."""
     router = APIRouter(tags=["sentinels"])
@@ -57,16 +75,12 @@ def build_router(ctx: Any) -> APIRouter:
     # Resolve SentinelEngine
     engine: SentinelEngine | None = getattr(ctx, "sentinel_engine", None)
     if engine is None:
-        engine = SentinelEngine(
-            ctx=ctx,
-            firestore=getattr(ctx, "docs", None),
-            bigquery=getattr(ctx, "ledger", None),
-            pubsub=getattr(ctx, "bus", None),
-            agent_engine=getattr(ctx, "agents", None),
-            clock=getattr(ctx, "clock", None),
-        )
+        from godview.sovereign.sentinel_engine import install
+
+        engine = install(ctx)
 
     service_dep = _get_service_auth_dep(ctx)
+    operator_dep = _get_operator_dep(ctx)
 
     @router.get("/sentinels")
     async def get_sentinels() -> dict[str, Any]:
@@ -78,7 +92,7 @@ def build_router(ctx: Any) -> APIRouter:
             ]
         }
 
-    @router.post("/sentinels")
+    @router.post("/sentinels", dependencies=[Depends(operator_dep)])
     async def create_sentinel(payload: dict[str, Any]) -> dict[str, Any]:
         """Register a new sentinel or compile from an invariant reference."""
         fs = getattr(ctx, "docs", None) or getattr(engine, "_firestore", None)
@@ -132,7 +146,7 @@ def build_router(ctx: Any) -> APIRouter:
         saved = engine.register_sentinel(snt)
         return {**saved.model_dump(mode="json", by_alias=True), "id": saved.sentinel_id}
 
-    @router.patch("/sentinels/{sentinel_id}")
+    @router.patch("/sentinels/{sentinel_id}", dependencies=[Depends(operator_dep)])
     async def patch_sentinel(
         sentinel_id: str,
         body: SentinelPatchRequest,

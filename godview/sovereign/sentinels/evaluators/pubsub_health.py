@@ -37,37 +37,91 @@ class PubSubHealthEvaluator(BaseSentinelEvaluator):
         sub_name = str(spec.get("subscription_name") or sentinel.source_ref)
         backlog_threshold = int(spec.get("backlog_threshold", 50))
 
-        # 1. Query DLQ depth
+        # 1. Query DLQ depth (specifically from pubsub.dlq_depth capability)
         dlq_info = await ctx.invoke_capability(
             "pubsub.dlq_depth",
             {"subscription_name": sub_name},
         )
         dlq_depth = 0
         if isinstance(dlq_info, dict):
-            dlq_depth = int(dlq_info.get("num_undelivered_messages") or dlq_info.get("dlq_depth") or 0)
+            dlq_depth = int(
+                dlq_info.get("dlq_depth")
+                or dlq_info.get("num_undelivered_messages")
+                or dlq_info.get("dead_letter_depth")
+                or 0
+            )
 
         # 2. Query subscription details
         sub_desc = await ctx.invoke_capability(
             "pubsub.describe_subscriptions",
             {"subscription_name": sub_name},
         )
-        target_sub: dict[str, Any] = {}
+        if sub_desc is None or (isinstance(sub_desc, dict) and "error" in sub_desc):
+            err = (
+                sub_desc.get("error", "No subscription data")
+                if isinstance(sub_desc, dict)
+                else "No subscription data returned"
+            )
+            return SentinelEvaluation(
+                observed=0.0,
+                breached=False,
+                details={"status": "unknown", "error": err, "subscription_name": sub_name},
+            )
+
+        target_sub: dict[str, Any] | None = None
         if isinstance(sub_desc, list):
             target_sub = next(
-                (s for s in sub_desc if s.get("name") == sub_name or s.get("id") == sub_name),
-                sub_desc[0] if sub_desc else {},
+                (
+                    s for s in sub_desc
+                    if s.get("name") == sub_name
+                    or s.get("id") == sub_name
+                    or sub_name in str(s.get("name", ""))
+                ),
+                None,
             )
         elif isinstance(sub_desc, dict):
             target_sub = sub_desc
 
-        undelivered_count = int(
-            target_sub.get("num_undelivered_messages")
-            or (dlq_info.get("num_undelivered_messages") if isinstance(dlq_info, dict) else 0)
-            or 0
-        )
+        if not target_sub:
+            return SentinelEvaluation(
+                observed=0.0,
+                breached=False,
+                details={
+                    "status": "unknown",
+                    "error": f"Subscription '{sub_name}' not found",
+                    "subscription_name": sub_name,
+                },
+            )
+
+        undelivered_count = int(target_sub.get("num_undelivered_messages") or 0)
         push_errors = target_sub.get("push_error_classes") or {}
         count_4xx = int(push_errors.get("4xx") or target_sub.get("push_4xx_count") or 0)
         count_5xx = int(push_errors.get("5xx") or target_sub.get("push_5xx_count") or 0)
+
+        # 3. Query Cloud Monitoring timeseries for push_request_count grouped by response code/class
+        ts_data = await ctx.invoke_capability(
+            "monitoring.query_timeseries",
+            {
+                "filter": (
+                    f'metric.type="pubsub.googleapis.com/subscription/push_request_count" '
+                    f'AND resource.labels.subscription_id="{sub_name}"'
+                ),
+                "window_s": 300,
+            },
+        )
+        if isinstance(ts_data, dict):
+            count_4xx += int(ts_data.get("4xx_count") or ts_data.get("push_4xx_count") or 0)
+            count_5xx += int(ts_data.get("5xx_count") or ts_data.get("push_5xx_count") or 0)
+        elif isinstance(ts_data, list):
+            for s in ts_data:
+                labels = s.get("metric", {}).get("labels", {})
+                resp_code = str(labels.get("response_code") or labels.get("response_class") or "")
+                pts = s.get("points", [])
+                total_pts = sum(int(p.get("value", 0)) for p in pts)
+                if resp_code.startswith("4") or resp_code == "4xx":
+                    count_4xx += total_pts
+                elif resp_code.startswith("5") or resp_code == "5xx":
+                    count_5xx += total_pts
 
         # Breach condition A: DLQ contains messages
         if dlq_depth > 0:

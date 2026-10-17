@@ -185,9 +185,30 @@ class SentinelEngine:
         start_time = time.monotonic()
         effective_budget = budget_s or self.budget_s
 
-        for snt in self.list_sentinels():
-            if snt.state in ("paused", "retired"):
-                continue
+        active_sentinels = [s for s in self.list_sentinels() if s.state not in ("paused", "retired")]
+        # Rotate / sort to evaluate least recently run sentinels first to avoid starving tail sentinels
+        active_sentinels.sort(key=lambda s: s.last_run_at or "")
+
+        universal_classes = {
+            "lb_requests",
+            "posture",
+            "probe",
+            "pubsub_health",
+            "golden_signals",
+            "journey_conformance",
+            "kpi_changepoint",
+            "invariant",
+        }
+
+        for snt in active_sentinels:
+            # Check cadence
+            if snt.last_run_at and snt.cadence_s > 0:
+                try:
+                    last_run_dt = datetime.fromisoformat(snt.last_run_at)
+                    if (now - last_run_dt).total_seconds() < snt.cadence_s:
+                        continue
+                except Exception:
+                    pass
 
             # Check tick budget
             if (time.monotonic() - start_time) > effective_budget:
@@ -217,8 +238,16 @@ class SentinelEngine:
                 continue
 
             observed = eval_res.observed
-            breached = eval_res.breached or _compare(
-                observed, snt.wake_condition.operator, snt.wake_condition.threshold
+            if snt.sentinel_class in universal_classes:
+                breached = eval_res.breached
+            else:
+                breached = eval_res.breached or _compare(
+                    observed, snt.wake_condition.operator, snt.wake_condition.threshold
+                )
+
+            is_unknown = (
+                eval_res.details.get("status") in ("unknown", "error")
+                or bool(eval_res.details.get("error"))
             )
 
             if not breached:
@@ -236,8 +265,9 @@ class SentinelEngine:
                             }
                         )
                     )
-                # Auto-close tracking via IncidentManager
-                await self.incident_manager.record_clear(snt, now)
+                # Auto-close tracking via IncidentManager: ONLY if evaluation confirmed healthy (not unknown)
+                if not is_unknown:
+                    await self.incident_manager.record_clear(snt, now, resource_id=eval_res.resource_id)
                 continue
 
             # Handle shadow mode
@@ -350,4 +380,59 @@ class SentinelEngine:
         return report
 
 
-__all__ = ["CapabilityInvoker", "SentinelEngine", "SentinelTickReport"]
+def install(ctx: Any) -> SentinelEngine:
+    """Wire up SentinelEngine and IncidentManager into SovereignContext lifecycle.
+
+    - Creates SentinelEngine and IncidentManager bound to ctx if not already present.
+    - Sets ctx.sentinel_engine and ctx.incident_manager.
+    - Registers idempotent perception hook: auto-compiles and registers universal sentinels
+      from discovered_services and discovered_edges in ctx.docs.
+    - Registers sentinel_tick hook (ctx.hooks.sentinel_tick.append(engine.evaluate_tick)).
+    - Registers on_change_event hook (ctx.hooks.on_change_event.append(engine.incident_manager.on_change_event)).
+    """
+    engine = getattr(ctx, "sentinel_engine", None)
+    if engine is None:
+        engine = SentinelEngine(
+            ctx=ctx,
+            firestore=getattr(ctx, "docs", None),
+            bigquery=getattr(ctx, "ledger", None),
+            pubsub=getattr(ctx, "bus", None),
+            agent_engine=getattr(ctx, "agents", None),
+            clock=getattr(ctx, "clock", None),
+        )
+        ctx.sentinel_engine = engine
+        ctx.incident_manager = engine.incident_manager
+
+    async def perception_sentinel_hook() -> None:
+        docs = getattr(ctx, "docs", None)
+        if docs is None or not hasattr(docs, "list_docs"):
+            return
+        try:
+            services = docs.list_docs("discovered_services")
+            edges = docs.list_docs("discovered_edges")
+        except Exception:
+            return
+
+        from godview.sovereign.sentinels.pack import compile_universal_sentinels
+
+        new_sentinels = compile_universal_sentinels(services=services, edges=edges)
+        for snt in new_sentinels:
+            existing = docs.get("sentinels", snt.sentinel_id) if hasattr(docs, "get") else None
+            if existing is None:
+                engine.register_sentinel(snt)
+
+    hooks = getattr(ctx, "hooks", None)
+    if hooks is not None:
+        if hasattr(hooks, "perception_tick") and perception_sentinel_hook not in hooks.perception_tick:
+            hooks.perception_tick.append(perception_sentinel_hook)
+        if hasattr(hooks, "sentinel_tick") and engine.evaluate_tick not in hooks.sentinel_tick:
+            hooks.sentinel_tick.append(engine.evaluate_tick)
+        if hasattr(hooks, "on_change_event"):
+            on_chg = engine.incident_manager.on_change_event
+            if on_chg not in hooks.on_change_event:
+                hooks.on_change_event.append(on_chg)
+
+    return engine
+
+
+__all__ = ["CapabilityInvoker", "SentinelEngine", "SentinelTickReport", "install"]

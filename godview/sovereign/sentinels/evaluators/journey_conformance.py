@@ -28,8 +28,15 @@ class JourneyConformanceEvaluator(BaseSentinelEvaluator):
         spec = sentinel.check.spec or {}
         journey_name = spec.get("journey_name") or sentinel.source_ref
 
+        if ctx.bigquery is None:
+            return SentinelEvaluation(
+                observed=0.0,
+                breached=False,
+                details={"status": "unknown", "error": "No ledger configured"},
+            )
+
         breaches: list[dict[str, Any]] = []
-        if ctx.bigquery is not None and hasattr(ctx.bigquery, "get_table"):
+        if hasattr(ctx.bigquery, "get_table"):
             rows = ctx.bigquery.get_table("journeys")
             for r in rows:
                 if r.get("is_synthetic"):

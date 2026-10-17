@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from godview.sovereign.sentinels.evaluators import (
     EVALUATOR_REGISTRY,
     BaseSentinelEvaluator,
@@ -21,6 +23,14 @@ from godview.sovereign.sentinels.pack import (
     compile_universal_sentinels,
 )
 
+
+def install(ctx: Any) -> Any:
+    """Wire up SentinelEngine and IncidentManager into SovereignContext lifecycle."""
+    from godview.sovereign.sentinel_engine import install as _install
+
+    return _install(ctx)
+
+
 __all__ = [
     "EVALUATOR_REGISTRY",
     "BaseSentinelEvaluator",
@@ -36,4 +46,5 @@ __all__ = [
     "build_pubsub_health_sentinel",
     "compile_universal_sentinels",
     "get_evaluator",
+    "install",
 ]

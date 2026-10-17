@@ -13,6 +13,7 @@ Breaches on:
 
 from __future__ import annotations
 
+import urllib.parse
 from typing import Any
 
 from godview_shared.contracts import SentinelDefinition
@@ -90,12 +91,74 @@ class ProbeEvaluator(BaseSentinelEvaluator):
             if is_failed:
                 transcript["fail_reason"] = fail_reason
                 failed_probes.append(transcript)
+            else:
+                # T2 static asset discovery from API response bodies
+                discovered_asset_urls: list[str] = []
+                resp_body = probe_result.get("json") or probe_result.get("body")
+
+                def _extract_asset_urls(data: Any, found: list[str], base_url: str) -> None:
+                    if isinstance(data, dict):
+                        for k, v in data.items():
+                            if isinstance(v, str):
+                                if str(k).endswith(("_url", "image_url", "asset_url")) or v.startswith("/assets/"):
+                                    found.append(urllib.parse.urljoin(base_url, v))
+                            elif isinstance(v, (dict, list)):
+                                _extract_asset_urls(v, found, base_url)
+                    elif isinstance(data, list):
+                        for item in data:
+                            _extract_asset_urls(item, found, base_url)
+
+                if resp_body:
+                    _extract_asset_urls(resp_body, discovered_asset_urls, target_url)
+
+                for asset_url in discovered_asset_urls[:5]:
+                    asset_res = await ctx.invoke_capability(
+                        "http.probe",
+                        {
+                            "url": asset_url,
+                            "method": "GET",
+                            "timeout_s": timeout_s,
+                            "headers": {"X-Synthetic": "true", "User-Agent": "GodView-Sentinel/5.0"},
+                        },
+                    )
+                    if isinstance(asset_res, dict):
+                        a_status = int(asset_res.get("status_code") or 0)
+                        a_err = asset_res.get("error")
+                        a_trans = {
+                            "url": asset_url,
+                            "status_code": a_status,
+                            "latency_ms": float(asset_res.get("latency_ms") or 0.0),
+                            "error": a_err,
+                            "parent_url": target_url,
+                            "is_discovered_asset": True,
+                        }
+                        all_transcripts.append(a_trans)
+                        if a_err or a_status not in expected_status:
+                            a_trans["fail_reason"] = (
+                                a_err or f"Static asset returned HTTP {a_status} (expected {expected_status})"
+                            )
+                            failed_probes.append(a_trans)
+
+        if not all_transcripts and urls:
+            return SentinelEvaluation(
+                observed=0.0,
+                breached=False,
+                details={"status": "unknown", "error": "No probe executions succeeded"},
+            )
 
         if failed_probes:
             first_fail = failed_probes[0]
             status = first_fail.get("status_code", 0)
-            sig = f"probe_failed_http_{status}" if status else "probe_failed_connection"
-            severity = "sev2" if (400 <= status < 500) else "sev1"
+            is_asset = first_fail.get("is_discovered_asset", False) or "/assets/" in first_fail.get("url", "")
+            if is_asset and status == 404:
+                sig = "probe_asset_404"
+                severity = "sev2"
+            elif is_asset and status == 403:
+                sig = "probe_asset_403_cdn"
+                severity = "sev2"
+            else:
+                sig = f"probe_failed_http_{status}" if status else "probe_failed_connection"
+                severity = "sev2" if (400 <= status < 500) else "sev1"
 
             return SentinelEvaluation(
                 observed=float(len(failed_probes)),
@@ -105,7 +168,7 @@ class ProbeEvaluator(BaseSentinelEvaluator):
                 resource_id=first_fail["url"],
                 severity_override=severity,
                 details={
-                    "total_probed": len(urls),
+                    "total_probed": len(all_transcripts),
                     "failed_count": len(failed_probes),
                     "failed_urls": [f["url"] for f in failed_probes],
                     "sample_transcript": first_fail,

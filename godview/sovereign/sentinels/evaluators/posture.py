@@ -50,93 +50,232 @@ class PostureEvaluator(BaseSentinelEvaluator):
                 "run.get_posture",
                 {"service_name": resource_id, "region": spec.get("region")},
             )
-            if isinstance(posture_data, dict):
-                current_ingress = posture_data.get("ingress")
-                invoker_iam_disabled = posture_data.get("invoker_iam_disabled", False)
-                allows_all_users = posture_data.get("all_users", False)
-
-                # Check invoker_iam_disabled (critical exposure)
-                expected_iam_disabled = baseline.get("invoker_iam_disabled", False)
-                if invoker_iam_disabled and not expected_iam_disabled:
-                    drift_items.append(
-                        {
-                            "field": "invoker_iam_disabled",
-                            "expected": False,
-                            "actual": True,
-                            "reason": "invoker IAM check disabled on service",
-                        }
-                    )
-
-                # Check ingress exposure (ingress="all" when expected internal/LB)
-                expected_ingress = baseline.get(
-                    "ingress", "internal-and-cloud-load-balancing"
+            if posture_data is None or (isinstance(posture_data, dict) and "error" in posture_data):
+                err = (
+                    posture_data.get("error", "No posture data")
+                    if isinstance(posture_data, dict)
+                    else "No posture data returned"
                 )
-                if current_ingress == "all" and expected_ingress != "all":
-                    drift_items.append(
-                        {
-                            "field": "ingress",
-                            "expected": expected_ingress,
-                            "actual": current_ingress,
-                            "reason": "public ingress without load balancer restriction",
-                        }
-                    )
+                return SentinelEvaluation(
+                    observed=0.0,
+                    breached=False,
+                    details={"status": "unknown", "error": err, "resource_id": resource_id},
+                )
 
-                # Check allUsers IAM binding
-                expected_all_users = baseline.get("all_users", False)
-                if allows_all_users and not expected_all_users:
-                    drift_items.append(
-                        {
-                            "field": "all_users",
-                            "expected": False,
-                            "actual": True,
-                            "reason": "allUsers granted run.invoker role",
-                        }
-                    )
+            # If no baseline from spec or tfstate, retrieve or record first-seen snapshot
+            if not baseline and ctx.firestore is not None and hasattr(ctx.firestore, "get"):
+                saved_bl = ctx.firestore.get("posture_baselines", resource_id)
+                if saved_bl and isinstance(saved_bl, dict):
+                    baseline = saved_bl.get("baseline", {})
+                else:
+                    first_seen = {
+                        "ingress": posture_data.get("ingress", "internal-and-cloud-load-balancing"),
+                        "invoker_iam_disabled": posture_data.get("invoker_iam_disabled", False),
+                        "all_users": posture_data.get("all_users", False),
+                    }
+                    baseline = first_seen
+                    try:
+                        ctx.firestore.set("posture_baselines", resource_id, {"baseline": first_seen})
+                    except Exception:
+                        pass
+
+            current_ingress = posture_data.get("ingress")
+            invoker_iam_disabled = posture_data.get("invoker_iam_disabled", False)
+            allows_all_users = posture_data.get("all_users", False)
+
+            # Check invoker_iam_disabled (critical exposure)
+            expected_iam_disabled = baseline.get("invoker_iam_disabled", False)
+            if invoker_iam_disabled and not expected_iam_disabled:
+                drift_items.append(
+                    {
+                        "field": "invoker_iam_disabled",
+                        "expected": False,
+                        "actual": True,
+                        "reason": "invoker IAM check disabled on service",
+                    }
+                )
+
+            # Check ingress exposure (ingress="all" when expected internal/LB)
+            expected_ingress = baseline.get(
+                "ingress", "internal-and-cloud-load-balancing"
+            )
+            if current_ingress == "all" and expected_ingress != "all":
+                drift_items.append(
+                    {
+                        "field": "ingress",
+                        "expected": expected_ingress,
+                        "actual": current_ingress,
+                        "reason": "public ingress without load balancer restriction",
+                    }
+                )
+
+            # Check allUsers IAM binding
+            expected_all_users = baseline.get("all_users", False)
+            if allows_all_users and not expected_all_users:
+                drift_items.append(
+                    {
+                        "field": "all_users",
+                        "expected": False,
+                        "actual": True,
+                        "reason": "allUsers granted run.invoker role",
+                    }
+                )
 
         elif resource_kind in ("backend_service", "edge", "lb_backend"):
+            project_id = spec.get("project_id", "")
             backend_data = await ctx.invoke_capability(
                 "edge.describe_backends",
-                {"resource_id": resource_id},
+                {"resource_id": resource_id, "project_id": project_id},
             )
+            if backend_data is None or (isinstance(backend_data, dict) and "error" in backend_data):
+                err = (
+                    backend_data.get("error", "No backend data")
+                    if isinstance(backend_data, dict)
+                    else "No backend data returned"
+                )
+                return SentinelEvaluation(
+                    observed=0.0,
+                    breached=False,
+                    details={"status": "unknown", "error": err, "resource_id": resource_id},
+                )
+
+            target: dict[str, Any] | None = None
             if isinstance(backend_data, list):
-                # Search for target backend
                 target = next(
-                    (b for b in backend_data if b.get("name") == resource_id or b.get("id") == resource_id),
-                    backend_data[0] if backend_data else None,
+                    (
+                        b for b in backend_data
+                        if b.get("name") == resource_id
+                        or b.get("id") == resource_id
+                        or resource_id in str(b.get("selfLink", ""))
+                    ),
+                    None,
                 )
             elif isinstance(backend_data, dict):
                 target = backend_data
-            else:
-                target = None
 
-            if target:
-                iap_cfg = target.get("iap") or {}
-                iap_enabled = bool(iap_cfg.get("enabled"))
-                expected_iap = bool(baseline.get("iap_enabled", True))
-                if expected_iap and not iap_enabled:
-                    drift_items.append(
-                        {
-                            "field": "iap_enabled",
-                            "expected": True,
-                            "actual": False,
-                            "reason": "Identity-Aware Proxy disabled on protected backend",
-                        }
-                    )
+            if not target:
+                return SentinelEvaluation(
+                    observed=0.0,
+                    breached=False,
+                    details={
+                        "status": "unknown",
+                        "error": f"Backend '{resource_id}' not found",
+                        "resource_id": resource_id,
+                    },
+                )
 
-                sec_policy = target.get("security_policy") or target.get("securityPolicy")
-                if not sec_policy and baseline.get("require_security_policy", True):
-                    drift_items.append(
-                        {
-                            "field": "security_policy",
-                            "expected": "attached",
-                            "actual": "none",
-                            "reason": "public backend exposed without security policy",
-                        }
-                    )
+            iap_cfg = target.get("iap") or {}
+            iap_enabled = bool(iap_cfg.get("enabled"))
+            if baseline.get("iap_enabled") is True and not iap_enabled:
+                drift_items.append(
+                    {
+                        "field": "iap_enabled",
+                        "expected": True,
+                        "actual": False,
+                        "reason": "Identity-Aware Proxy disabled on protected backend",
+                    }
+                )
+
+            sec_policy = target.get("security_policy") or target.get("securityPolicy")
+            if not sec_policy and baseline.get("require_security_policy", False):
+                drift_items.append(
+                    {
+                        "field": "security_policy",
+                        "expected": "attached",
+                        "actual": "none",
+                        "reason": "public backend exposed without security policy",
+                    }
+                )
+
+        elif resource_kind in ("security_policy", "securityPolicy"):
+            project_id = spec.get("project_id", "")
+            policies = await ctx.invoke_capability(
+                "edge.describe_security_policies",
+                {"project_id": project_id},
+            )
+            if policies is None or (isinstance(policies, dict) and "error" in policies):
+                err = (
+                    policies.get("error", "No security policies returned")
+                    if isinstance(policies, dict)
+                    else "No data returned"
+                )
+                return SentinelEvaluation(
+                    observed=0.0,
+                    breached=False,
+                    details={"status": "unknown", "error": err, "resource_id": resource_id},
+                )
+
+            target_policy: dict[str, Any] | None = None
+            if isinstance(policies, list):
+                target_policy = next(
+                    (
+                        p for p in policies
+                        if p.get("name") == resource_id
+                        or resource_id in str(p.get("selfLink", ""))
+                    ),
+                    None,
+                )
+            elif isinstance(policies, dict):
+                target_policy = policies
+
+            if not target_policy:
+                return SentinelEvaluation(
+                    observed=0.0,
+                    breached=False,
+                    details={
+                        "status": "unknown",
+                        "error": f"Security policy '{resource_id}' not found",
+                        "resource_id": resource_id,
+                    },
+                )
+
+            rules = target_policy.get("rules", [])
+            expected_sensitivity = baseline.get("waf_sensitivity", 1)
+            for r in rules:
+                match_cfg = r.get("match", {})
+                expr_str = str(match_cfg.get("expr", {}).get("expression", ""))
+                if "evaluatePreconfiguredWaf" in expr_str:
+                    has_sensitivity = "sensitivity" in expr_str
+                    if not has_sensitivity:
+                        drift_items.append(
+                            {
+                                "field": "waf_sensitivity",
+                                "expected": expected_sensitivity,
+                                "actual": "missing",
+                                "priority": r.get("priority"),
+                                "reason": (
+                                    f"WAF rule priority {r.get('priority')} has evaluatePreconfiguredWaf "
+                                    f"without sensitivity parameter"
+                                ),
+                            }
+                        )
+                    elif (
+                        f"'sensitivity': {expected_sensitivity}" not in expr_str
+                        and f'"sensitivity": {expected_sensitivity}' not in expr_str
+                    ):
+                        drift_items.append(
+                            {
+                                "field": "waf_sensitivity",
+                                "expected": expected_sensitivity,
+                                "actual": expr_str,
+                                "priority": r.get("priority"),
+                                "reason": (
+                                    f"WAF rule priority {r.get('priority')} sensitivity does not match "
+                                    f"expected baseline ({expected_sensitivity})"
+                                ),
+                            }
+                        )
 
         if drift_items:
             primary_drift = drift_items[0]
-            sig = f"posture_drift_{primary_drift['field']}"
+            if primary_drift["field"] == "waf_sensitivity":
+                sig = (
+                    "waf_sensitivity_missing"
+                    if primary_drift.get("actual") == "missing"
+                    else "waf_sensitivity_mismatch"
+                )
+            else:
+                sig = f"posture_drift_{primary_drift['field']}"
             severity = "sev1" if "invoker_iam_disabled" in [d["field"] for d in drift_items] else "sev2"
             return SentinelEvaluation(
                 observed=float(len(drift_items)),

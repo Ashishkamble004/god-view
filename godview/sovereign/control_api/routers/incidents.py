@@ -81,18 +81,25 @@ def build_router(ctx: Any) -> APIRouter:
             raise HTTPException(status_code=404, detail=f"Unknown incident '{incident_id}'")
         return incident.model_dump(mode="json", by_alias=True) if hasattr(incident, "model_dump") else incident
 
-    @router.post("/incidents/{incident_id}:close", dependencies=[Depends(operator_dep)])
+    @router.post("/incidents/{incident_id}:close")
     async def close_incident(
         incident_id: str,
         body: IncidentCloseRequest | None = None,
+        principal: Any = Depends(operator_dep),  # noqa: B008
     ) -> dict[str, Any]:
         """Close an open incident with reason and operator attribution."""
         req = body or IncidentCloseRequest()
+        operator_email = (
+            getattr(principal, "email", None)
+            or (principal.get("email") if isinstance(principal, dict) else None)
+            or str(principal)
+        )
         try:
             closed = await incident_mgr.close_incident(
                 incident_id,
                 reason=req.reason,
-                operator="operator",
+                outcome=req.outcome,
+                operator=operator_email,
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc

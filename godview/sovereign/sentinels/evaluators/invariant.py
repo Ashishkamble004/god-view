@@ -43,19 +43,35 @@ class InvariantEvaluator(BaseSentinelEvaluator):
         samples: list[dict[str, Any]] = []
 
         if ctx.bigquery is not None and hasattr(ctx.bigquery, "query"):
-            rows = ctx.bigquery.query(stmt)
-            if rows:
-                first_row = rows[0]
-                raw_val = (
-                    first_row.get("count")
-                    or first_row.get("violations")
-                    or next(iter(first_row.values()), 0.0)
+            try:
+                rows = ctx.bigquery.query(stmt)
+                if rows:
+                    first_row = rows[0]
+                    raw_val = (
+                        first_row.get("count")
+                        or first_row.get("violations")
+                        or next(iter(first_row.values()), 0.0)
+                    )
+                    count = float(raw_val or 0.0)
+            except Exception as exc:
+                return SentinelEvaluation(
+                    observed=0.0,
+                    breached=False,
+                    details={
+                        "status": "unknown",
+                        "error": f"Query execution failed: {exc}",
+                        "statement": stmt,
+                    },
                 )
-                count = float(raw_val or 0.0)
 
-            if hasattr(ctx.bigquery, "get_table"):
-                all_events = ctx.bigquery.get_table("events")
-                samples = [r for r in all_events if r.get("source") != "probe"][:5]
+            try:
+                sample_rows = ctx.bigquery.query(
+                    "SELECT * FROM events WHERE COALESCE(source, 'otel') != 'probe' LIMIT 5"
+                )
+                if sample_rows and isinstance(sample_rows, list):
+                    samples = sample_rows[:5]
+            except Exception:
+                pass
 
         threshold = sentinel.wake_condition.threshold
         breached = count >= threshold

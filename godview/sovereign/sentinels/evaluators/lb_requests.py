@@ -44,7 +44,7 @@ class LbRequestsEvaluator(BaseSentinelEvaluator):
             filter_parts.append(f'httpRequest.requestUrl:"{host_filter}"')
         filter_str = " AND ".join(filter_parts)
 
-        # Query LB logs via capability
+        # 1. Query general LB requests via capability
         raw_entries = await ctx.invoke_capability(
             "logging.query_lb_requests",
             {
@@ -53,15 +53,60 @@ class LbRequestsEvaluator(BaseSentinelEvaluator):
                 "page_size": spec.get("page_size", 100),
             },
         )
-        if not raw_entries or not isinstance(raw_entries, list):
-            return SentinelEvaluation(observed=0.0, breached=False)
+        if raw_entries is None or (isinstance(raw_entries, dict) and "error" in raw_entries):
+            err = (
+                raw_entries.get("error", "No LB request data")
+                if isinstance(raw_entries, dict)
+                else "No LB request data returned"
+            )
+            return SentinelEvaluation(
+                observed=0.0,
+                breached=False,
+                details={"status": "unknown", "error": err, "filter": filter_str},
+            )
 
-        total_requests = len(raw_entries)
+        # 2. Targeted query for security policy denies or 5xx over wider lookback (1 hour)
+        deny_filter_parts = [
+            'resource.type="http_load_balancer"',
+            '(jsonPayload.statusDetails="denied_by_security_policy" OR httpRequest.status>=500)',
+        ]
+        if host_filter:
+            deny_filter_parts.append(f'httpRequest.requestUrl:"{host_filter}"')
+        deny_filter_str = " AND ".join(deny_filter_parts)
+
+        deny_entries = await ctx.invoke_capability(
+            "logging.query_lb_requests",
+            {
+                "filter": deny_filter_str,
+                "window_s": max(window_s, 3600),
+                "page_size": 100,
+            },
+        )
+
+        combined_entries: list[dict[str, Any]] = list(raw_entries) if isinstance(raw_entries, list) else []
+        if isinstance(deny_entries, list) and deny_entries:
+            seen_hashes = {
+                (
+                    e.get("insertId")
+                    or f"{e.get('timestamp')}_{e.get('httpRequest', {}).get('requestUrl')}"
+                )
+                for e in combined_entries
+            }
+            for de in deny_entries:
+                deh = (
+                    de.get("insertId")
+                    or f"{de.get('timestamp')}_{de.get('httpRequest', {}).get('requestUrl')}"
+                )
+                if deh not in seen_hashes:
+                    seen_hashes.add(deh)
+                    combined_entries.append(de)
+
+        total_requests = len(combined_entries)
         status_5xx_count = 0
         legitimate_blocked: list[dict[str, Any]] = []
         ip_outcomes: dict[str, list[int]] = {}
 
-        for entry in raw_entries:
+        for entry in combined_entries:
             http_req = entry.get("httpRequest") or {}
             json_payload = entry.get("jsonPayload") or {}
             status_code = int(http_req.get("status") or json_payload.get("status") or 0)
