@@ -1,0 +1,107 @@
+version: "3.8"
+
+services:
+  parcel-intake-svc:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: fictional-logistics/parcel-intake-svc:latest
+    container_name: parcel-intake-svc
+    environment:
+      - PORT=8080
+      - SERVICE_NAME=parcel-intake-svc
+      - ROUTE_SERVICE_URL=http://parcel-route-svc:8080
+      - DATABASE_URL=postgresql://parcel_user:parcel_pass@parcel-db:5432/parcel_logistics
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://god-view-sovereign:8000/v1/traces
+    ports:
+      - "18081:8080"
+    labels:
+      godview_managed: "true"
+      godview_kind: "cloud_run"
+      godview_role: "entrypoint"
+      metrics_port: "8080"
+      metrics_path: "/metrics"
+    depends_on:
+      - parcel-db
+      - parcel-route-svc
+
+  parcel-route-svc:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: fictional-logistics/parcel-route-svc:latest
+    container_name: parcel-route-svc
+    environment:
+      - PORT=8080
+      - SERVICE_NAME=parcel-route-svc
+      - DISPATCH_SERVICE_URL=http://parcel-dispatch-svc:8080
+      - DATABASE_URL=postgresql://parcel_user:parcel_pass@parcel-db:5432/parcel_logistics
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://god-view-sovereign:8000/v1/traces
+    ports:
+      - "18082:8080"
+    labels:
+      godview_managed: "true"
+      godview_kind: "cloud_run"
+      metrics_port: "8080"
+      metrics_path: "/metrics"
+    depends_on:
+      - parcel-db
+      - parcel-dispatch-svc
+
+  parcel-dispatch-svc:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: fictional-logistics/parcel-dispatch-svc:latest
+    container_name: parcel-dispatch-svc
+    environment:
+      - PORT=8080
+      - SERVICE_NAME=parcel-dispatch-svc
+      - PROOF_SERVICE_URL=http://parcel-proof-svc:8080
+      - DATABASE_URL=postgresql://parcel_user:parcel_pass@parcel-db:5432/parcel_logistics
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://god-view-sovereign:8000/v1/traces
+    ports:
+      - "18083:8080"
+    labels:
+      godview_managed: "true"
+      godview_kind: "cloud_run"
+      metrics_port: "8080"
+      metrics_path: "/metrics"
+    depends_on:
+      - parcel-db
+      - parcel-proof-svc
+
+  parcel-proof-svc:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: fictional-logistics/parcel-proof-svc:latest
+    container_name: parcel-proof-svc
+    environment:
+      - PORT=8080
+      - SERVICE_NAME=parcel-proof-svc
+      - DATABASE_URL=postgresql://parcel_user:parcel_pass@parcel-db:5432/parcel_logistics
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://god-view-sovereign:8000/v1/traces
+    ports:
+      - "18084:8080"
+    labels:
+      godview_managed: "true"
+      godview_kind: "cloud_run"
+      metrics_port: "8080"
+      metrics_path: "/metrics"
+    depends_on:
+      - parcel-db
+
+  parcel-db:
+    image: postgres:16-alpine
+    container_name: parcel-db
+    environment:
+      - POSTGRES_DB=parcel_logistics
+      - POSTGRES_USER=parcel_user
+      - POSTGRES_PASSWORD=parcel_pass
+    ports:
+      - "15432:5432"
+    labels:
+      godview_managed: "true"
+      godview_kind: "cloud_sql"
+      godview_datastore: "postgres"

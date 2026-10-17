@@ -36,7 +36,7 @@ check:
 severity: sev2
 wake_condition: {operator: ">=", threshold: 1, consecutive: 2, target_agent_id: application__loan-orchestrator-api}
 confidence: 0.95
-created_by: application__loan-orchestrator-api (gemini-3.8-flash, MEDIUM)
+created_by: application__loan-orchestrator-api
 version: 1.0.0
 status: enforced
 ---

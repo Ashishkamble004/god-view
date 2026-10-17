@@ -35,15 +35,10 @@ BAGGAGE_KEYS: tuple[str, ...] = ("journey.id", "customer.id", "synthetic")
 BUSINESS_SPAN_ATTRIBUTES: tuple[str, ...] = (
     "journey.id",
     "customer.id",
-    "loan.id",
     "decision",
-    "foir_pct",
-    "cibil_score",
     "status_from",
     "status_to",
     "event_type",
-    "emi_inr",
-    "amount_inr",
     "entity",
     "entity_id",
     "synthetic",
@@ -369,44 +364,18 @@ def set_business_attributes(
 
 def set_business_span_attributes(
     span: trace.Span,
-    *,
-    journey_id: str | None = None,
-    customer_id: str | None = None,
-    loan_id: str | None = None,
-    decision: str | None = None,
-    foir_pct: float | None = None,
-    cibil_score: int | None = None,
-    status_from: str | None = None,
-    status_to: str | None = None,
-    event_type: str | None = None,
-    emi_inr: float | None = None,
-    amount_inr: float | None = None,
-    entity: str | None = None,
-    entity_id: str | None = None,
-    synthetic: bool | None = None,
-    extra: Mapping[str, Any] | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    """Deprecated shim for set_business_attributes mapping legacy tenant fields into generic attributes."""
-    mapping: dict[str, Any] = {
-        "journey.id": journey_id,
-        "customer.id": customer_id,
-        "loan.id": loan_id,
-        "decision": decision,
-        "foir_pct": foir_pct,
-        "cibil_score": cibil_score,
-        "status_from": status_from,
-        "status_to": status_to,
-        "event_type": event_type,
-        "emi_inr": emi_inr,
-        "amount_inr": amount_inr,
-        "entity": entity,
-        "entity_id": entity_id,
-        "synthetic": synthetic,
-    }
-    if extra:
+    """Deprecated shim mapping legacy span attributes into generic business attributes."""
+    mapping: dict[str, Any] = {}
+    extra = kwargs.pop("extra", None)
+    for k, v in kwargs.items():
+        if k in ("journey_id", "customer_id") and "." not in k:
+            mapping[k.replace("_", ".")] = v
+        else:
+            mapping[k] = v
+    if extra and isinstance(extra, Mapping):
         mapping.update(extra)
-    mapping.update(kwargs)
     return set_business_attributes(span, **mapping)
 
 

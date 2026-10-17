@@ -4,7 +4,6 @@ from godview.invariants.compiler import (
     InvariantCompiler,
     InvariantLifecycleError,
     InvariantLifecycleManager,
-    expected_emi,
 )
 from godview.invariants.loader import (
     INVARIANTS_ROOT,
@@ -39,7 +38,6 @@ __all__ = [
     "SkillValidationError",
     "SkillsStorageClientProtocol",
     "default_skills_bucket_uri",
-    "expected_emi",
     "format_skill_markdown",
     "load_invariant_file",
     "load_seed_invariants",

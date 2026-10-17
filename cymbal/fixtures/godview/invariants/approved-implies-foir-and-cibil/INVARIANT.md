@@ -15,7 +15,7 @@ check:
 severity: sev1
 wake_condition: {operator: ">=", threshold: 1, consecutive: 2, target_agent_id: application__underwriting-los-svc}
 confidence: 0.93
-created_by: application__underwriting-los-svc (gemini-3.8-flash, MEDIUM)
+created_by: application__underwriting-los-svc
 version: 1.0.0
 status: enforced
 ---

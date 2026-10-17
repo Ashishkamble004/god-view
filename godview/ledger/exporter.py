@@ -40,16 +40,6 @@ from godview.ledger.process_mining import (
     classify_journey_conformance,
 )
 
-_ALLOWED_ENTITIES: frozenset[str] = frozenset(
-    {
-        "loan_application",
-        "disbursement",
-        "insurance_policy",
-        "credit_line",
-        "kyc_document",
-    }
-)
-
 _PRIMARY_KEY_BY_TABLE: dict[str, str] = {
     "events": "event_id",
     "state_transitions": "transition_id",
@@ -212,7 +202,7 @@ class _JourneyAccumulator:
     ended_at: datetime | None = None
     step_events: list[dict[str, Any]] = field(default_factory=list)
     final_status: str = "IN_PROGRESS"
-    rupee_value: Decimal = Decimal("0")
+    total_value: Decimal = Decimal("0")
     is_synthetic: bool = False
     seen_event_ids: set[str] = field(default_factory=set)
 
@@ -232,17 +222,11 @@ def _infer_entity(
     raw_entity: str | None,
     event_type: str,
 ) -> StateTransitionEntity:
-    if raw_entity in _ALLOWED_ENTITIES:
-        return raw_entity  # type: ignore[return-value]
-    if event_type in ("kyc.verified", "armor.blocked"):
-        return "kyc_document"
-    if event_type.startswith("credit_line."):
-        return "credit_line"
-    if event_type == "insurance.issued":
-        return "insurance_policy"
-    if event_type.startswith("disbursement."):
-        return "disbursement"
-    return "loan_application"
+    if raw_entity:
+        return str(raw_entity)
+    if "." in event_type:
+        return event_type.split(".", 1)[0]
+    return "default_entity"
 
 
 class LedgerSpanExporter(SpanExporter):
@@ -253,7 +237,7 @@ class LedgerSpanExporter(SpanExporter):
         bigquery: InMemoryBigQuery | None = None,
         *,
         env_id: str = "local-compose",
-        default_journey_name: str = "vehicle_loan_origination",
+        default_journey_name: str = "default_journey",
         write_stream: StorageWriteStreamProtocol | None = None,
         intended_order: Sequence[str] = DEFAULT_INTENDED_ORDER,
         stall_threshold_ms: int = 30_000,
@@ -374,21 +358,27 @@ class LedgerSpanExporter(SpanExporter):
 
             journey_id = attrs.get("journey.id") or raw.get("journey_id")
             customer_id = attrs.get("customer.id") or raw.get("customer_id")
-            loan_id = attrs.get("loan.id") or raw.get("loan_id")
             decision = attrs.get("decision") or raw.get("decision")
-            foir_pct = attrs.get("foir_pct") if "foir_pct" in attrs else raw.get("foir_pct")
-            cibil_score = (
-                int(attrs["cibil_score"])
-                if attrs.get("cibil_score") is not None
-                else (int(raw["cibil_score"]) if raw.get("cibil_score") is not None else None)
+            status_from = (
+                attrs.get("state_from")
+                or attrs.get("status_from")
+                or raw.get("state_from")
+                or raw.get("status_from")
             )
-            emi_inr = attrs.get("emi_inr") if "emi_inr" in attrs else raw.get("emi_inr")
-            amount_inr = attrs.get("amount_inr") if "amount_inr" in attrs else raw.get("amount_inr")
-            status_from = attrs.get("status_from") or raw.get("status_from")
-            status_to = attrs.get("status_to") or raw.get("status_to")
+            status_to = (
+                attrs.get("state_to")
+                or attrs.get("status_to")
+                or raw.get("state_to")
+                or raw.get("status_to")
+            )
             event_type = str(attrs.get("event_type") or raw.get("event_type") or operation)
-            entity_raw = attrs.get("entity") or raw.get("entity")
-            entity_id_raw = attrs.get("entity_id") or raw.get("entity_id") or loan_id or journey_id
+            entity_raw = (
+                attrs.get("entity_type")
+                or attrs.get("entity")
+                or raw.get("entity_type")
+                or raw.get("entity")
+            )
+            entity_id_raw = attrs.get("entity_id") or raw.get("entity_id") or journey_id
             http_status = (
                 attrs.get("http.status_code") or attrs.get("http_status") or raw.get("http_status")
             )
@@ -401,15 +391,18 @@ class LedgerSpanExporter(SpanExporter):
                 "probe" if raw_source == "probe" else ("cdc" if raw_source == "cdc" else "otel")
             )
 
-            extra_attrs = {
-                k: v
-                for k, v in attrs.items()
-                if k not in BUSINESS_SPAN_ATTRIBUTES and k != "http.status_code"
-            }
+            numeric_attrs: dict[str, float] = {}
+            extra_attrs: dict[str, Any] = {}
+            for k, v in attrs.items():
+                if k not in BUSINESS_SPAN_ATTRIBUTES and k != "http.status_code":
+                    extra_attrs[k] = v
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    numeric_attrs[k] = float(v)
+
             if status_from is not None:
-                extra_attrs["status_from"] = status_from
+                extra_attrs["state_from"] = status_from
             if status_to is not None:
-                extra_attrs["status_to"] = status_to
+                extra_attrs["state_to"] = status_to
 
             ev_model = LedgerEventRow(
                 event_id=event_id,
@@ -422,21 +415,27 @@ class LedgerSpanExporter(SpanExporter):
                 operation=operation,
                 event_type=event_type,
                 customer_id=str(customer_id) if customer_id else None,
-                loan_id=str(loan_id) if loan_id else None,
-                entity=str(entity_raw) if entity_raw else None,
+                entity_type=str(entity_raw) if entity_raw else None,
                 entity_id=str(entity_id_raw) if entity_id_raw else None,
+                state_from=str(status_from) if status_from else None,
+                state_to=str(status_to) if status_to else None,
                 decision=str(decision) if decision else None,
-                foir_pct=Decimal(str(foir_pct)) if foir_pct is not None else None,
-                cibil_score=cibil_score,
-                emi_inr=Decimal(str(emi_inr)) if emi_inr is not None else None,
-                amount_inr=Decimal(str(amount_inr)) if amount_inr is not None else None,
                 http_status=int(http_status) if http_status is not None else None,
                 duration_ms=int(duration_ms),
                 is_synthetic=synthetic,
                 source=source,
                 attributes=extra_attrs,
+                numeric_attributes=numeric_attrs,
             )
-            event_rows.append(ev_model.model_dump())
+            raw_dump = ev_model.model_dump()
+            valid_cols = {
+                "event_id", "event_time", "env_id", "journey_id", "trace_id", "span_id",
+                "service", "operation", "event_type", "entity_type", "entity_id", "decision",
+                "state_from", "state_to", "numeric_attributes", "currency", "http_status",
+                "duration_ms", "is_synthetic", "source", "attributes",
+            }
+            ev_dict = {k: v for k, v in raw_dump.items() if k in valid_cols}
+            event_rows.append(ev_dict)
 
             # Emit state_transitions row when status_to and journey_id are present (skip dwell mutation on duplicate retries)
             if status_to and journey_id and source in ("otel", "cdc") and not is_duplicate_event:
@@ -461,6 +460,8 @@ class LedgerSpanExporter(SpanExporter):
                     journey_id=j_str,
                     status_from=str(status_from) if status_from else None,
                     status_to=str(status_to),
+                    state_from=str(status_from) if status_from else None,
+                    state_to=str(status_to),
                     actor_service=service,
                     source="cdc" if source == "cdc" else "otel",
                     dwell_ms=dwell,
@@ -494,8 +495,9 @@ class LedgerSpanExporter(SpanExporter):
                     if acc.ended_at is None or end_time > acc.ended_at:
                         acc.ended_at = end_time
                     acc.is_synthetic = acc.is_synthetic or synthetic
-                    if amount_inr is not None and Decimal(str(amount_inr)) > acc.rupee_value:
-                        acc.rupee_value = Decimal(str(amount_inr))
+                    val = numeric_attrs.get("value") or numeric_attrs.get("amount")
+                    if val is not None and Decimal(str(val)) > acc.total_value:
+                        acc.total_value = Decimal(str(val))
                     step_status = str(status_to or decision or "OK")
                     acc.step_events.append(
                         {
@@ -577,7 +579,7 @@ class LedgerSpanExporter(SpanExporter):
                 observed_sequence=observed_seq,
                 conformance=conformance,
                 final_status=chronological_final_status,
-                rupee_value=acc.rupee_value,
+                total_value=acc.total_value,
                 total_duration_ms=total_dur,
                 is_synthetic=acc.is_synthetic,
                 journey_model_version="1.0",

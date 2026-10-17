@@ -25,7 +25,7 @@ check:
 severity: sev1
 wake_condition: {operator: ">=", threshold: 1, consecutive: 1, target_agent_id: business_line__vehicle_loan_origination}
 confidence: 0.96
-created_by: data__god-view-pg (gemini-3.8-flash, MEDIUM)
+created_by: data__god-view-pg
 version: 1.0.0
 status: enforced
 ---

@@ -21,7 +21,7 @@
   {"name": "observed_sequence", "type": "STRING", "mode": "NULLABLE"},
   {"name": "conformance", "type": "STRING", "mode": "NULLABLE"},
   {"name": "final_status", "type": "STRING", "mode": "NULLABLE"},
-  {"name": "rupee_value", "type": "NUMERIC", "mode": "NULLABLE"},
+  {"name": "total_value", "type": "NUMERIC", "mode": "NULLABLE"},
   {"name": "total_duration_ms", "type": "INT64", "mode": "NULLABLE"},
   {"name": "is_synthetic", "type": "BOOL", "mode": "NULLABLE"},
   {"name": "journey_model_version", "type": "STRING", "mode": "NULLABLE"}

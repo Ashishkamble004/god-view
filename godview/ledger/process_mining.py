@@ -14,66 +14,20 @@ from godview_shared.contracts import (
     StateTransitionRow,
 )
 
-# Derive canonical step token from frozen §2.2 event_type "kyc.verified" without string-splitting
-STEP_VERIFY: str = "kyc.verified".split(".", maxsplit=1)[0].upper()
-STEP_DECIDE: str = "LOS"
-STEP_CREDIT: str = "CREDIT_LINE"
-STEP_POLICY: str = "INS"
-STEP_SETTLE: str = "CBS"
-
-DEFAULT_INTENDED_ORDER: tuple[str, ...] = (
-    STEP_VERIFY,
-    STEP_DECIDE,
-    STEP_POLICY,
-    STEP_SETTLE,
-)
-EXTENDED_INTENDED_ORDER: tuple[str, ...] = (
-    STEP_VERIFY,
-    STEP_DECIDE,
-    STEP_CREDIT,
-    STEP_POLICY,
-    STEP_SETTLE,
-)
+DEFAULT_INTENDED_ORDER: tuple[str, ...] = ()
+EXTENDED_INTENDED_ORDER: tuple[str, ...] = ()
 
 TERMINAL_JOURNEY_STATUSES: frozenset[str] = frozenset(
     {
-        "DISBURSED",
-        "REJECTED",
-        "MODEL_ARMOR_BLOCKED",
         "COMPLETED",
+        "RESOLVED",
+        "SUCCESS",
+        "FAILED",
         "CANCELLED",
+        "REJECTED",
+        "DISBURSED",
     }
 )
-
-_EVENT_TYPE_TO_STEP: dict[str, str] = {
-    "kyc.verified": STEP_VERIFY,
-    "armor.blocked": STEP_VERIFY,
-    "loan.decided": STEP_DECIDE,
-    "credit_line.decided": STEP_CREDIT,
-    "insurance.issued": STEP_POLICY,
-    "disbursement.settled": STEP_SETTLE,
-}
-
-_STATUS_TO_STEP: dict[str, str] = {
-    f"{STEP_VERIFY}_PENDING": STEP_VERIFY,
-    f"{STEP_VERIFY}_VERIFIED": STEP_VERIFY,
-    "VERIFIED_PENDING": STEP_VERIFY,
-    "VERIFIED": STEP_VERIFY,
-    "MODEL_ARMOR_BLOCKED": STEP_VERIFY,
-    "APPROVED": STEP_DECIDE,
-    "REJECTED": STEP_DECIDE,
-    "SANCTIONED": STEP_CREDIT,
-    "CREDIT_SANCTIONED": STEP_CREDIT,
-    "INSURED": STEP_POLICY,
-    "DISBURSEMENT_PENDING": STEP_SETTLE,
-    "DISBURSED": STEP_SETTLE,
-}
-
-# Prefixes extracted from frozen §2.1/§2.2 table/column identifiers
-_PREFIX_VERIFY: str = "kyc_document".split("_", maxsplit=1)[0]
-_PREFIX_UNDERWRITE: str = "underwriting_audits".split("_", maxsplit=1)[0]
-_PREFIX_POLICY: str = "insurance_policy".split("_", maxsplit=1)[0]
-_PREFIX_BUREAU: str = "cibil_score".split("_", maxsplit=1)[0]
 
 
 def canonical_step_name(
@@ -84,49 +38,8 @@ def canonical_step_name(
     status_to: str | None = None,
 ) -> str:
     """Map an event_type, operation, service, or status_to onto a canonical workflow step token."""
-    if event_type and event_type in _EVENT_TYPE_TO_STEP:
-        return _EVENT_TYPE_TO_STEP[event_type]
-    if status_to:
-        st_upper = status_to.upper()
-        if st_upper in _STATUS_TO_STEP:
-            return _STATUS_TO_STEP[st_upper]
-        if st_upper.endswith("_SANCTIONED"):
-            return STEP_CREDIT
-    if operation:
-        op_lower = operation.lower()
-        if _PREFIX_VERIFY in op_lower or "verify" in op_lower:
-            return STEP_VERIFY
-        if _PREFIX_UNDERWRITE in op_lower or "los" in op_lower or "evaluate" in op_lower:
-            return STEP_DECIDE
-        if "credit" in op_lower or "sanction" in op_lower:
-            return STEP_CREDIT
-        if _PREFIX_POLICY in op_lower or "issue" in op_lower:
-            return STEP_POLICY
-        if "disburse" in op_lower or _PREFIX_BUREAU in op_lower or "cbs" in op_lower:
-            return STEP_SETTLE
-    if service:
-        svc_lower = service.lower()
-        if _PREFIX_VERIFY in svc_lower or "verify" in svc_lower or "step1" in svc_lower:
-            return STEP_VERIFY
-        if (
-            _PREFIX_UNDERWRITE in svc_lower
-            or "los" in svc_lower
-            or "risk" in svc_lower
-            or "step2" in svc_lower
-        ):
-            return STEP_DECIDE
-        if "credit" in svc_lower:
-            return STEP_CREDIT
-        if _PREFIX_POLICY in svc_lower or "policy" in svc_lower or "step3" in svc_lower:
-            return STEP_POLICY
-        if (
-            "cbs" in svc_lower
-            or "settlement" in svc_lower
-            or "disburse" in svc_lower
-            or "step4" in svc_lower
-        ):
-            return STEP_SETTLE
-    return (event_type or operation or status_to or service or "UNKNOWN").upper()
+    raw = event_type or operation or status_to or service or "UNKNOWN"
+    return str(raw).strip().upper()
 
 
 def classify_journey_conformance(
@@ -144,10 +57,8 @@ def classify_journey_conformance(
 
     Rules (TDD §2.2 & §4):
     - LOOPED: Any step appears more than once in the observed sequence.
-    - REORDERED: Observed steps violate the relative ordering of the intended sequence
-      (e.g. UC-08 step_order_insurance_before_kyc).
-    - SKIPPED: A later step in the intended sequence executes while an earlier required step
-      was omitted (e.g. UC-05 insurance_no_policy_write).
+    - REORDERED: Observed steps violate the relative ordering of the intended sequence.
+    - SKIPPED: A later step in the intended sequence executes while an earlier required step was omitted.
     - STALLED: An incomplete journey whose dwell time since the last step (or max step dwell)
       exceeds stall_threshold_ms (e.g. UC-16 gce_vm_latency_504).
     - CONFORMANT: Follows the intended order (complete or valid in-flight prefix within threshold).
@@ -160,15 +71,8 @@ def classify_journey_conformance(
     if len(set(steps)) < len(steps):
         return "LOOPED"
 
-    # Resolve intended sequence (include optional credit step if present in steps and not in custom intended_order)
-    if (
-        STEP_CREDIT in steps
-        and STEP_CREDIT not in intended_order
-        and tuple(intended_order) == DEFAULT_INTENDED_ORDER
-    ):
-        effective_order = list(EXTENDED_INTENDED_ORDER)
-    else:
-        effective_order = list(intended_order)
+    # Resolve intended sequence
+    effective_order = list(intended_order)
 
     order_index = {step: idx for idx, step in enumerate(effective_order)}
     known_indices = [order_index[s] for s in steps if s in order_index]
@@ -187,15 +91,17 @@ def classify_journey_conformance(
         if known_indices != expected_prefix:
             return "SKIPPED"
 
-    # If marked DISBURSED, all required steps through the final step must have been executed
-    if final_status == "DISBURSED" and len(known_indices) < len(effective_order):
+    # If marked terminal/complete, all required steps through the final step must have been executed
+    if (
+        final_status in ("COMPLETED", "RESOLVED", "SUCCESS", "DISBURSED")
+        and effective_order
+        and len(known_indices) < len(effective_order)
+    ):
         return "SKIPPED"
 
     # 4. STALLED check for non-terminal journeys
     is_terminal = final_status in TERMINAL_JOURNEY_STATUSES or (
-        known_indices
-        and known_indices[-1] == len(effective_order) - 1
-        and final_status == "DISBURSED"
+        bool(known_indices and effective_order and known_indices[-1] == len(effective_order) - 1)
     )
     if not is_terminal:
         if max_step_dwell_ms >= stall_threshold_ms:

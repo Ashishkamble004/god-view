@@ -104,19 +104,7 @@ from pydantic import ValidationError
 @pytest.mark.unit
 @pytest.mark.contract
 def test_tenant_9_tables_and_no_telemetry_in_patient() -> None:
-    """TDD §2.1 & I-04: Exact 9 business tables; telemetry tables are forbidden."""
-    expected = (
-        "vehicles",
-        "customers",
-        "kyc_documents",
-        "loan_applications",
-        "underwriting_audits",
-        "commercial_credit_lines",
-        "insurance_policies",
-        "disbursements",
-        "chaos_fault_states",
-    )
-    assert tuple(TENANT_BUSINESS_TABLES) == expected
+    """TDD §2.1 & I-04: Tenant business tables loaded from runtime fixture; telemetry tables forbidden."""
     assert len(TENANT_BUSINESS_TABLES) == 9
     for forbidden in ("service_metric_rollups", "otel_trace_spans"):
         assert forbidden in FORBIDDEN_TELEMETRY_TABLES
@@ -139,21 +127,17 @@ def test_ledger_row_models_and_tables() -> None:
         span_id="sp-01",
         service="svc-alpha",
         operation="POST /evaluate",
-        event_type="loan.decided",
+        event_type="item.decided",
         customer_id="cust-01",
-        loan_id="ln-01",
-        entity="loan_application",
-        entity_id="ln-01",
+        entity_type="item_record",
+        entity_id="rec-01",
         decision="APPROVED",
-        foir_pct=Decimal("48.5"),
-        cibil_score=740,
-        emi_inr=Decimal("22400.00"),
-        amount_inr=Decimal("900000.00"),
         http_status=200,
         duration_ms=145,
         is_synthetic=True,
         source="otel",
         attributes={"rules_version": "abc1234"},
+        numeric_attributes={"ratio": 48.5, "score": 740.0},
     )
     assert ev.source == "otel"
 
@@ -161,8 +145,8 @@ def test_ledger_row_models_and_tables() -> None:
         transition_id="trn-1001",
         transition_time=now,
         env_id="env-neutral-01",
-        entity="loan_application",
-        entity_id="ln-01",
+        entity="item_record",
+        entity_id="rec-01",
         journey_id="jrn-01",
         status_from="STEP_1_DONE",
         status_to="APPROVED",
@@ -193,7 +177,7 @@ def test_ledger_row_models_and_tables() -> None:
         observed_sequence="STEP1->STEP2",
         conformance="CONFORMANT",
         final_status="COMPLETED",
-        rupee_value=Decimal("900000.00"),
+        total_value=Decimal("900000.00"),
         total_duration_ms=850,
         is_synthetic=True,
         journey_model_version="v1",
@@ -267,7 +251,7 @@ def test_firestore_collections_and_json_contracts_serialize_by_alias() -> None:
             "journeys": ["origination_flow"],
             "journey_ids": ["j-1", "j-2"],
             "rows": 212,
-            "rupee_at_risk": 18400000,
+            "value_at_risk": 18400000,
         },
         "correlated_changes": [
             {
@@ -306,7 +290,7 @@ def test_firestore_collections_and_json_contracts_serialize_by_alias() -> None:
             "trust_level_required": 4,
             "narrative": "Re-evaluate 212 applications",
             "evidence_pack_id": "evp-20261016-0007",
-            "rupee_impact": 18400000,
+            "financial_impact": 18400000,
             "reversal_recipe": {"capability": "biz.compensate_journey", "args": {}},
             "requested_at": "2026-10-16T08:36:00Z",
             "expires_at": "2026-10-16T09:36:00Z",
@@ -478,9 +462,9 @@ def test_firestore_collections_and_json_contracts_serialize_by_alias() -> None:
     )
     assert edge_doc.evidence == "config"
     ent_doc = DiscoveredEntityDoc(
-        name="loan_application", correlation_keys=["loan_id", "journey_id"]
+        name="item_record", correlation_keys=["item_id", "journey_id"]
     )
-    assert "loan_id" in ent_doc.correlation_keys
+    assert "item_id" in ent_doc.correlation_keys
     jrn_doc = JourneyDoc(name="origination_flow", steps=["STEP1", "STEP2"])
     assert len(jrn_doc.steps) == 2
     ca_doc = CourtAgentDoc(
@@ -946,14 +930,14 @@ async def test_sense_adapter_abc_and_trust_enforcement() -> None:
     )
     assert res_l2["executed"] == "tf.apply_dispatch"
 
-    # Negative 3: Money-movement capability (biz.replay_disbursement, L4) without approval_id / L4 whitelist
+    # Negative 3: Money-movement capability (biz.replay_transaction, L4) without approval_id / L4 whitelist
     with pytest.raises(TrustViolation):
         await adapter.execute_capability(
-            "biz.replay_disbursement",
+            "biz.replay_transaction",
             {},
             make_td(
-                capability_id="biz.replay_disbursement",
-                action_type="biz.replay_disbursement",
+                capability_id="biz.replay_transaction",
+                action_type="biz.replay_transaction",
                 effective_level=2,
                 required_level=4,
                 approval_id=None,
@@ -962,17 +946,17 @@ async def test_sense_adapter_abc_and_trust_enforcement() -> None:
 
     # Positive 3: Money-movement capability WITH approval_id at L2 succeeds
     res_money = await adapter.execute_capability(
-        "biz.replay_disbursement",
+        "biz.replay_transaction",
         {},
         make_td(
-            capability_id="biz.replay_disbursement",
-            action_type="biz.replay_disbursement",
+            capability_id="biz.replay_transaction",
+            action_type="biz.replay_transaction",
             effective_level=2,
             required_level=4,
             approval_id="apr-money-1",
         ),
     )
-    assert res_money["executed"] == "biz.replay_disbursement"
+    assert res_money["executed"] == "biz.replay_transaction"
 
     # Negative 4: action_type != capability_id
     with pytest.raises(TrustViolation):
@@ -1021,7 +1005,8 @@ async def test_sense_adapter_abc_and_trust_enforcement() -> None:
 def test_otel_baggage_and_metrics() -> None:
     """TDD §3.2 & §5: Baggage propagation, business span attributes, and /metrics exposition."""
     assert BAGGAGE_KEYS == ("journey.id", "customer.id", "synthetic")
-    assert "foir_pct" in BUSINESS_SPAN_ATTRIBUTES
+    assert "decision" in BUSINESS_SPAN_ATTRIBUTES
+    assert "status_to" in BUSINESS_SPAN_ATTRIBUTES
     assert SYNTHETIC_HEADER == "X-Synthetic"
 
     headers = inject_baggage_headers(journey_id="jrn-99", customer_id="cust-88", synthetic=True)
@@ -1037,8 +1022,7 @@ def test_otel_baggage_and_metrics() -> None:
             span,
             journey_id="jrn-99",
             decision="APPROVED",
-            foir_pct=42.0,
-            cibil_score=760,
+            status_to="COMPLETED",
             synthetic=True,
         )
 
@@ -1125,25 +1109,25 @@ async def test_in_memory_fakes_firestore_knn_bigquery_pubsub_agent_engine() -> N
             {
                 "event_id": "e-1",
                 "decision": "APPROVED",
-                "foir_pct": 65,
-                "cibil_score": 700,
-                "amount_inr": 5,
+                "ratio": 65,
+                "score": 700,
+                "value": 5,
                 "source": "otel",
             },
             {
                 "event_id": "e-1",
                 "decision": "APPROVED",
-                "foir_pct": 65,
-                "cibil_score": 700,
-                "amount_inr": 5,
+                "ratio": 65,
+                "score": 700,
+                "value": 5,
                 "source": "otel",
             },
             {
                 "event_id": "e-2",
                 "decision": "APPROVED",
-                "foir_pct": 45,
-                "cibil_score": 750,
-                "amount_inr": 2500,
+                "ratio": 45,
+                "score": 750,
+                "value": 2500,
                 "source": "otel",
             },
         ],
@@ -1152,12 +1136,12 @@ async def test_in_memory_fakes_firestore_knn_bigquery_pubsub_agent_engine() -> N
     assert len(bq.get_table("events")) == 2
     assert (
         bq.query(
-            "SELECT COUNT(*) FROM events WHERE decision='APPROVED' AND (foir_pct > 60 OR cibil_score < 680)"
+            "SELECT COUNT(*) FROM events WHERE decision='APPROVED' AND (ratio > 60 OR score < 680)"
         )[0]["count"]
         == 1
     )
-    assert bq.query("SELECT COUNT(*) FROM events WHERE foir_pct > 70")[0]["count"] == 0
-    assert bq.query("SELECT COUNT(*) FROM events WHERE amount_inr > 1000")[0]["count"] == 1
+    assert bq.query("SELECT COUNT(*) FROM events WHERE ratio > 70")[0]["count"] == 0
+    assert bq.query("SELECT COUNT(*) FROM events WHERE value > 1000")[0]["count"] == 1
     assert bq.insert_rows("kpi_rollups", [{"a": 1}, {"a": 1}]) == 1
 
     # Invalid / unparseable SQL must raise ValueError (no silent fake)

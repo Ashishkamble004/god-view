@@ -2,12 +2,12 @@
 name: diagnose-and-heal-postgres-lock-contention
 description: Isolates and resolves PostgreSQL lock contention that stalls vehicle-loan underwriting journeys, through the capability adapter layer only.
 version: 1.2.0
-created_by: data__god-view-pg (gemini-3.8-flash, MEDIUM)
+created_by: data__god-view-pg
 owner_agent_id: data__god-view-pg
-provenance: agent_synthesized
-confidence_score: 0.94
-executions_count: 3
-avg_mttr_seconds: 48
+provenance: human_runbook
+confidence_score: 1.0
+executions_count: 0
+avg_mttr_seconds: 0.0
 trigger:
   sentinel_classes: [golden_signal_gate, journey_conformance]
   symptom: "p95 above 3.5 s on underwriting or orchestrator routes, error rate below 10 %, pods ready, journeys dwelling in LOS"

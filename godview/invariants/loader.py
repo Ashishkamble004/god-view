@@ -27,7 +27,6 @@ ALLOWED_PYTHON_FUNCTIONS: frozenset[str] = frozenset(
         "float",
         "int",
         "bool",
-        "expected_emi",
     }
 )
 
@@ -54,16 +53,16 @@ _FORBIDDEN_SQL_PREFIXES: tuple[str, ...] = (
 
 
 def discover_invariant_names(
-    journey_key: str = "vehicle_loan_origination",
+    journey_key: str | None = None,
     *,
     root_dir: Path | None = None,
 ) -> tuple[str, ...]:
-    """Discover all invariant slugs under godview/invariants/<journey_key>/*/INVARIANT.md."""
+    """Discover all invariant slugs under <root_dir>/[<journey_key>/]*/INVARIANT.md."""
     base = root_dir if root_dir is not None else INVARIANTS_ROOT
-    journey_dir = base / journey_key
-    if not journey_dir.is_dir():
+    target_dir = base / journey_key if journey_key else base
+    if not target_dir.is_dir():
         return ()
-    return tuple(sorted(p.parent.name for p in journey_dir.glob("*/INVARIANT.md") if p.is_file()))
+    return tuple(sorted(p.parent.name for p in target_dir.glob("*/INVARIANT.md") if p.is_file()))
 
 
 SEED_INVARIANT_NAMES: tuple[str, ...] = discover_invariant_names()
@@ -225,27 +224,29 @@ def load_invariant_file(
 def resolve_invariant_path(
     name: str,
     *,
-    journey_key: str = "vehicle_loan_origination",
+    journey_key: str | None = None,
     root_dir: Path | None = None,
 ) -> Path:
-    """Resolve the filesystem path for a named invariant under godview/invariants/<journey_key>/<name>/INVARIANT.md."""
+    """Resolve the filesystem path for a named invariant under <root_dir>/[<journey_key>/]<name>/INVARIANT.md."""
     base = root_dir if root_dir is not None else INVARIANTS_ROOT
-    direct = base / journey_key / name / "INVARIANT.md"
+    if journey_key:
+        direct = base / journey_key / name / "INVARIANT.md"
+    else:
+        direct = base / name / "INVARIANT.md"
     if direct.is_file():
         return direct
-    if name.startswith("step-order"):
-        return base / journey_key / "step-order" / "INVARIANT.md"
-    if name.startswith("emi-formula"):
-        return base / journey_key / "emi-formula" / "INVARIANT.md"
+    matches = list(base.glob(f"**/{name}/INVARIANT.md"))
+    if matches:
+        return matches[0]
     return direct
 
 
 def load_seed_invariants(
-    journey_key: str = "vehicle_loan_origination",
+    journey_key: str | None = None,
     *,
     root_dir: Path | None = None,
 ) -> list[InvariantDoc]:
-    """Load and validate all seed invariants discovered under the given journey_key."""
+    """Load and validate all seed invariants discovered under the given journey_key or root_dir."""
     slugs = discover_invariant_names(journey_key=journey_key, root_dir=root_dir)
     return [
         load_invariant_file(

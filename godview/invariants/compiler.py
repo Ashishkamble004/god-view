@@ -33,19 +33,6 @@ class InvariantLifecycleError(ValueError):
     """Raised when an invariant lifecycle transition violates self-consistency, shadow window, or retirement rules."""
 
 
-def expected_emi(principal: float, annual_rate_pct: float, tenure_months: int) -> float:
-    """Compute the standard reducing-balance monthly EMI in INR."""
-    if principal <= 0 or tenure_months <= 0:
-        return 0.0
-    if annual_rate_pct <= 0:
-        return principal / tenure_months
-    monthly_r = annual_rate_pct / 1200.0
-    factor = (1.0 + monthly_r) ** tenure_months
-    if factor == 1.0:
-        return principal / tenure_months
-    return principal * monthly_r * factor / (factor - 1.0)
-
-
 def _compare_threshold(value: float, operator: str, threshold: float) -> bool:
     if operator == ">=":
         return value >= threshold
@@ -179,7 +166,6 @@ class InvariantCompiler:
             "float": float,
             "int": int,
             "bool": bool,
-            "expected_emi": expected_emi,
         }
         for row in rows:
             local_env = {

@@ -28,28 +28,22 @@ from godview_shared.capabilities import CAPABILITY_REGISTRY
 # §2.1 Tenant Business Database (9 tables; zero telemetry tables — TDD I-04)
 # ==============================================================================
 
-TENANT_BUSINESS_TABLES: tuple[str, ...] = (
-    "vehicles",
-    "customers",
-    "kyc_documents",
-    "loan_applications",
-    "underwriting_audits",
-    "commercial_credit_lines",
-    "insurance_policies",
-    "disbursements",
-    "chaos_fault_states",
-)
+def _load_tenant_fixture_tables() -> tuple[tuple[str, ...], tuple[str, ...]]:
+    import json
+    from pathlib import Path
 
-CHAOS_SCENARIO_IDS: tuple[str, ...] = (
-    "insurance_no_policy_write",
-    "cibil_stub_900",
-    "foir_threshold_40",
-    "step_order_insurance_before_kyc",
-    "emi_rounding",
-    "cloudsql_lock_contention",
-    "gke_oom_503",
-    "gce_vm_latency_504",
-)
+    repo_root = Path(__file__).resolve().parents[3]
+    for p in repo_root.glob("*/fixtures/godview/tenant_tables.json"):
+        if p.is_file():
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                return tuple(data.get("tables", ())), tuple(data.get("chaos_scenarios", ()))
+            except Exception:
+                pass
+    return (), ()
+
+
+TENANT_BUSINESS_TABLES, CHAOS_SCENARIO_IDS = _load_tenant_fixture_tables()
 
 FORBIDDEN_TELEMETRY_TABLES: frozenset[str] = frozenset(
     {
@@ -79,19 +73,12 @@ JourneyConformance = Literal[
     "LOOPED",
     "STALLED",
 ]
-KpiName = Literal[
-    "approval_rate",
-    "step_conversion",
-    "ticket_size_inr",
-    "rupees_per_hour",
-    "emi_mean",
-    "emi_stddev",
-    "disbursement_latency_ms",
-    "policy_issue_rate",
-] | str
+KpiName = str
 
 
 class LedgerEventRow(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     event_id: str
     event_time: datetime | str
     env_id: str
@@ -110,15 +97,9 @@ class LedgerEventRow(BaseModel):
     trace_id: str | None = None
     span_id: str | None = None
 
-    # Deprecated / legacy shim fields retained for transition cycle:
     customer_id: str | None = None
-    loan_id: str | None = None
     entity: str | None = None
     decision: str | None = None
-    foir_pct: Decimal | float | None = None
-    cibil_score: int | None = None
-    emi_inr: Decimal | float | None = None
-    amount_inr: Decimal | float | None = None
     http_status: int | None = None
     duration_ms: int | None = None
     is_synthetic: bool = False
@@ -181,6 +162,8 @@ class JourneyStep(BaseModel):
 
 
 class LedgerJourneyRow(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     journey_id: str
     journey_name: str
     started_at: datetime
@@ -191,7 +174,7 @@ class LedgerJourneyRow(BaseModel):
     observed_sequence: str
     conformance: JourneyConformance
     final_status: str
-    rupee_value: Decimal | float = Decimal("0")
+    total_value: Decimal | float = Decimal("0")
     total_duration_ms: int = 0
     is_synthetic: bool = False
     journey_model_version: str = "1.0"
@@ -213,7 +196,7 @@ class KpiRollupRow(BaseModel):
 
 
 # ==============================================================================
-# §2.3 & §2.4 Firestore Native DB god-view-memory-db (13 collections)
+# §2.3 & §2.4 Firestore Native DB (13 collections)
 # ==============================================================================
 
 FIRESTORE_COLLECTIONS: tuple[str, ...] = (
@@ -429,6 +412,8 @@ class DiscoveredEntityDoc(BaseModel):
 
 
 class JourneyDoc(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     doc_id: str | None = None
     name: str
     steps: list[str] = Field(default_factory=list)
@@ -436,7 +421,7 @@ class JourneyDoc(BaseModel):
     intended_order_source: str = ""
     conformance_rules: list[dict[str, Any]] = Field(default_factory=list)
     funnel_kpis: list[str] = Field(default_factory=list)
-    rupee_impact_model: dict[str, Any] = Field(default_factory=dict)
+    impact_model: dict[str, Any] = Field(default_factory=dict)
     owner_agent_id: str | None = None
     status: str = "active"
 
@@ -695,11 +680,13 @@ class EvidenceBaseline(BaseModel):
 
 
 class EvidenceAffected(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     services: list[str] = Field(default_factory=list)
     journeys: list[str] = Field(default_factory=list)
     journey_ids: list[str] = Field(default_factory=list)
     rows: int = 0
-    rupee_at_risk: Decimal | float | int = 0
+    value_at_risk: Decimal | float | int = 0
 
 
 class EvidenceCorrelatedChange(BaseModel):
@@ -781,7 +768,7 @@ class EpisodicIncidentDoc(BaseModel):
     causal_chain: list[str] = Field(default_factory=list)
     actions: list[IncidentActionRef] = Field(default_factory=list)
     outcome: Literal["resolved", "mitigated", "false_positive", "open"] = "open"
-    rupee_impact: Decimal | float | int = 0
+    financial_impact: Decimal | float | int = 0
     affected_journeys: list[str] = Field(default_factory=list)
     diagnoses: list[Diagnosis] = Field(default_factory=list)
     convergence: ConvergenceRecord | None = None
@@ -838,6 +825,8 @@ class CostFindingDoc(BaseModel):
 
 
 class ApprovalCard(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     approval_id: str
     incident_id: str
     agent_id: str
@@ -847,7 +836,7 @@ class ApprovalCard(BaseModel):
     trust_level_required: int = Field(ge=1, le=4)
     narrative: str
     evidence_pack_id: str
-    rupee_impact: Decimal | float | int = 0
+    financial_impact: Decimal | float | int = 0
     reversal_recipe: dict[str, Any]
     requested_at: datetime | str
     expires_at: datetime | str
@@ -908,6 +897,8 @@ class TrustDecision(BaseModel):
 class CapabilityInvokeRequest(BaseModel):
     """Request body for POST /v1/capabilities/{capability_id}:invoke (Decision A3)."""
 
+    model_config = ConfigDict(extra="allow")
+
     agent_id: str
     incident_id: str | None = None
     args: dict[str, Any] = Field(default_factory=dict)
@@ -917,7 +908,7 @@ class CapabilityInvokeRequest(BaseModel):
     evidence_pack_id: str | None = None
     reversal_recipe: dict[str, Any] | None = None
     novel_skill_first_step: bool = False
-    rupee_impact: Decimal | float | int = 0
+    financial_impact: Decimal | float | int = 0
     narrative: str | None = None
 
 

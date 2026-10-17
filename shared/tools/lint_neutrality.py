@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""TDD I-02 Environment Neutrality Linter (`make lint-neutrality`).
+"""Strict Environment Neutrality Linter.
 
-Scans `godview/` (excluding the runtime vaults `godview/invariants/` and
-`godview/agent-skills/`) and `shared/` for any hardcoded tenant service names,
-domain terms, project IDs, or hostnames, allowing only the frozen TDD §2.1/§2.2
-schema/column/span identifiers where required by the TDD contract.
-Must return 0 hits.
+Scans `godview/` and `shared/` for hardcoded tenant service names, domain terms,
+environment project IDs, buckets, hostnames, ports, and finance/lending vocabulary.
+
+Zero allowlist. Returns 0 hits when codebase is fully neutral.
 """
 
 from __future__ import annotations
@@ -14,43 +13,37 @@ import re
 import sys
 from pathlib import Path
 
-# Split token parts so this file itself never triggers a raw grep over shared/
-_FORBIDDEN_NEUTRALITY_PARTS: tuple[tuple[str, str], ...] = (
+# Split token parts so this file never triggers a raw string search
+_BANNED_FINANCE_LENDING_PARTS: tuple[tuple[str, str], ...] = (
+    ("lo", "an"),
+    ("lend", "ing"),
+    ("borrow", "er"),
+    ("lend", "er"),
+    ("sanct", "ion"),
+    ("under", "writing"),
+    ("disburse", "ment"),
+    ("cib", "il"),
+    ("fo", "ir"),
+    ("em", "i"),
+    ("rup", "ee"),
+    ("in", "r"),
+    ("ky", "c"),
+    ("insur", "ance"),
+)
+
+_BANNED_ENVIRONMENT_PARTS: tuple[tuple[str, str], ...] = (
     ("cym", "bal"),
     ("general", "-ak"),
     ("ak-", "demos"),
-    ("lo", "an"),
-    ("ky", "c"),
-    ("under", "writing"),
-    ("cib", "il"),
-    ("insur", "ance"),
-    ("fle", "et"),
+    ("76900298", "5772"),
+    ("altostrat", ".com"),
+    ("god-view-edge-", "policy"),
+    ("80", "85"),
 )
 
-FORBIDDEN_TENANT_TERMS: tuple[str, ...] = tuple(a + b for a, b in _FORBIDDEN_NEUTRALITY_PARTS)
-
-# Explicit allowlist of TDD §2.1 / §2.2 frozen table/column/span/event identifiers
-_FROZEN_SCHEMA_PARTS: tuple[tuple[str, str], ...] = (
-    ("kyc_", "documents"),
-    ("loan_", "applications"),
-    ("underwriting_", "audits"),
-    ("insurance_", "policies"),
-    ("loan_", "application"),
-    ("insurance_", "policy"),
-    ("kyc_", "document"),
-    ("loan_", "id"),
-    ("loan.", "id"),
-    ("cibil_", "score"),
-    ("kyc.", "verified"),
-    ("loan.", "decided"),
-    ("insurance.", "issued"),
-    ("vehicle_loan_", "origination"),
-    ("step_order_insurance_before_", "kyc"),
-    ("insurance_no_policy_", "write"),
-    ("cibil_stub_", "900"),
+BANNED_TERMS: tuple[str, ...] = tuple(
+    a + b for a, b in (_BANNED_FINANCE_LENDING_PARTS + _BANNED_ENVIRONMENT_PARTS)
 )
-
-ALLOWED_FROZEN_IDENTIFIERS: tuple[str, ...] = tuple(a + b for a, b in _FROZEN_SCHEMA_PARTS)
 
 _EXCLUDED_DIR_NAMES: frozenset[str] = frozenset(
     {
@@ -65,36 +58,30 @@ _EXCLUDED_DIR_NAMES: frozenset[str] = frozenset(
     }
 )
 
+_EXCLUDED_FILE_NAMES: frozenset[str] = frozenset(
+    {
+        "lint_neutrality.py",
+        "lint_brands.py",
+        "check_neutrality.py",
+    }
+)
+
 
 def _compile_pattern() -> re.Pattern[str]:
-    escaped = [re.escape(term) for term in FORBIDDEN_TENANT_TERMS]
-    return re.compile("(?:" + "|".join(escaped) + ")", re.IGNORECASE)
+    patterns: list[str] = []
+    for term in BANNED_TERMS:
+        # Word boundary style check: bounded by non-alphanumeric characters
+        patterns.append(rf"(?<![a-zA-Z0-9]){re.escape(term)}(?![a-zA-Z0-9])")
+    return re.compile("|".join(patterns), re.IGNORECASE)
 
 
-def _strip_allowed_identifiers(line: str) -> str:
-    cleaned = line
-    for allowed in ALLOWED_FROZEN_IDENTIFIERS:
-        cleaned = re.sub(re.escape(allowed), "", cleaned, flags=re.IGNORECASE)
-    return cleaned
-
-
-def _is_vault_path(file_path: Path, repo_root: Path) -> bool:
-    try:
-        rel = file_path.resolve().relative_to(repo_root.resolve())
-    except ValueError:
-        return False
-    parts = rel.parts
-    if len(parts) >= 2 and parts[0] == "godview" and parts[1] in ("invariants", "agent-skills"):
-        if file_path.name in ("INVARIANT.md", "SKILL.md") or file_path.suffix.lower() == ".md":
-            return True
-    return False
-
-
-def scan_neutrality(paths: list[Path], repo_root: Path | None = None) -> list[str]:
-    """Scan target paths for hardcoded tenant/environment terms."""
+def scan_neutrality(
+    paths: list[Path],
+    repo_root: Path | None = None,
+) -> list[str]:
+    """Strictly scan target paths for hardcoded tenant/environment terms. Zero allowlist."""
     pattern = _compile_pattern()
     self_path = Path(__file__).resolve()
-    root_dir = repo_root.resolve() if repo_root is not None else self_path.parents[2]
     violations: list[str] = []
 
     for target in paths:
@@ -107,22 +94,19 @@ def scan_neutrality(paths: list[Path], repo_root: Path | None = None) -> list[st
             else [p for p in target_resolved.rglob("*") if p.is_file()]
         )
         for file_path in sorted(files):
-            if file_path == self_path:
+            if file_path == self_path or file_path.name in _EXCLUDED_FILE_NAMES:
                 continue
             if any(part in _EXCLUDED_DIR_NAMES for part in file_path.parts):
-                continue
-            if _is_vault_path(file_path, root_dir):
                 continue
             try:
                 content = file_path.read_text(encoding="utf-8")
             except (UnicodeDecodeError, OSError):
                 continue
             for lineno, line in enumerate(content.splitlines(), start=1):
-                scrubbed = _strip_allowed_identifiers(line)
-                match = pattern.search(scrubbed)
+                match = pattern.search(line)
                 if match:
                     violations.append(
-                        f"{file_path}:{lineno}: hardcoded tenant/domain identifier '{match.group(0)}'"
+                        f"{file_path}:{lineno}: hardcoded tenant/environment identifier '{match.group(0)}'"
                     )
     return violations
 
@@ -140,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
             print(v, file=sys.stderr)
         print(f"lint-neutrality FAILED: {len(violations)} violation(s) found.", file=sys.stderr)
         return 1
-    print("lint-neutrality OK: 0 tenant/environment hits in shared/ and godview/.")
+    print("lint-neutrality OK: 0 tenant/environment hits in scanned targets.")
     return 0
 
 

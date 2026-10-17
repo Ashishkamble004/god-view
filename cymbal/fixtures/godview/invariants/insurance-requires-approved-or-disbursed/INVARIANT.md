@@ -21,7 +21,7 @@ check:
 severity: sev2
 wake_condition: {operator: ">=", threshold: 1, consecutive: 1, target_agent_id: application__motor-insurance-svc}
 confidence: 0.94
-created_by: application__motor-insurance-svc (gemini-3.8-flash, MEDIUM)
+created_by: application__motor-insurance-svc
 version: 1.0.0
 status: enforced
 ---
