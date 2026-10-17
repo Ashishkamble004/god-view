@@ -1,6 +1,6 @@
 {
   "cloud_armor": {
-    "security_policy": "god-view-edge-policy",
+    "security_policy": "edge-security-policy",
     "rule_1000": {
       "priority": 1000,
       "action": "deny(403)",

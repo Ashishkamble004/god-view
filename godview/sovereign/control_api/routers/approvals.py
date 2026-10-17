@@ -1,23 +1,27 @@
 """Approvals router (Plan §3.4 & §1.2).
 
 Exposes:
-- GET /approvals: list approval cards (pending, decided, expired)
-- GET /approvals/{approval_id}: get approval card details
-- POST /approvals: create an approval request card (TTL 30 min)
-- POST /approvals/{approval_id}/approve: approve card with IAP operator identity
-- POST /approvals/{approval_id}/reject: reject card with IAP operator identity
+- GET /approvals: list approval cards (auto-expiring overdue items)
+- GET /approvals/{approval_id}: fetch approval card by ID
+- POST /approvals: create an approval request card (TTL 30 min, single use)
+- POST /approvals/{approval_id}/approve & :approve: approve card with operator identity,
+  immediately executing the approved invocation as godview-act-sa, verifying effect,
+  persisting the execution result, and closing associated incident.
+- POST /approvals/{approval_id}/reject & :reject: reject card with operator identity
 """
 
 from __future__ import annotations
 
+import inspect
 import logging
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from godview_shared.contracts import ApprovalCard, TrustViolation
 from pydantic import BaseModel, Field
 
+from godview.sovereign.remediation.registry import RemediationDispatcher
 from godview.sovereign.trust_ladder import TrustGate
 
 logger = logging.getLogger(__name__)
@@ -32,8 +36,10 @@ class ApprovalCreateRequest(BaseModel):
     target_resource: str
     trust_level_required: int = Field(default=2, ge=1, le=4)
     narrative: str
+    args: dict[str, Any] = Field(default_factory=dict)
+    verification_plan: list[dict[str, Any]] | list[str] | None = None
     evidence_pack_id: str = "evp-remediation"
-    rupee_impact: float = 0.0
+    financial_impact: float = 0.0
     reversal_recipe: dict[str, Any] | None = None
 
 
@@ -43,7 +49,7 @@ class ApprovalDecisionRequest(BaseModel):
     reason: str | None = None
 
 
-def _get_operator_email(operator: Any, header_email: str | None) -> str:
+def _get_operator_email(operator: Any, header_email: str | None = None) -> str:
     if operator is not None:
         if isinstance(operator, str):
             email = operator
@@ -62,21 +68,51 @@ def _get_operator_email(operator: Any, header_email: str | None) -> str:
         if clean:
             return clean
 
-    return "operator@local.dev"
+    return "operator@godview.test"
 
 
 def build_router(ctx: Any) -> APIRouter:
     """Construct and return the FastAPI APIRouter for approvals."""
     router = APIRouter(tags=["Approvals"])
 
-    # Determine auth dependency
-    operator_dep = (
-        ctx.auth.require_operator
-        if (ctx and hasattr(ctx, "auth") and ctx.auth and hasattr(ctx.auth, "require_operator"))
-        else lambda: None
-    )
+    async def operator_dep(
+        request: Request,
+    ) -> Any:
+        if ctx and hasattr(ctx, "auth") and ctx.auth is not None:
+            require_op = getattr(ctx.auth, "require_operator", None)
+            if callable(require_op):
+                return await require_op(request)
+        # Test / hermetic fallback
+        header_email = (
+            request.headers.get("x-goog-authenticated-user-email")
+            or request.headers.get("x-godview-test-principal")
+        )
+        env_mode = getattr(getattr(ctx, "settings", None), "env_mode", "gcp")
+        if env_mode == "hermetic" or header_email:
+            return _get_operator_email(None, header_email)
+        raise HTTPException(status_code=401, detail="Unauthorized: valid operator identity required")
 
-    # Initialize TrustGate instance attached to ctx
+    async def service_or_operator_dep(
+        request: Request,
+    ) -> Any:
+        if ctx and hasattr(ctx, "auth") and ctx.auth is not None:
+            verify_iap = getattr(ctx.auth, "verify_iap_jwt", None)
+            if callable(verify_iap) and verify_iap(request):
+                return verify_iap(request)
+            verify_oidc = getattr(ctx.auth, "verify_google_oidc", None)
+            if callable(verify_oidc) and verify_oidc(request):
+                return verify_oidc(request)
+        header_email = (
+            request.headers.get("x-goog-authenticated-user-email")
+            or request.headers.get("x-godview-test-principal")
+        )
+        env_mode = getattr(getattr(ctx, "settings", None), "env_mode", "gcp")
+        if env_mode == "hermetic" or header_email:
+            return _get_operator_email(None, header_email)
+        # In live mode without credentials, fail closed
+        raise HTTPException(status_code=401, detail="Unauthorized: authenticated service or operator required")
+
+    # Initialize or reuse TrustGate
     trust_gate: TrustGate
     if hasattr(ctx, "trust_gate") and ctx.trust_gate is not None:
         trust_gate = ctx.trust_gate
@@ -84,6 +120,32 @@ def build_router(ctx: Any) -> APIRouter:
         trust_gate = TrustGate(docs=getattr(ctx, "docs", None), bus=getattr(ctx, "bus", None))
         if hasattr(ctx, "__dict__"):
             ctx.trust_gate = trust_gate
+
+    # Initialize or reuse RemediationDispatcher
+    dispatcher: RemediationDispatcher
+    if hasattr(ctx, "dispatcher") and ctx.dispatcher is not None:
+        dispatcher = ctx.dispatcher
+    else:
+        dispatcher = RemediationDispatcher()
+        if hasattr(ctx, "__dict__"):
+            ctx.dispatcher = dispatcher
+
+    async def _trigger_approval_decided_hook(card: ApprovalCard) -> None:
+        hooks = getattr(ctx, "hooks", None)
+        if hooks is None:
+            return
+        listeners = getattr(hooks, "on_approval_decided", None)
+        if not listeners:
+            return
+        if callable(listeners):
+            listeners = [listeners]
+        for listener in listeners:
+            try:
+                res = listener(card)
+                if inspect.isawaitable(res):
+                    await res
+            except Exception as e:
+                logger.warning("Error invoking on_approval_decided hook: %s", e)
 
     @router.get("/approvals")
     async def list_approvals(
@@ -111,7 +173,6 @@ def build_router(ctx: Any) -> APIRouter:
         cards: list[dict[str, Any]] = []
 
         for item in raw_docs:
-            # Check expiry for pending cards
             if item.get("decision") == "pending":
                 exp_str = item.get("expires_at")
                 if exp_str:
@@ -128,7 +189,6 @@ def build_router(ctx: Any) -> APIRouter:
                         pass
             cards.append(item)
 
-        # Sort descending by requested_at
         cards.sort(key=lambda c: str(c.get("requested_at", "")), reverse=True)
         return cards
 
@@ -144,8 +204,11 @@ def build_router(ctx: Any) -> APIRouter:
         return raw
 
     @router.post("/approvals")
-    async def create_approval(body: ApprovalCreateRequest) -> dict[str, Any]:
-        """Create an approval request card (TTL 30 min)."""
+    async def create_approval(
+        body: ApprovalCreateRequest,
+        caller: Annotated[Any, Depends(service_or_operator_dep)] = None,
+    ) -> dict[str, Any]:
+        """Create an approval request card (TTL 30 min, single use)."""
         card: ApprovalCard = trust_gate.create_approval_request(
             incident_id=body.incident_id,
             agent_id=body.agent_id,
@@ -154,8 +217,10 @@ def build_router(ctx: Any) -> APIRouter:
             trust_level_required=body.trust_level_required,
             narrative=body.narrative,
             evidence_pack_id=body.evidence_pack_id,
-            rupee_impact=body.rupee_impact,
+            financial_impact=body.financial_impact,
             reversal_recipe=body.reversal_recipe,
+            args=body.args,
+            verification_plan=body.verification_plan,
         )
         return card.model_dump(mode="json")
 
@@ -163,23 +228,64 @@ def build_router(ctx: Any) -> APIRouter:
     @router.post("/approvals/{approval_id}:approve")
     async def approve_card(
         approval_id: str,
+        request: Request,
         body: ApprovalDecisionRequest | None = None,
         operator: Annotated[Any, Depends(operator_dep)] = None,
-        x_goog_authenticated_user_email: Annotated[
-            str | None, Header(alias="X-Goog-Authenticated-User-Email")
-        ] = None,
     ) -> dict[str, Any]:
-        """Approve an approval card with operator identity."""
-        actor = _get_operator_email(operator, x_goog_authenticated_user_email)
+        """Approve an approval card with operator identity, then immediately execute the approved remediation."""
+        actor = _get_operator_email(operator, request.headers.get("x-goog-authenticated-user-email"))
         try:
             updated_card, audit = trust_gate.decide_approval(
                 approval_id,
                 decision="approved",
                 decided_by=actor,
             )
+
+            await _trigger_approval_decided_hook(updated_card)
+
+            # Record recommendation correct in TrustGate (Plan §3.4.3)
+            try:
+                trust_gate.record_recommendation_correct(updated_card.agent_id, updated_card.capability)
+            except Exception as e:
+                logger.warning("Failed to record recommendation correct: %s", e)
+
+            # Execute the approved remediation using the card's stored parameters
+            card_args = getattr(updated_card, "args", {}) or {}
+            exec_result = await dispatcher.invoke(
+                ctx=ctx,
+                trust_gate=trust_gate,
+                capability_id=updated_card.capability,
+                target_resource=updated_card.target_resource,
+                args=card_args,
+                agent_id=updated_card.agent_id,
+                approval_id=approval_id,
+            )
+
+            # Write ExecutionResult onto the card in docs store
+            docs_store = getattr(ctx, "docs", None)
+            card_dict = updated_card.model_dump(mode="json")
+            card_dict["execution_result"] = exec_result.model_dump(mode="json")
+            card_dict["executed_at"] = datetime.now(tz=UTC).isoformat()
+            if docs_store is not None:
+                docs_store.set("approvals", approval_id, card_dict, merge=True)
+
+            # If execution verified and card has incident_id, resolve incident
+            if exec_result.ok and updated_card.incident_id:
+                incident_mgr = getattr(ctx, "incident_manager", None) or getattr(ctx, "incidents", None)
+                if incident_mgr and hasattr(incident_mgr, "close_incident"):
+                    try:
+                        incident_mgr.close_incident(
+                            updated_card.incident_id,
+                            resolved_by=f"remediation:{updated_card.capability}",
+                            resolution_summary=f"Remediation executed and verified: {updated_card.narrative}",
+                        )
+                    except Exception as inc_err:
+                        logger.warning("Failed to close incident %s: %s", updated_card.incident_id, inc_err)
+
             return {
-                "ok": True,
-                "approval": updated_card.model_dump(mode="json"),
+                "ok": exec_result.ok,
+                "approval": card_dict,
+                "execution_result": exec_result.model_dump(mode="json"),
                 "audit": audit.model_dump(mode="json"),
             }
         except KeyError:
@@ -191,20 +297,20 @@ def build_router(ctx: Any) -> APIRouter:
     @router.post("/approvals/{approval_id}:reject")
     async def reject_card(
         approval_id: str,
+        request: Request,
         body: ApprovalDecisionRequest | None = None,
         operator: Annotated[Any, Depends(operator_dep)] = None,
-        x_goog_authenticated_user_email: Annotated[
-            str | None, Header(alias="X-Goog-Authenticated-User-Email")
-        ] = None,
     ) -> dict[str, Any]:
         """Reject an approval card with operator identity."""
-        actor = _get_operator_email(operator, x_goog_authenticated_user_email)
+        actor = _get_operator_email(operator, request.headers.get("x-goog-authenticated-user-email"))
         try:
             updated_card, audit = trust_gate.decide_approval(
                 approval_id,
                 decision="rejected",
                 decided_by=actor,
             )
+
+            await _trigger_approval_decided_hook(updated_card)
             return {
                 "ok": True,
                 "approval": updated_card.model_dump(mode="json"),

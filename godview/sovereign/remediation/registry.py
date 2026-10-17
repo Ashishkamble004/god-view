@@ -10,6 +10,7 @@ import logging
 from typing import Any
 
 from godview_shared.capabilities import get_capability
+from godview_shared.contracts import TrustViolation
 
 from godview.sovereign.remediation.executors.agent import AgentScalingExecutor
 from godview.sovereign.remediation.executors.armor import CloudArmorExecutor
@@ -82,7 +83,6 @@ class RemediationDispatcher:
         """Authorize, validate scope, dispatch to executor, verify outcome, and feed trust ladder."""
         # 1. Look up executor first; if unhandled, raise NoExecutorError (never echo)
         executor = self.get_executor(capability_id)
-
         spec = get_capability(capability_id)
 
         # 2. Check TrustGate authorization
@@ -95,14 +95,28 @@ class RemediationDispatcher:
             novel_skill_first_step=novel_skill_first_step,
         )
         if not decision.authorized:
-            from godview_shared.contracts import TrustViolation
-
             raise TrustViolation(
                 f"TrustGate refused authorization: {decision.reason} "
                 f"(effective=L{decision.effective_level}, required=L{decision.required_level})"
             )
 
-        # 3. Validate Scope Rule (Plan §3.4 item 5)
+        # 3. If approval_id was used, enforce argument binding against stored approval card
+        effective_args = dict(args)
+        if approval_id is not None and hasattr(ctx, "docs") and ctx.docs is not None:
+            card_raw = ctx.docs.get("approvals", approval_id)
+            if card_raw:
+                card_args = card_raw.get("args")
+                if card_args is not None:
+                    # If caller supplied distinct arguments, verify they match approved card
+                    if args and args != card_args:
+                        raise TrustViolation(
+                            f"Approval '{approval_id}' argument mismatch: "
+                            f"invocation args {args} do not match approved card args {card_args}"
+                        )
+                    # Always use the approved card's stored arguments
+                    effective_args = dict(card_args)
+
+        # 4. Validate Scope Rule (Plan §3.4 item 5)
         validate_resource_scope(
             ctx=ctx,
             agent_id=agent_id,
@@ -112,17 +126,25 @@ class RemediationDispatcher:
             approval_id=approval_id,
         )
 
-        # 4. Dispatch to real executor
-        result = await executor.execute(
-            ctx=ctx,
-            args={**args, "capability_id": capability_id},
-            target_resource=target_resource,
-            agent_id=agent_id,
-            approval_id=approval_id,
-            probe_url=probe_url,
-        )
+        # 5. Dispatch to real executor with learning feedback
+        try:
+            result = await executor.execute(
+                ctx=ctx,
+                args={**effective_args, "capability_id": capability_id},
+                target_resource=target_resource,
+                agent_id=agent_id,
+                approval_id=approval_id,
+                probe_url=probe_url,
+            )
+        except Exception as exc:
+            if spec.mutating:
+                try:
+                    trust_gate.record_bad_outcome(agent_id, capability_id, reason=str(exc))
+                except Exception as ex:
+                    logger.warning("Failed to record bad outcome on exception: %s", ex)
+            raise
 
-        # 5. Outcome verification & Trust Ladder feedback
+        # 6. Outcome verification & Trust Ladder feedback
         if result.ok:
             if spec.mutating and approval_id is not None:
                 try:

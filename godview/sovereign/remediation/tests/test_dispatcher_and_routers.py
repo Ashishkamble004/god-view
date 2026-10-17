@@ -72,8 +72,8 @@ async def test_capabilities_invoke_success_and_trust_record_update() -> None:
     # Pre-populate discovered_services so target is observed
     ctx.docs.set(
         "discovered_services",
-        "god-view-edge-policy",
-        {"name": "god-view-edge-policy", "kind": "security_policy", "labels": {}},
+        "edge-security-policy",
+        {"name": "edge-security-policy", "kind": "security_policy", "labels": {}},
     )
 
     # Create & approve an approval card
@@ -81,10 +81,11 @@ async def test_capabilities_invoke_success_and_trust_record_update() -> None:
         incident_id="inc-test-01",
         agent_id="platform__env-01",
         capability_id="armor.set_waf_sensitivity",
-        target_resource="god-view-edge-policy",
+        target_resource="edge-security-policy",
         trust_level_required=2,
         narrative="Tune WAF sensitivity",
         evidence_pack_id="evp-01",
+        args={"sensitivity": 1},
     )
     ctx.trust_gate.decide_approval(card.approval_id, decision="approved", decided_by="admin@example.com")
 
@@ -98,7 +99,7 @@ async def test_capabilities_invoke_success_and_trust_record_update() -> None:
             json={
                 "capability_id": "armor.set_waf_sensitivity",
                 "agent_id": "platform__env-01",
-                "target_resource": "god-view-edge-policy",
+                "target_resource": "edge-security-policy",
                 "approval_id": card.approval_id,
                 "args": {"sensitivity": 1},
             },
@@ -137,6 +138,10 @@ async def test_capabilities_invoke_unregistered_raises_501_never_echo() -> None:
 @pytest.mark.unit
 async def test_operator_kill_switch_lifecycle() -> None:
     ctx = MockContext()
+    ctx.env_mode = "hermetic"
+    ctx.discovered_services = [
+        {"name": "edge-security-policy", "kind": "security_policy", "labels": {}}
+    ]
     mock_armor = MagicMock()
     mock_armor.set_rule_preview = AsyncMock(
         return_value=ExecutionResult(
@@ -165,7 +170,10 @@ async def test_operator_kill_switch_lifecycle() -> None:
         assert ctx.trust_gate.global_kill_switch is True
 
         # State persisted in operator_state
-        state_resp = await client.get("/operator/state")
+        state_resp = await client.get(
+            "/operator/state",
+            headers={"X-Goog-Authenticated-User-Email": "operator@example.com"},
+        )
         assert state_resp.status_code == 200
         assert state_resp.json()["kill_switch_enabled"] is True
 
@@ -174,7 +182,7 @@ async def test_operator_kill_switch_lifecycle() -> None:
             incident_id="inc-test-02",
             agent_id="platform__env-01",
             capability_id="armor.set_waf_sensitivity",
-            target_resource="god-view-edge-policy",
+            target_resource="edge-security-policy",
             trust_level_required=2,
             narrative="Test during kill switch",
             evidence_pack_id="evp-02",
@@ -187,7 +195,7 @@ async def test_operator_kill_switch_lifecycle() -> None:
             json={"enabled": True, "security_policy": "god-view-control-policy"},
             headers={"X-Goog-Authenticated-User-Email": "operator@example.com"},
         )
-        assert forbid_resp.status_code == 400
+        assert forbid_resp.status_code == 403
 
         # 3. Disengage kill switch
         resp_off = await client.post(
@@ -203,6 +211,11 @@ async def test_operator_kill_switch_lifecycle() -> None:
 @pytest.mark.unit
 async def test_operator_pause_resume_hibernate() -> None:
     ctx = MockContext()
+    ctx.env_mode = "hermetic"
+    ctx.discovered_admin_actions = {
+        "tenant.pause": {"action_name": "tenant.pause", "operation_id": "pause", "method": "POST", "url": "https://api.example.com/admin/pause"},
+        "tenant.resume": {"action_name": "tenant.resume", "operation_id": "resume", "method": "POST", "url": "https://api.example.com/admin/resume"},
+    }
     # Deploy an agent to verify hibernate scales it down
     ctx.agents.deploy_agent("application__svc-01", "application", min_instances=1)
 
@@ -214,18 +227,20 @@ async def test_operator_pause_resume_hibernate() -> None:
         # Pause
         pause_resp = await client.post(
             "/operator/pause",
+            json={"reason": "Operator maintenance"},
             headers={"X-Goog-Authenticated-User-Email": "operator@example.com"},
         )
         assert pause_resp.status_code == 200
         assert pause_resp.json()["tenant_paused"] is True
 
         # State check
-        state = (await client.get("/operator/state")).json()
+        state = (await client.get("/operator/state", headers={"X-Goog-Authenticated-User-Email": "operator@example.com"})).json()
         assert state["tenant_paused"] is True
 
         # Resume
         resume_resp = await client.post(
             "/operator/resume",
+            json={"reason": "Operator resumed"},
             headers={"X-Goog-Authenticated-User-Email": "operator@example.com"},
         )
         assert resume_resp.status_code == 200

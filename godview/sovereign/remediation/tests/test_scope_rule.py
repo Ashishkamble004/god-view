@@ -50,16 +50,27 @@ def test_read_only_capability_always_allowed() -> None:
 @pytest.mark.unit
 def test_sovereign_root_operator_always_allowed() -> None:
     ctx = MockContext()
+    ctx.observed_resources = {"edge-security-policy"}
     assert (
         validate_resource_scope(
             ctx=ctx,
             agent_id="operator",
             capability_id="armor.set_rule_preview",
-            target_resource="god-view-edge-policy",
+            target_resource="edge-security-policy",
             effective_level=0,
         )
         is True
     )
+
+    # But unobserved resource is rejected even for operator
+    with pytest.raises(ScopeViolationError, match="neither godview_managed=true nor an observed resource"):
+        validate_resource_scope(
+            ctx=ctx,
+            agent_id="operator",
+            capability_id="armor.set_rule_preview",
+            target_resource="completely-unobserved-random-resource",
+            effective_level=0,
+        )
 
 
 @pytest.mark.unit
@@ -146,5 +157,18 @@ def test_observed_resource_insufficient_level_raises_scope_violation() -> None:
             agent_id="application__svc-01",
             capability_id="k8s.rollout_restart",
             target_resource="custom-target",
+            effective_level=1,
+        )
+
+
+@pytest.mark.unit
+def test_scope_bypass_query_param_rejected() -> None:
+    ctx = MockContext()
+    with pytest.raises(ScopeViolationError, match="invalid query parameter scope bypass"):
+        validate_resource_scope(
+            ctx=ctx,
+            agent_id="application__x",
+            capability_id="run.set_ingress",
+            target_resource="anything?godview_managed=true",
             effective_level=1,
         )

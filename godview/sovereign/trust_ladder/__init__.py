@@ -12,6 +12,8 @@ Coordinator Decision A10:
 
 from __future__ import annotations
 
+import threading
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
@@ -63,6 +65,7 @@ class TrustGate:
         self._pubsub = bus if bus is not None else pubsub
         self._token_governor = token_governor
         self._clock = clock
+        self._lock = threading.Lock()
         self._router = NervousSystemRouter(pubsub=self._pubsub) if self._pubsub is not None else None
         self.global_kill_switch: bool = False
         self._inflight_steps: list[str] = []
@@ -362,44 +365,47 @@ class TrustGate:
         clamped_level: int = max(0, min(4, effective_level))
 
         if approval_id is not None:
-            apr_raw = self._firestore.get("approvals", approval_id)
-            if apr_raw is None or apr_raw.get("decision") != "approved":
-                raise TrustViolation(
-                    f"Approval '{approval_id}' is missing or not in 'approved' state"
+            if self._firestore is None:
+                raise TrustViolation(f"Approval '{approval_id}' cannot be validated: no datastore configured")
+            with self._lock:
+                apr_raw = self._firestore.get("approvals", approval_id)
+                if apr_raw is None or apr_raw.get("decision") != "approved":
+                    raise TrustViolation(
+                        f"Approval '{approval_id}' is missing or not in 'approved' state"
+                    )
+                if apr_raw.get("consumed"):
+                    raise TrustViolation(
+                        f"Approval '{approval_id}' has already been consumed and cannot be reused"
+                    )
+                apr_cap = apr_raw.get("capability") or apr_raw.get("action_type")
+                if apr_cap != capability_id:
+                    raise TrustViolation(
+                        f"Approval '{approval_id}' is bound to capability '{apr_cap}', not '{capability_id}'"
+                    )
+                apr_agent = apr_raw.get("agent_id")
+                if apr_agent != agent_id:
+                    raise TrustViolation(
+                        f"Approval '{approval_id}' is bound to agent '{apr_agent}', not '{agent_id}'"
+                    )
+                expected_target = target_resource or capability_id
+                apr_target = apr_raw.get("target_resource")
+                if apr_target != expected_target:
+                    raise TrustViolation(
+                        f"Approval '{approval_id}' is bound to target '{apr_target}', not '{expected_target}'"
+                    )
+                raw_expires = apr_raw.get("expires_at")
+                if isinstance(raw_expires, str) and raw_expires:
+                    exp_dt = datetime.fromisoformat(raw_expires.replace("Z", "+00:00"))
+                    if exp_dt.tzinfo is None:
+                        exp_dt = exp_dt.replace(tzinfo=UTC)
+                    if exp_dt <= datetime.now(tz=UTC):
+                        raise TrustViolation(f"Approval '{approval_id}' expired at {raw_expires}")
+                self._firestore.set(
+                    "approvals",
+                    approval_id,
+                    {"consumed": True, "consumed_at": now_iso},
+                    merge=True,
                 )
-            if apr_raw.get("consumed"):
-                raise TrustViolation(
-                    f"Approval '{approval_id}' has already been consumed and cannot be reused"
-                )
-            apr_cap = apr_raw.get("capability") or apr_raw.get("action_type")
-            if apr_cap != capability_id:
-                raise TrustViolation(
-                    f"Approval '{approval_id}' is bound to capability '{apr_cap}', not '{capability_id}'"
-                )
-            apr_agent = apr_raw.get("agent_id")
-            if apr_agent != agent_id:
-                raise TrustViolation(
-                    f"Approval '{approval_id}' is bound to agent '{apr_agent}', not '{agent_id}'"
-                )
-            expected_target = target_resource or capability_id
-            apr_target = apr_raw.get("target_resource")
-            if apr_target != expected_target:
-                raise TrustViolation(
-                    f"Approval '{approval_id}' is bound to target '{apr_target}', not '{expected_target}'"
-                )
-            raw_expires = apr_raw.get("expires_at")
-            if isinstance(raw_expires, str) and raw_expires:
-                exp_dt = datetime.fromisoformat(raw_expires.replace("Z", "+00:00"))
-                if exp_dt.tzinfo is None:
-                    exp_dt = exp_dt.replace(tzinfo=UTC)
-                if exp_dt <= datetime.now(tz=UTC):
-                    raise TrustViolation(f"Approval '{approval_id}' expired at {raw_expires}")
-            self._firestore.set(
-                "approvals",
-                approval_id,
-                {"consumed": True, "consumed_at": now_iso},
-                merge=True,
-            )
             exec_level = max(2, clamped_level)
             return TrustDecision(
                 authorized=True,
@@ -523,20 +529,33 @@ class TrustGate:
         target_resource: str,
         trust_level_required: int,
         narrative: str,
-        evidence_pack_id: str,
-        rupee_impact: float = 0.0,
+        evidence_pack_id: str = "evp-remediation",
+        financial_impact: float = 0.0,
         reversal_recipe: dict[str, Any] | None = None,
+        args: dict[str, Any] | None = None,
+        verification_plan: list[dict[str, Any]] | list[str] | None = None,
+        **kwargs: Any,
     ) -> ApprovalCard:
         """Create a persisted L2 approval card; auto-expire if global kill switch is active (Decision A10)."""
-        self._approval_seq += 1
         now = datetime.now(tz=UTC)
         date_str = now.strftime("%Y%m%d")
-        approval_id = f"apr-{date_str}-{self._approval_seq:04d}"
+        approval_id = f"apr-{date_str}-{uuid.uuid4().hex[:8]}"
 
         decision: Literal["pending", "approved", "rejected", "snoozed", "expired"] = (
             "expired" if self.global_kill_switch else "pending"
         )
         req_level = max(1, min(4, trust_level_required))
+        effective_financial_impact = financial_impact or 0.0
+        if not effective_financial_impact:
+            for k, v in kwargs.items():
+                if "impact" in k and isinstance(v, (int, float)):
+                    effective_financial_impact = float(v)
+                    break
+        extra_fields = {
+            "args": args or {},
+            "verification_plan": verification_plan or [],
+            "consumed": False,
+        }
         card = ApprovalCard(
             approval_id=approval_id,
             incident_id=incident_id,
@@ -547,15 +566,17 @@ class TrustGate:
             trust_level_required=req_level,
             narrative=narrative,
             evidence_pack_id=evidence_pack_id,
-            rupee_impact=rupee_impact,
+            financial_impact=effective_financial_impact,
             reversal_recipe=reversal_recipe or {"capability": capability_id},
             requested_at=now.isoformat(),
             expires_at=(now + timedelta(minutes=30)).isoformat(),
             decision=decision,
             decided_by="system:kill-switch" if self.global_kill_switch else None,
             decided_at=now.isoformat() if self.global_kill_switch else None,
+            **extra_fields,
         )
-        self._firestore.set("approvals", approval_id, card.model_dump(mode="json"))
+        if self._firestore is not None:
+            self._firestore.set("approvals", approval_id, card.model_dump(mode="json"))
         return card
 
     def decide_approval(
@@ -618,10 +639,9 @@ class TrustGate:
         outcome: Literal["success", "failed", "reverted"] = "success",
     ) -> AuditRecord:
         """Create and store an immutable AuditRecord."""
-        self._audit_seq += 1
         now = datetime.now(tz=UTC)
         now_iso = now.isoformat()
-        audit_id = f"aud-{now.strftime('%Y%m%d')}-{self._audit_seq:04d}"
+        audit_id = f"aud-{now.strftime('%Y%m%d')}-{uuid.uuid4().hex[:8]}"
         approver = (
             AuditApprover(principal=actor, channel="cockpit", at=now_iso)
             if approval_id is not None

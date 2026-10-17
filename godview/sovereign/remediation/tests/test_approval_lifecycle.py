@@ -11,14 +11,17 @@ Tests:
 from __future__ import annotations
 
 from datetime import datetime
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import FastAPI
-from godview_shared.contracts import TrustViolation
+from godview_shared.contracts import ApprovalCard, TrustViolation
 from godview_shared.fakes import InMemoryFirestore, InMemoryPubSub
 from httpx import ASGITransport, AsyncClient
 
 from godview.sovereign.control_api.routers.approvals import build_router
+from godview.sovereign.remediation.registry import RemediationDispatcher
+from godview.sovereign.remediation.types import ExecutionResult, VerificationCheck
 from godview.sovereign.trust_ladder import TrustGate
 
 
@@ -27,6 +30,17 @@ class MockContext:
         self.docs = InMemoryFirestore()
         self.bus = InMemoryPubSub()
         self.trust_gate = TrustGate(docs=self.docs, bus=self.bus)
+        self.observed_resources = {"edge-security-policy"}
+        mock_armor = MagicMock()
+        mock_armor.execute = AsyncMock(
+            return_value=ExecutionResult(
+                ok=True,
+                before={"preview": True},
+                after={"preview": False},
+                verification=[VerificationCheck(check="waf_rule_enforced_with_sensitivity", passed=True)],
+            )
+        )
+        self.dispatcher = RemediationDispatcher(custom_executors={"armor.set_waf_sensitivity": mock_armor})
 
 
 @pytest.mark.unit
@@ -39,7 +53,7 @@ def test_approval_creation_with_30_min_ttl() -> None:
         incident_id="inc-test-01",
         agent_id="platform__env-01",
         capability_id="armor.set_waf_sensitivity",
-        target_resource="god-view-edge-policy",
+        target_resource="edge-security-policy",
         trust_level_required=2,
         narrative="Tune WAF sensitivity to 1",
         evidence_pack_id="evp-test-01",
@@ -69,7 +83,7 @@ def test_approval_decision_records_audit_and_enforces_single_use() -> None:
         incident_id="inc-test-01",
         agent_id="platform__env-01",
         capability_id="armor.set_waf_sensitivity",
-        target_resource="god-view-edge-policy",
+        target_resource="edge-security-policy",
         trust_level_required=2,
         narrative="Tune WAF sensitivity to 1",
         evidence_pack_id="evp-test-01",
@@ -90,7 +104,7 @@ def test_approval_decision_records_audit_and_enforces_single_use() -> None:
     dec1 = gate.authorize(
         agent_id="platform__env-01",
         capability_id="armor.set_waf_sensitivity",
-        target_resource="god-view-edge-policy",
+        target_resource="edge-security-policy",
         approval_id=card.approval_id,
     )
     assert dec1.authorized is True
@@ -101,7 +115,7 @@ def test_approval_decision_records_audit_and_enforces_single_use() -> None:
         gate.authorize(
             agent_id="platform__env-01",
             capability_id="armor.set_waf_sensitivity",
-            target_resource="god-view-edge-policy",
+            target_resource="edge-security-policy",
             approval_id=card.approval_id,
         )
 
@@ -116,7 +130,7 @@ def test_approval_binding_checks_mismatch() -> None:
         incident_id="inc-test-01",
         agent_id="platform__env-01",
         capability_id="armor.set_waf_sensitivity",
-        target_resource="god-view-edge-policy",
+        target_resource="edge-security-policy",
         trust_level_required=2,
         narrative="Tune WAF sensitivity to 1",
         evidence_pack_id="evp-test-01",
@@ -128,7 +142,7 @@ def test_approval_binding_checks_mismatch() -> None:
         gate.authorize(
             agent_id="platform__env-01",
             capability_id="run.set_ingress",
-            target_resource="god-view-edge-policy",
+            target_resource="edge-security-policy",
             approval_id=card.approval_id,
         )
 
@@ -137,12 +151,12 @@ def test_approval_binding_checks_mismatch() -> None:
         gate.authorize(
             agent_id="data__db-01",
             capability_id="armor.set_waf_sensitivity",
-            target_resource="god-view-edge-policy",
+            target_resource="edge-security-policy",
             approval_id=card.approval_id,
         )
 
     # Mismatched target resource
-    with pytest.raises(TrustViolation, match="bound to target 'god-view-edge-policy', not 'other-policy'"):
+    with pytest.raises(TrustViolation, match="bound to target 'edge-security-policy', not 'other-policy'"):
         gate.authorize(
             agent_id="platform__env-01",
             capability_id="armor.set_waf_sensitivity",
@@ -167,7 +181,7 @@ async def test_approvals_router_endpoints() -> None:
                 "incident_id": "inc-api-01",
                 "agent_id": "platform__env-01",
                 "capability_id": "armor.set_waf_sensitivity",
-                "target_resource": "god-view-edge-policy",
+                "target_resource": "edge-security-policy",
                 "trust_level_required": 2,
                 "narrative": "Fix Cloud Armor WAF 403 on JSON POST",
             },
@@ -199,7 +213,7 @@ async def test_approvals_router_endpoints() -> None:
                 "incident_id": "inc-api-02",
                 "agent_id": "platform__env-01",
                 "capability_id": "armor.set_waf_sensitivity",
-                "target_resource": "god-view-edge-policy",
+                "target_resource": "edge-security-policy",
                 "trust_level_required": 2,
                 "narrative": "Test reject colon alias",
             },
@@ -216,3 +230,43 @@ async def test_approvals_router_endpoints() -> None:
         rejected_data = reject_resp.json()
         assert rejected_data["approval"]["decision"] == "rejected"
         assert rejected_data["approval"]["decided_by"] == "operator@example.com"
+
+
+@pytest.mark.unit
+async def test_approval_decided_hook_invoked() -> None:
+    ctx = MockContext()
+    ctx.env_mode = "hermetic"
+    hook_called = []
+
+    async def hook_listener(card: ApprovalCard) -> None:
+        hook_called.append(card.approval_id)
+
+    class Hooks:
+        on_approval_decided = [hook_listener]
+
+    ctx.hooks = Hooks()
+
+    app = FastAPI()
+    app.include_router(build_router(ctx))
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        create_resp = await client.post(
+            "/approvals",
+            headers={"X-Goog-Authenticated-User-Email": "operator@example.com"},
+            json={
+                "incident_id": "inc-hook-001",
+                "agent_id": "network_specialist",
+                "capability_id": "armor.set_waf_sensitivity",
+                "target_resource": "edge-security-policy",
+                "trust_level_required": 2,
+                "narrative": "Hook test",
+            },
+        )
+        app_id = create_resp.json()["approval_id"]
+
+        await client.post(
+            f"/approvals/{app_id}:reject",
+            headers={"X-Goog-Authenticated-User-Email": "operator@example.com"},
+        )
+        assert app_id in hook_called

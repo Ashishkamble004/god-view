@@ -1,57 +1,64 @@
-"""Operator control router (Plan §3.4 & §1.2).
+"""Operator controls router (Plan §3.4 & §1.2).
 
 Exposes:
-- POST /operator/kill-switch: toggles rule 100 preview on the security policy
-  attached to observed public backends (never god-view-control-policy) and persists operator_state.
-- POST /operator/pause & resume: calls discovered tenant admin action and persists operator_state.
-- POST /operator/hibernate: scales agents to 0, runs hibernate job, and persists operator_state.
-- GET /operator/state: retrieves live operator state from Firestore operator_state collection.
+- POST /operator/kill-switch: toggle preview on Cloud Armor rule attached to observed public backends
+  (never observer's god-view-control-policy); 502 on execution failure; publishes NervousSystemEvent.
+- POST /operator/pause & /operator/resume: invokes discovered tenant admin action; 409 if no action
+  discovered; 502 on execution failure; persists operator_state in docs; publishes NervousSystemEvent.
+- POST /operator/hibernate: triggers Cloud Scheduler hibernate job via act SA and scales agents to 0;
+  restores agents to 1 when disabled; 502 on failure; persists operator_state in docs; publishes NervousSystemEvent.
+- GET /operator/state: inspect active operator controls state.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import uuid
 from datetime import UTC, datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+import httpx
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from godview_shared.contracts import NervousSystemEvent
 from pydantic import BaseModel
 
+from godview.sovereign.remediation.executors.agent import AgentScalingExecutor
 from godview.sovereign.remediation.executors.armor import CloudArmorExecutor
-from godview.sovereign.remediation.executors.tenant_admin import (
-    TenantAdminExecutor,
-)
+from godview.sovereign.remediation.executors.tenant_admin import TenantAdminExecutor
+from godview.sovereign.remediation.impersonation import get_act_sa_access_token
 from godview.sovereign.trust_ladder import TrustGate
 
 logger = logging.getLogger(__name__)
 
 OBSERVER_CONTROL_POLICY: str = "god-view-control-policy"
-HIBERNATE_JOB_NAME: str = "god-view-hibernate-job"
+SCHEDULER_API_BASE: str = "https://cloudscheduler.googleapis.com/v1"
 
 
 class KillSwitchRequest(BaseModel):
-    """Payload to toggle the emergency kill switch."""
+    """Payload to toggle the Cloud Armor kill switch."""
 
     enabled: bool
-    reason: str | None = None
     security_policy: str | None = None
+    priority: int | None = None
+    reason: str | None = None
 
 
-class PauseResumeRequest(BaseModel):
-    """Optional payload for tenant pause/resume."""
+class PauseRequest(BaseModel):
+    """Payload to pause/resume the tenant via discovered admin action."""
 
     reason: str | None = None
 
 
 class HibernateRequest(BaseModel):
-    """Payload to engage/disengage environment hibernation."""
+    """Payload to hibernate the platform environment."""
 
     enabled: bool
+    job_name: str | None = None
     reason: str | None = None
 
 
-def _get_operator_email(operator: Any, header_email: str | None) -> str:
+def _get_operator_email(operator: Any, header_email: str | None = None) -> str:
     if operator is not None:
         if isinstance(operator, str):
             email = operator
@@ -70,35 +77,62 @@ def _get_operator_email(operator: Any, header_email: str | None) -> str:
         if clean:
             return clean
 
-    return "operator@local.dev"
+    return "operator@godview.test"
+
+
+def _get_env_mode(ctx: Any) -> str:
+    return (
+        getattr(getattr(ctx, "settings", None), "env_mode", None)
+        or getattr(ctx, "env_mode", None)
+        or os.environ.get("GODVIEW_ENV", "gcp")
+    )
 
 
 def _discover_observed_security_policy(ctx: Any) -> str:
     """Find the security policy attached to observed public backends (never observer control policy)."""
+    # 1. Check ctx.discovered_services attribute or ctx.docs
+    candidates = []
+    if ctx and hasattr(ctx, "discovered_services") and ctx.discovered_services:
+        if isinstance(ctx.discovered_services, list):
+            candidates.extend(ctx.discovered_services)
+        elif isinstance(ctx.discovered_services, dict):
+            candidates.extend(ctx.discovered_services.values())
+
     if ctx and hasattr(ctx, "docs") and ctx.docs is not None:
         try:
-            services = ctx.docs.list_docs("discovered_services")
-            for svc in services:
-                kind = svc.get("kind", "")
-                name = svc.get("name", "")
-                labels = svc.get("labels", {})
-                # Ensure not observer control policy
-                if kind == "security_policy" and name != OBSERVER_CONTROL_POLICY:
-                    if labels.get("godview_role") != "observer":
-                        return name
-                # Check backend_service attached policies
-                if kind == "backend_service" and labels.get("godview_role") != "observer":
-                    sec_policy = svc.get("posture", {}).get("security_policy") or svc.get("security_policy")
-                    if sec_policy and sec_policy != OBSERVER_CONTROL_POLICY:
-                        return sec_policy.split("/")[-1]
-        except Exception as e:
-            logger.debug("Could not discover security policy from docs: %s", e)
+            candidates.extend(ctx.docs.list_docs("discovered_services"))
+        except Exception:
+            pass
 
-    # Fallback to configured or discovered edge policy, strictly verifying not observer control policy
-    candidate = os.environ.get("TENANT_EDGE_POLICY", "god-view-edge-policy")
-    if candidate == OBSERVER_CONTROL_POLICY:
-        raise ValueError("Kill switch is strictly forbidden from targeting god-view-control-policy (Plan §3.4 item 4)")
-    return candidate
+    for svc in candidates:
+        if not isinstance(svc, dict):
+            continue
+        kind = svc.get("kind", "")
+        name = svc.get("name", "")
+        labels = svc.get("labels", {})
+        if labels.get("godview_role") == "observer":
+            continue
+
+        if kind == "security_policy" and name != OBSERVER_CONTROL_POLICY:
+            return name
+        if kind == "backend_service":
+            sec_policy = svc.get("posture", {}).get("security_policy") or svc.get("security_policy")
+            if sec_policy and sec_policy != OBSERVER_CONTROL_POLICY:
+                return sec_policy.split("/")[-1]
+
+    # 2. Check environment variable override
+    env_policy = os.environ.get("TENANT_EDGE_POLICY")
+    if env_policy:
+        if env_policy == OBSERVER_CONTROL_POLICY:
+            raise ValueError("Kill switch is strictly forbidden from targeting god-view-control-policy (Plan §3.4 item 4)")
+        return env_policy
+
+    # In hermetic mode without discovered services, use hermetic test policy name
+    env_mode = _get_env_mode(ctx)
+    if env_mode == "hermetic":
+        return "hermetic-edge-policy"
+
+    raise HTTPException(status_code=409, detail="No observed public security policy discovered for kill switch")
 
 
 def _set_operator_state(docs_store: Any, doc_id: str, state_doc: dict[str, Any]) -> None:
@@ -138,11 +172,20 @@ def build_router(ctx: Any) -> APIRouter:
     """Construct and return the FastAPI APIRouter for operator control actions."""
     router = APIRouter(tags=["Operator"])
 
-    operator_dep = (
-        ctx.auth.require_operator
-        if (ctx and hasattr(ctx, "auth") and ctx.auth and hasattr(ctx.auth, "require_operator"))
-        else lambda: None
-    )
+    async def operator_dep(
+        request: Request,
+        x_goog_authenticated_user_email: Annotated[
+            str | None, Header(alias="X-Goog-Authenticated-User-Email")
+        ] = None,
+    ) -> Any:
+        if ctx and hasattr(ctx, "auth") and ctx.auth is not None:
+            require_op = getattr(ctx.auth, "require_operator", None)
+            if callable(require_op):
+                return await require_op(request)
+        env_mode = _get_env_mode(ctx)
+        if env_mode == "hermetic" or x_goog_authenticated_user_email:
+            return _get_operator_email(None, x_goog_authenticated_user_email)
+        raise HTTPException(status_code=401, detail="Unauthorized: valid operator identity required")
 
     trust_gate: TrustGate
     if hasattr(ctx, "trust_gate") and ctx.trust_gate is not None:
@@ -160,270 +203,319 @@ def build_router(ctx: Any) -> APIRouter:
         getattr(ctx, "tenant_admin_executor", None)
         or TenantAdminExecutor(http_client=getattr(ctx, "http_client", None))
     )
+    agent_executor = (
+        getattr(ctx, "agent_executor", None)
+        or AgentScalingExecutor()
+    )
 
     async def _emit_event(event_type: str, subject: str, data: dict[str, Any]) -> None:
         bus = getattr(ctx, "bus", None)
         if bus is not None and hasattr(bus, "publish"):
             try:
-                res = bus.publish(
-                    topic=os.environ.get("NERVOUS_SYSTEM_TOPIC", "godview-nervous-system"),
-                    event={"type": event_type, "subject": subject, "data": data},
+                now = datetime.now(tz=UTC)
+                event_obj = NervousSystemEvent(
+                    specversion="1.0",
+                    type=event_type,
+                    source="godview/sovereign/operator",
+                    id=f"evt-{now.strftime('%Y%m%d')}-{uuid.uuid4().hex[:8]}",
+                    time=now.isoformat(),
+                    subject=subject,
+                    data=data,
                 )
-                if hasattr(res, "__await__"):
-                    await res
+                topic = os.environ.get("NERVOUS_SYSTEM_TOPIC", "godview-nervous-system")
+                pub_res = bus.publish(topic=topic, event=event_obj.model_dump(mode="json"))
+                if hasattr(pub_res, "__await__"):
+                    await pub_res
             except Exception as e:
-                logger.warning("Failed to publish operator event %s: %s", event_type, e)
+                logger.warning("Could not publish nervous system operator event: %s", e)
 
     @router.get("/operator/state")
-    async def get_operator_state() -> dict[str, Any]:
-        """Fetch live operator state from Firestore."""
+    async def get_operator_state(
+        operator: Annotated[Any, Depends(operator_dep)] = None,
+    ) -> dict[str, Any]:
+        """Fetch current operator controls state (kill switch, pause, hibernate)."""
         docs_store = getattr(ctx, "docs", None)
-        state: dict[str, Any] = {
-            "kill_switch_enabled": trust_gate.global_kill_switch,
+        doc = _get_operator_state_doc(docs_store, "current") if docs_store is not None else None
+        if doc:
+            return doc
+        return {
+            "kill_switch_enabled": getattr(trust_gate, "global_kill_switch", False),
             "tenant_paused": False,
             "hibernate_enabled": False,
+            "updated_at": datetime.now(tz=UTC).isoformat(),
+            "updated_by": "system:initial",
         }
-        if docs_store is not None:
-            ks_doc = _get_operator_state_doc(docs_store, "kill_switch") or {}
-            tenant_doc = _get_operator_state_doc(docs_store, "tenant") or {}
-            hib_doc = _get_operator_state_doc(docs_store, "hibernate") or {}
-            state["kill_switch_enabled"] = ks_doc.get("enabled", trust_gate.global_kill_switch)
-            state["kill_switch"] = ks_doc
-            state["tenant_paused"] = tenant_doc.get("tenant_paused", False)
-            state["tenant"] = tenant_doc
-            state["hibernate_enabled"] = hib_doc.get("hibernate_enabled", False)
-            state["hibernate"] = hib_doc
-        return state
 
     @router.post("/operator/kill-switch")
-    @router.post("/tenant/kill-switch")
-    async def set_kill_switch(
+    async def toggle_kill_switch(
         body: KillSwitchRequest,
         operator: Annotated[Any, Depends(operator_dep)] = None,
-        x_goog_authenticated_user_email: Annotated[
-            str | None, Header(alias="X-Goog-Authenticated-User-Email")
-        ] = None,
     ) -> dict[str, Any]:
-        """Engage or disengage the global kill switch by toggling rule 100 preview on the tenant policy."""
-        actor = _get_operator_email(operator, x_goog_authenticated_user_email)
-        now_iso = datetime.now(tz=UTC).isoformat()
+        """Toggle kill switch by adjusting Cloud Armor rule preview on observed public backend."""
+        actor = _get_operator_email(operator)
 
-        # 1. Resolve security policy (never the observer control policy)
-        policy_name = body.security_policy or _discover_observed_security_policy(ctx)
-        if policy_name == OBSERVER_CONTROL_POLICY:
+        # Strictly discover observed policy; forbidden to target observer control policy
+        target_policy = body.security_policy or _discover_observed_security_policy(ctx)
+        if target_policy == OBSERVER_CONTROL_POLICY:
             raise HTTPException(
-                status_code=400,
-                detail=f"Safety violation: kill switch is strictly forbidden from targeting {OBSERVER_CONTROL_POLICY}",
+                status_code=403,
+                detail=f"Targeting '{OBSERVER_CONTROL_POLICY}' with kill switch is strictly forbidden",
             )
 
-        # Rule 100: preview=False blocks traffic (kill switch active); preview=True allows traffic
-        target_rule_preview = not body.enabled
-
-        # 2. Toggle rule 100 preview via Cloud Armor executor
+        # When kill switch is enabled, preview is FALSE (rule enforces 403 hard deny)
+        preview_mode = not body.enabled
         exec_res = await armor_executor.set_rule_preview(
             ctx=ctx,
             args={
-                "security_policy": policy_name,
-                "priority": 100,
-                "preview": target_rule_preview,
+                "preview": preview_mode,
+                "priority": body.priority or 0,
             },
-            target_resource=policy_name,
+            target_resource=target_policy,
             agent_id="operator",
         )
 
-        # 3. Update TrustGate global kill switch
-        drain = trust_gate.set_global_kill_switch(enabled=body.enabled, actor=actor)
+        if not exec_res.ok:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Cloud Armor kill switch execution failed: {exec_res.error}",
+            )
 
-        # 4. Persist operator state in Firestore
+        # Update TrustGate in-memory kill switch flag
+        trust_gate.global_kill_switch = body.enabled
+
+        now_iso = datetime.now(tz=UTC).isoformat()
         docs_store = getattr(ctx, "docs", None)
-        state_doc = {
-            "enabled": body.enabled,
-            "reason": body.reason,
-            "actor": actor,
-            "updated_at": now_iso,
-            "security_policy": policy_name,
-            "rule_priority": 100,
-            "rule_preview": target_rule_preview,
-            "drain": drain,
-            "execution": exec_res.model_dump(mode="json"),
-        }
-        _set_operator_state(docs_store, "kill_switch", state_doc)
+        state_doc = _get_operator_state_doc(docs_store, "current") or {}
+        state_doc.update(
+            {
+                "kill_switch_enabled": body.enabled,
+                "kill_switch_target_policy": target_policy,
+                "kill_switch_updated_at": now_iso,
+                "kill_switch_updated_by": actor,
+                "kill_switch_reason": body.reason,
+            }
+        )
+        _set_operator_state(docs_store, "current", state_doc)
 
-        await _emit_event("godview.operator.kill_switch", "tenant", state_doc)
+        await _emit_event(
+            event_type="godview.operator.kill_switch",
+            subject=target_policy,
+            data={
+                "enabled": body.enabled,
+                "target_policy": target_policy,
+                "operator": actor,
+                "reason": body.reason,
+            },
+        )
 
         return {
             "ok": True,
             "kill_switch_enabled": body.enabled,
-            "security_policy": policy_name,
-            "rule_preview": target_rule_preview,
-            "execution_ok": exec_res.ok,
-            "drain": drain,
+            "target_policy": target_policy,
+            "execution": exec_res.model_dump(mode="json"),
         }
 
     @router.post("/operator/pause")
-    @router.post("/tenant/pause")
-    @router.post("/lifecycle/tenant-pause")
     async def pause_tenant(
-        body: PauseResumeRequest | None = None,
+        body: PauseRequest | None = None,
         operator: Annotated[Any, Depends(operator_dep)] = None,
-        x_goog_authenticated_user_email: Annotated[
-            str | None, Header(alias="X-Goog-Authenticated-User-Email")
-        ] = None,
     ) -> dict[str, Any]:
-        """Invoke discovered tenant admin action to pause operations and persist operator_state."""
-        actor = _get_operator_email(operator, x_goog_authenticated_user_email)
-        now_iso = datetime.now(tz=UTC).isoformat()
-        reason = body.reason if body else "Scheduled Pause"
+        """Pause tenant operations via discovered OpenAPI admin action."""
+        actor = _get_operator_email(operator)
+        reason = body.reason if body else "operator pause"
+        env_mode = _get_env_mode(ctx)
 
-        # Look up discovered admin action for tenant pause if available
-        docs_store = getattr(ctx, "docs", None)
-        admin_url = None
-        if docs_store is not None:
-            try:
-                services = docs_store.list_docs("discovered_services")
-                for s in services:
-                    actions = s.get("admin_actions") or []
-                    for act in actions:
-                        if act.get("tag") == "x-godview-admin-action" and "pause" in act.get("name", "").lower():
-                            admin_url = act.get("url")
-                            break
-            except Exception:
-                pass
-
+        # Try to invoke discovered tenant admin action for pause
         admin_result = None
-        if admin_url:
+        try:
             admin_result = await tenant_admin_executor.execute(
                 ctx=ctx,
-                args={"url": admin_url, "method": "POST", "body": {"paused": True, "reason": reason}},
-                target_resource=admin_url,
+                args={"action_name": "tenant.pause", "operation_id": "pause", "body": {"reason": reason}},
+                target_resource="tenant.pause",
                 agent_id="operator",
             )
+        except Exception as e:
+            if env_mode != "hermetic":
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Cannot pause tenant: no discovered admin action 'tenant.pause' available: {e}",
+                ) from None
 
-        state_doc = {
-            "tenant_paused": True,
-            "reason": reason,
-            "actor": actor,
-            "updated_at": now_iso,
-            "admin_action_url": admin_url,
-        }
-        _set_operator_state(docs_store, "tenant", state_doc)
+        if admin_result is not None and not admin_result.ok:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Tenant administrative pause operation failed: {admin_result.error}",
+            )
 
-        await _emit_event("godview.schedule.pause", "tenant", state_doc)
+        now_iso = datetime.now(tz=UTC).isoformat()
+        docs_store = getattr(ctx, "docs", None)
+        state_doc = _get_operator_state_doc(docs_store, "current") or {}
+        state_doc.update(
+            {
+                "tenant_paused": True,
+                "tenant_paused_at": now_iso,
+                "tenant_paused_by": actor,
+                "pause_reason": reason,
+            }
+        )
+        _set_operator_state(docs_store, "current", state_doc)
+
+        await _emit_event(
+            event_type="godview.schedule.pause",
+            subject="tenant",
+            data={"action": "pause", "operator": actor, "reason": reason},
+        )
 
         return {
             "ok": True,
             "tenant_paused": True,
-            "admin_action_invoked": admin_url is not None,
-            "admin_result": admin_result.model_dump(mode="json") if admin_result else None,
+            "admin_action_invoked": admin_result is not None,
+            "result": admin_result.model_dump(mode="json") if admin_result else None,
         }
 
     @router.post("/operator/resume")
-    @router.post("/tenant/resume")
-    @router.post("/lifecycle/tenant-resume")
     async def resume_tenant(
-        body: PauseResumeRequest | None = None,
+        body: PauseRequest | None = None,
         operator: Annotated[Any, Depends(operator_dep)] = None,
-        x_goog_authenticated_user_email: Annotated[
-            str | None, Header(alias="X-Goog-Authenticated-User-Email")
-        ] = None,
     ) -> dict[str, Any]:
-        """Invoke discovered tenant admin action to resume operations and persist operator_state."""
-        actor = _get_operator_email(operator, x_goog_authenticated_user_email)
-        now_iso = datetime.now(tz=UTC).isoformat()
-        reason = body.reason if body else "Scheduled Resume"
-
-        docs_store = getattr(ctx, "docs", None)
-        admin_url = None
-        if docs_store is not None:
-            try:
-                services = docs_store.list_docs("discovered_services")
-                for s in services:
-                    actions = s.get("admin_actions") or []
-                    for act in actions:
-                        if act.get("tag") == "x-godview-admin-action" and "resume" in act.get("name", "").lower():
-                            admin_url = act.get("url")
-                            break
-            except Exception:
-                pass
+        """Resume tenant operations via discovered OpenAPI admin action."""
+        actor = _get_operator_email(operator)
+        reason = body.reason if body else "operator resume"
+        env_mode = _get_env_mode(ctx)
 
         admin_result = None
-        if admin_url:
+        try:
             admin_result = await tenant_admin_executor.execute(
                 ctx=ctx,
-                args={"url": admin_url, "method": "POST", "body": {"paused": False, "reason": reason}},
-                target_resource=admin_url,
+                args={"action_name": "tenant.resume", "operation_id": "resume", "body": {"reason": reason}},
+                target_resource="tenant.resume",
                 agent_id="operator",
             )
+        except Exception as e:
+            if env_mode != "hermetic":
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Cannot resume tenant: no discovered admin action 'tenant.resume' available: {e}",
+                ) from None
 
-        state_doc = {
-            "tenant_paused": False,
-            "reason": reason,
-            "actor": actor,
-            "updated_at": now_iso,
-            "admin_action_url": admin_url,
-        }
-        _set_operator_state(docs_store, "tenant", state_doc)
+        if admin_result is not None and not admin_result.ok:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Tenant administrative resume operation failed: {admin_result.error}",
+            )
 
-        await _emit_event("godview.schedule.resume", "tenant", state_doc)
+        now_iso = datetime.now(tz=UTC).isoformat()
+        docs_store = getattr(ctx, "docs", None)
+        state_doc = _get_operator_state_doc(docs_store, "current") or {}
+        state_doc.update(
+            {
+                "tenant_paused": False,
+                "tenant_resumed_at": now_iso,
+                "tenant_resumed_by": actor,
+            }
+        )
+        _set_operator_state(docs_store, "current", state_doc)
+
+        await _emit_event(
+            event_type="godview.schedule.resume",
+            subject="tenant",
+            data={"action": "resume", "operator": actor, "reason": reason},
+        )
 
         return {
             "ok": True,
             "tenant_paused": False,
-            "admin_action_invoked": admin_url is not None,
-            "admin_result": admin_result.model_dump(mode="json") if admin_result else None,
+            "admin_action_invoked": admin_result is not None,
+            "result": admin_result.model_dump(mode="json") if admin_result else None,
         }
 
     @router.post("/operator/hibernate")
-    @router.post("/hibernate")
-    async def set_hibernate_mode(
+    async def toggle_hibernate(
         body: HibernateRequest,
         operator: Annotated[Any, Depends(operator_dep)] = None,
-        x_goog_authenticated_user_email: Annotated[
-            str | None, Header(alias="X-Goog-Authenticated-User-Email")
-        ] = None,
     ) -> dict[str, Any]:
-        """Scale agents to 0, run hibernate job, and persist operator_state."""
-        actor = _get_operator_email(operator, x_goog_authenticated_user_email)
-        now_iso = datetime.now(tz=UTC).isoformat()
+        """Hibernate or wake the platform: run Cloud Scheduler hibernate job via act SA and scale agents."""
+        actor = _get_operator_email(operator)
+        project_id = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
+        location = os.environ.get("GODVIEW_REGIONS", "us-central1").split(",")[0].strip()
+        job_name = body.job_name or os.environ.get("HIBERNATE_JOB_NAME") or "godview-hibernate"
+        if not job_name.startswith("projects/"):
+            job_name = f"projects/{project_id}/locations/{location}/jobs/{job_name}"
 
-        cooled_agents_count = 0
+        env_mode = _get_env_mode(ctx)
+
         if body.enabled:
-            # Scale agents to 0
-            agents_runtime = getattr(ctx, "agents", None)
-            if agents_runtime is not None:
-                if hasattr(agents_runtime, "list_agents"):
-                    agent_list = agents_runtime.list_agents()
-                    for ag in agent_list:
-                        ag_id = ag.get("agent_id") if isinstance(ag, dict) else getattr(ag, "agent_id", None)
-                        if ag_id and hasattr(agents_runtime, "set_min_instances"):
-                            try:
-                                agents_runtime.set_min_instances(ag_id, 0)
-                                cooled_agents_count += 1
-                            except Exception:
-                                pass
+            # 1. Trigger Cloud Scheduler hibernate job via act SA
+            if env_mode != "hermetic":
+                try:
+                    token = await get_act_sa_access_token(ctx, project_id=project_id)
+                    headers = {"Authorization": f"Bearer {token}"}
+                    client = getattr(ctx, "http_client", None) or httpx.AsyncClient()
+                    run_url = f"{SCHEDULER_API_BASE}/{job_name}:run"
+                    resp = await client.post(run_url, headers=headers, timeout=15.0)
+                    if resp.status_code not in (200, 204):
+                        raise HTTPException(
+                            status_code=502,
+                            detail=f"Cloud Scheduler hibernate job run failed with status {resp.status_code}: {resp.text}",
+                        )
+                except httpx.HTTPError as exc:
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"Failed to trigger Cloud Scheduler hibernate job: {exc}",
+                    ) from exc
 
+            # 2. Scale agents to 0
+            if hasattr(ctx, "agents") and ctx.agents is not None:
+                try:
+                    agents_list = ctx.agents.list_agents() if hasattr(ctx.agents, "list_agents") else []
+                    for ag in agents_list:
+                        aid = ag.get("agent_id") or ag.get("id") or ag.get("name")
+                        if aid:
+                            try:
+                                await agent_executor.execute(ctx, {"min_instances": 0}, str(aid), agent_id="operator")
+                            except Exception as e:
+                                logger.warning("Failed to scale agent %s to 0 during hibernate: %s", aid, e)
+                except Exception as exc:
+                    logger.warning("Failed to list agents during hibernate: %s", exc)
+        else:
+            # Restore agents to 1
+            if hasattr(ctx, "agents") and ctx.agents is not None:
+                try:
+                    agents_list = ctx.agents.list_agents() if hasattr(ctx.agents, "list_agents") else []
+                    for ag in agents_list:
+                        aid = ag.get("agent_id") or ag.get("id") or ag.get("name")
+                        if aid:
+                            try:
+                                await agent_executor.execute(ctx, {"min_instances": 1}, str(aid), agent_id="operator")
+                            except Exception as e:
+                                logger.warning("Failed to restore agent %s to 1: %s", aid, e)
+                except Exception as exc:
+                    logger.warning("Failed to list agents during hibernate wake: %s", exc)
+
+        now_iso = datetime.now(tz=UTC).isoformat()
         docs_store = getattr(ctx, "docs", None)
-        state_doc = {
-            "hibernate_enabled": body.enabled,
-            "reason": body.reason,
-            "actor": actor,
-            "updated_at": now_iso,
-            "job_name": HIBERNATE_JOB_NAME,
-            "cooled_agents_count": cooled_agents_count,
-        }
-        _set_operator_state(docs_store, "hibernate", state_doc)
+        state_doc = _get_operator_state_doc(docs_store, "current") or {}
+        state_doc.update(
+            {
+                "hibernate_enabled": body.enabled,
+                "hibernate_job_name": job_name,
+                "hibernate_updated_at": now_iso,
+                "hibernate_updated_by": actor,
+                "hibernate_reason": body.reason,
+            }
+        )
+        _set_operator_state(docs_store, "current", state_doc)
 
         await _emit_event(
-            "godview.operator.hibernate",
-            "environment",
-            state_doc,
+            event_type="godview.operator.hibernate",
+            subject="platform",
+            data={"enabled": body.enabled, "job_name": job_name, "operator": actor, "reason": body.reason},
         )
 
         return {
             "ok": True,
             "hibernate_enabled": body.enabled,
-            "job_name": HIBERNATE_JOB_NAME,
-            "cooled_agents_count": cooled_agents_count,
+            "job_name": job_name,
         }
 
     return router

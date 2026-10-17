@@ -82,6 +82,8 @@ async def test_cloud_run_set_invoker_iam(remediation_fixtures: dict[str, Any]) -
             body = json.loads(request.content)
             live_policy["bindings"] = body["policy"]["bindings"]
             return httpx.Response(200, json=live_policy)
+        if "services/svc-origination-901" in url:
+            return httpx.Response(200, json={"invokerIamDisabled": False})
         return httpx.Response(404)
 
     transport = httpx.MockTransport(handle_request)
@@ -231,24 +233,49 @@ async def test_tenant_admin_action() -> None:
         invoked_auth.append(request.headers.get("Authorization", ""))
         return httpx.Response(200, json={"status": "ok", "paused": True})
 
+    ctx = MagicMock()
+    ctx.settings = MagicMock(env_mode="gcp")
+    ctx.discovered_admin_actions = {
+        "tenant.pause": {
+            "action_name": "tenant.pause",
+            "operation_id": "pause",
+            "method": "POST",
+            "url": "https://api.example.com/admin/v1/tenant/pause",
+            "service_url": "https://api.example.com",
+        }
+    }
+
     transport = httpx.MockTransport(handle_request)
     async with httpx.AsyncClient(transport=transport) as mock_client:
         executor = TenantAdminExecutor(http_client=mock_client)
 
         result = await executor.execute(
-            ctx=None,
+            ctx=ctx,
             args={
-                "url": "https://api.example.com/admin/v1/tenant/pause",
+                "action_name": "tenant.pause",
                 "method": "POST",
                 "body": {"reason": "Maintenance"},
             },
-            target_resource="https://api.example.com/admin/v1/tenant/pause",
+            target_resource="tenant.pause",
         )
 
         assert result.ok is True
         assert result.verification[0].passed is True
         assert len(invoked_auth) == 1
         assert "Bearer" in invoked_auth[0]
+
+        # Negative test: raw un-discovered URL raises NoExecutorError
+        from godview.sovereign.remediation.types import NoExecutorError
+
+        with pytest.raises(NoExecutorError, match="No discovered tenant admin action"):
+            await executor.execute(
+                ctx=ctx,
+                args={
+                    "action_name": "undiscovered.action",
+                    "url": "https://api.example.com/arbitrary/endpoint",
+                },
+                target_resource="undiscovered.action",
+            )
 
 
 @pytest.mark.unit

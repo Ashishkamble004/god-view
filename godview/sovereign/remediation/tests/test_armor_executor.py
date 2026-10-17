@@ -86,13 +86,13 @@ async def test_armor_executor_set_waf_sensitivity_preview_first_and_verify(
             ctx=None,
             args={
                 "project_id": "proj-test",
-                "security_policy": "god-view-edge-policy",
+                "security_policy": "edge-security-policy",
                 "priority": 1000,
                 "sensitivity": 1,
                 "preview_first": True,
                 "probe_url": "https://api.example.com/test-probe",
             },
-            target_resource="god-view-edge-policy",
+            target_resource="edge-security-policy",
         )
 
         assert result.ok is True
@@ -110,7 +110,7 @@ async def test_armor_executor_set_waf_sensitivity_preview_first_and_verify(
         assert len(result.verification) == 3
         check_names = [v.check for v in result.verification]
         assert "waf_rule_preview_mode_active" in check_names
-        assert "probe_json_post_bypasses_waf_block" in check_names
+        assert "post_enforce_probe_bypasses_waf_block" in check_names
         assert "waf_rule_enforced_with_sensitivity" in check_names
 
         # Final state
@@ -162,12 +162,12 @@ async def test_armor_executor_rollback_on_failed_verification(
             ctx=None,
             args={
                 "project_id": "proj-test",
-                "security_policy": "god-view-edge-policy",
+                "security_policy": "edge-security-policy",
                 "priority": 1000,
                 "sensitivity": 1,
                 "preview_first": True,
             },
-            target_resource="god-view-edge-policy",
+            target_resource="edge-security-policy",
         )
 
         assert result.ok is False
@@ -203,11 +203,11 @@ async def test_armor_executor_set_rule_preview_kill_switch(
             ctx=None,
             args={
                 "project_id": "proj-test",
-                "security_policy": "god-view-edge-policy",
+                "security_policy": "edge-security-policy",
                 "priority": 100,
                 "preview": False,
             },
-            target_resource="god-view-edge-policy",
+            target_resource="edge-security-policy",
         )
         assert res.ok is True
         assert res.after["preview"] is False
@@ -218,11 +218,72 @@ async def test_armor_executor_set_rule_preview_kill_switch(
             ctx=None,
             args={
                 "project_id": "proj-test",
-                "security_policy": "god-view-edge-policy",
+                "security_policy": "edge-security-policy",
                 "priority": 100,
                 "preview": True,
             },
-            target_resource="god-view-edge-policy",
+            target_resource="edge-security-policy",
         )
         assert res_disengage.ok is True
         assert res_disengage.after["preview"] is True
+
+
+@pytest.mark.unit
+async def test_armor_executor_rollback_on_post_enforce_probe_403(
+    remediation_fixtures: dict[str, Any],
+) -> None:
+    """If post-enforcement probe returns 403, rule must automatically roll back."""
+    ca_fixture = remediation_fixtures["cloud_armor"]
+    rule_state = dict(ca_fixture["rule_1000"])
+    patch_history: list[dict[str, Any]] = []
+
+    def handle_request(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "getRule" in url and "priority=1000" in url:
+            return httpx.Response(200, json=rule_state)
+        if "patchRule" in url and "priority=1000" in url:
+            body = json.loads(request.content)
+            patch_history.append(body)
+            if "preview" in body:
+                rule_state["preview"] = body["preview"]
+            if "match" in body and "expr" in body["match"]:
+                rule_state["match"]["expr"]["expression"] = body["match"]["expr"]["expression"]
+            return httpx.Response(200, json=rule_state)
+        if "test-probe" in url:
+            # 403: WAF is blocking legitimate traffic!
+            return httpx.Response(403, text="Forbidden by Cloud Armor WAF")
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handle_request)
+    async with httpx.AsyncClient(transport=transport) as mock_client:
+        executor = CloudArmorExecutor(http_client=mock_client)
+        result = await executor.set_waf_sensitivity(
+            ctx=None,
+            args={
+                "project_id": "proj-test",
+                "priority": 1000,
+                "sensitivity": 1,
+                "probe_url": "https://api.example.com/test-probe",
+            },
+            target_resource="edge-security-policy",
+        )
+
+        assert result.ok is False
+        assert result.reverted is True
+        assert "403 Forbidden" in (result.error or "")
+
+
+@pytest.mark.unit
+async def test_armor_executor_ssrf_forbidden_url() -> None:
+    """Probing internal metadata server addresses must raise ScopeViolationError."""
+    from godview.sovereign.remediation.types import ScopeViolationError
+
+    executor = CloudArmorExecutor()
+    with pytest.raises(ScopeViolationError, match="SSRF protection"):
+        await executor.set_waf_sensitivity(
+            ctx=None,
+            args={
+                "probe_url": "http://169.254.169.254/computeMetadata/v1/",
+            },
+            target_resource="edge-security-policy",
+        )

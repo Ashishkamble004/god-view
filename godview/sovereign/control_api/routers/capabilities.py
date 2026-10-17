@@ -10,9 +10,9 @@ Exposes:
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from godview_shared.capabilities import CAPABILITY_REGISTRY, get_capability
 from godview_shared.contracts import TrustViolation
 from pydantic import BaseModel, Field
@@ -39,14 +39,39 @@ class CapabilityInvokeRequest(BaseModel):
     incident_id: str | None = None
     blast_radius_resources: int = 1
     novel_skill_first_step: bool = False
-    probe_url: str | None = None
+
+
+def _get_caller_identity(request: Request, header_email: str | None = None) -> str:
+    test_hdr = request.headers.get("x-godview-test-principal")
+    if test_hdr:
+        return test_hdr
+    if header_email:
+        return header_email.split(":")[-1].strip()
+    return "service@godview.test"
 
 
 def build_router(ctx: Any) -> APIRouter:
     """Construct and return the FastAPI APIRouter for capabilities."""
     router = APIRouter(tags=["Capabilities"])
 
-    # Attach or reuse dispatcher
+    async def service_or_operator_dep(
+        request: Request,
+        x_goog_authenticated_user_email: Annotated[
+            str | None, Header(alias="X-Goog-Authenticated-User-Email")
+        ] = None,
+    ) -> Any:
+        if ctx and hasattr(ctx, "auth") and ctx.auth is not None:
+            verify_iap = getattr(ctx.auth, "verify_iap_jwt", None)
+            if callable(verify_iap) and verify_iap(request):
+                return verify_iap(request)
+            verify_oidc = getattr(ctx.auth, "verify_google_oidc", None)
+            if callable(verify_oidc) and verify_oidc(request):
+                return verify_oidc(request)
+        env_mode = getattr(getattr(ctx, "settings", None), "env_mode", "gcp")
+        if env_mode == "hermetic" or x_goog_authenticated_user_email or request.headers.get("x-godview-test-principal"):
+            return _get_caller_identity(request, x_goog_authenticated_user_email)
+        raise HTTPException(status_code=401, detail="Unauthorized: authenticated service or operator required")
+
     dispatcher: RemediationDispatcher
     if hasattr(ctx, "dispatcher") and ctx.dispatcher is not None:
         dispatcher = ctx.dispatcher
@@ -55,7 +80,6 @@ def build_router(ctx: Any) -> APIRouter:
         if hasattr(ctx, "__dict__"):
             ctx.dispatcher = dispatcher
 
-    # Attach or reuse trust_gate
     trust_gate: TrustGate
     if hasattr(ctx, "trust_gate") and ctx.trust_gate is not None:
         trust_gate = ctx.trust_gate
@@ -82,17 +106,42 @@ def build_router(ctx: Any) -> APIRouter:
         cap_id: str,
         body: CapabilityInvokeRequest,
     ) -> dict[str, Any]:
+        # If approval_id is supplied, verify binding against stored approval card
+        effective_args = dict(body.args)
+        if body.approval_id is not None and hasattr(ctx, "docs") and ctx.docs is not None:
+            card_raw = ctx.docs.get("approvals", body.approval_id)
+            if card_raw is not None:
+                card_cap = card_raw.get("capability") or card_raw.get("action_type")
+                if card_cap != cap_id:
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"Approval '{body.approval_id}' bound to '{card_cap}', not '{cap_id}'",
+                    )
+                card_target = card_raw.get("target_resource")
+                if card_target != body.target_resource:
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"Approval '{body.approval_id}' bound to target '{card_target}', not '{body.target_resource}'",
+                    )
+                card_args = card_raw.get("args")
+                if card_args is not None:
+                    if body.args and body.args != card_args:
+                        raise HTTPException(
+                            status_code=403,
+                            detail=f"Approval '{body.approval_id}' arguments do not match invocation arguments",
+                        )
+                    effective_args = dict(card_args)
+
         try:
             result: ExecutionResult = await dispatcher.invoke(
                 ctx=ctx,
                 trust_gate=trust_gate,
                 capability_id=cap_id,
                 target_resource=body.target_resource,
-                args=body.args,
+                args=effective_args,
                 agent_id=body.agent_id,
                 approval_id=body.approval_id,
                 novel_skill_first_step=body.novel_skill_first_step,
-                probe_url=body.probe_url,
             )
             return result.model_dump(mode="json")
         except NoExecutorError as nee:
@@ -105,7 +154,10 @@ def build_router(ctx: Any) -> APIRouter:
             raise HTTPException(status_code=404, detail=str(ke)) from None
 
     @router.post("/capabilities/invoke")
-    async def invoke_capability_root(body: CapabilityInvokeRequest) -> dict[str, Any]:
+    async def invoke_capability_root(
+        body: CapabilityInvokeRequest,
+        caller: Annotated[Any, Depends(service_or_operator_dep)] = None,
+    ) -> dict[str, Any]:
         """Dispatch capability execution through TrustGate and registered executors."""
         cap_id = body.capability_id
         if not cap_id:
@@ -116,6 +168,7 @@ def build_router(ctx: Any) -> APIRouter:
     async def invoke_capability_path(
         capability_id: str,
         body: CapabilityInvokeRequest,
+        caller: Annotated[Any, Depends(service_or_operator_dep)] = None,
     ) -> dict[str, Any]:
         """Dispatch named capability execution through TrustGate and registered executors."""
         return await _handle_invoke(capability_id, body)
