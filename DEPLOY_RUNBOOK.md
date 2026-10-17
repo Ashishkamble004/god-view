@@ -1,15 +1,19 @@
 # God-View v5 & Cymbal Auto Finance — Deployment Runbook
 
+> [!CAUTION]
+> **DEPLOYER OPERATIONAL RULE: UNTARGETED APPLY IS STRICTLY FORBIDDEN**
+> An untargeted `terraform apply` on `infra/terraform/platform` will attempt to reconcile drifted tenant Cloud Run services, the cockpit, and the hibernate job (manual scaling, client=gcloud drift). ALL terraform applies MUST use targeted resource flags (`-target=...`) as specified in Step 1 until tenant Cloud Run drift is explicitly reconciled.
+
 > [!NOTE]
 > **God-View v5 Rebuild (2026-10-17) — see [`issues-identified-17-10-26.md`](issues-identified-17-10-26.md) & [`plans/2026-10-17-god-view-rebuild-plan.md`](plans/2026-10-17-god-view-rebuild-plan.md).**
-> - **Zero Fakes in Production**: Production Sovereign runs with real GCP composition root (`bootstrap.py`) over Firestore (`god-view-memory-db`), BigQuery (`godview_ledger`), Pub/Sub (`godview-nervous-system`), and Vertex AI Agent Engine. `GODVIEW_ENV=gcp` fails closed if any in-memory store is active.
+> - **Zero Fakes in Production (v5 Target)**: Production Sovereign runs with real GCP composition root (`bootstrap.py`) over Firestore (`god-view-memory-db`), BigQuery (`godview_ledger`), Pub/Sub (`godview-nervous-system`), and Vertex AI Agent Engine. `GODVIEW_ENV=gcp` fails closed if any in-memory store is active. (Live Cloud Run revision `god-view-sovereign-00006-mfk` is the legacy v4 baseline running on in-memory fakes; replaced upon v5 deployment).
 > - **Section 2.1 Correction**: The stale v4 Sovereign image digest (`god-view-sovereign-00006-mfk` `@sha256:93fae7d6…`) ran on in-memory fakes with zero sense adapters (`app = create_app()`). Replaced by the v5 rebuild container.
 > - **Section 2.2 Correction**: **No Court Agents were deployed in v4** (the previous table reflected planned specs; live Vertex AI had 0 `godview_managed` Reasoning Engines). In v5, ADK specialists on Vertex AI Agent Engine (`min_instances = 0`, `gemini-4-argon` default) are deployed dynamically by the Sovereign / deployer once agent engine slice lands.
 > - **Infrastructure & Edge (Rev 5 & Rev 6)**:
 >   - God-View backends (`god-view-bs-cockpit`, `-sovereign-api`, `-sovereign-public`) use Cloud Armor `god-view-control-policy` (WAF sensitivity 1, verbose logging, 600 req/min/IP rate limit). Tenant backends remain on `god-view-edge-policy` (sensitivity 4; test case T1).
 >   - Sovereign Cloud Run sized to 2 vCPU / 2 GiB (`min=max=1`).
 >   - Database passwords moved to Secret Manager (`godview-pg-readonly-password:latest`) via `secret_key_ref`.
->   - Monitoring uptime check upgraded to direct Sovereign `.run.app` host with OIDC service agent authentication.
+>   - Monitoring uptime check upgraded to direct Sovereign `.run.app` host with OIDC service agent authentication and `create_before_destroy`.
 >   - Audit log sink configured with exclusions for GKE Autopilot churn (`leases`, `configmaps`, `pods.binding`, `endpointslices`).
 >   - Pub/Sub DLQ topic backed by a dedicated subscription `godview-nervous-system-dlq-sub` (7-day retention).
 
@@ -30,7 +34,7 @@
 | Stage | Scope | Status | Applied At (UTC) | Key Outputs / Notes |
 | :-- | :-- | :-- | :-- | :-- |
 | Bootstrap | GCS bucket `gs://general-ak-god-view-tfstate` (uniform access, versioning, `prevent_destroy = true`) | **Applied** | `2026-10-16T17:34:42Z` | Imported and updated in-place (`godview_managed = "true"`) |
-| Stage 1 | `01-project-iam` (30 APIs, 5 SAs, WIF), VPC/subnet/PSA/NAT/firewalls/ILB IPs, Artifact Registry `god-view-containers`, 5 buckets, Secret Manager secrets (`cymbal-pg-app-password`, `godview-pg-readonly-password`, `godview-github-*`), Firestore `god-view-memory-db` + 4 vector indexes, BigQuery `godview_ledger` + 4 tables, Cloud SQL `god-view-pg` (`godview_lms`, `app_user`, `godview_readonly`), GKE Autopilot `god-view-gke-cluster` + WI, Pub/Sub `godview-nervous-system` + `-dlq` + audit sink, Model Armor `cymbal-text-guard` | **Applied / Rev 6 Ready** | `2026-10-17T07:51:52Z` (base) | `sql_private_ip = 10.186.0.3`, `kyc_ilb = 10.10.0.3`, `los_ilb = 10.10.0.2`, `gke_dns_endpoint = gke-00dca33da82641e7a02cb81ed031de9e7418-769002985772.us-central1.gke.goog`. Rev 6: Scoped SA IAM roles strictly to §3.8; rotated `godview_readonly` password in Secret Manager. |
+| Stage 1 | `01-project-iam` (30 APIs, 5 SAs, WIF), VPC/subnet/PSA/NAT/firewalls/ILB IPs, Artifact Registry `god-view-containers`, 5 buckets, Secret Manager secrets (`cymbal-pg-app-password`, `godview-github-*` applied; `godview-pg-readonly-password` target created in Rev 6 apply), Firestore `god-view-memory-db` + 4 vector indexes, BigQuery `godview_ledger` + 4 tables, Cloud SQL `god-view-pg` (`godview_lms`, `app_user`, `godview_readonly`), GKE Autopilot `god-view-gke-cluster` + WI, Pub/Sub `godview-nervous-system` + `-dlq` + audit sink, Model Armor `cymbal-text-guard` | **Applied / Rev 6 Ready** | `2026-10-17T07:51:52Z` (base) | `sql_private_ip = 10.186.0.3`, `kyc_ilb = 10.10.0.3`, `los_ilb = 10.10.0.2`, `gke_dns_endpoint = gke-00dca33da82641e7a02cb81ed031de9e7418-769002985772.us-central1.gke.goog`. Rev 6: Scoped SA IAM roles strictly to §3.8 + custom hibernate role; rotated `godview_readonly` password in Secret Manager. |
 | Stage 2 | 8 Cloud Run v2 services, API Gateway `god-view-loan-api-gw`, 5 serverless NEGs, Global LB `god-view-edge` (`35.244.128.165`) + `god-view-edge-cert` (`ACTIVE`), Cloud CDN backend bucket, Cloud Armor policies (`god-view-control-policy` for God-View backends; `god-view-edge-policy` for tenant), DNS `A` records (`cymbal`, `los.cymbal`, `api.cymbal`, `godview` in `ak-demos-com`), IAP bindings, GCE VM `core-banking-cibil-vm` (`10.10.0.5`), Pub/Sub push `godview-sovereign-push` | **Applied / Rev 6 Ready** | `2026-10-17T08:19:07Z` (base) | `lb_ip_address = 35.244.128.165`, `api_gateway_hostname = god-view-loan-api-gw-9t9witd8.uc.gateway.dev`, `cbs_vm_internal_ip = 10.10.0.5`, `sovereign_service_url = https://god-view-sovereign-mcj3w7ujpq-uc.a.run.app`. Rev 5: `control_policy` sensitivity 1 + LB logging. Rev 6: Sovereign 2 vCPU / 2 GiB, min=max=1, `IAP_BACKEND_SERVICE_IDS`, Secret Manager refs. |
 | Stage 3 | 5 Cloud Scheduler jobs (`godview-tenant-pause`, `godview-tenant-resume`, `godview-probe-run`, `godview-agent-reflection`, `godview-simulator-tick` in `Asia/Kolkata`), uptime check `sovereign_health` (OIDC auth to Sovereign `.run.app` host) + alert policy `sovereign_heartbeat` + email channel `operator_email`, `$600` Billing Budget `god-view-monthly-budget-600`, Cloud Run Job `god-view-hibernate-job`, Vertex AI Reasoning Engine staging bucket IAM `staging_re_service_agent` | **Applied / Rev 6 Ready** | `2026-10-17T08:27:47Z` (base) | `hibernate_job_name = god-view-hibernate-job`. Rev 6: OIDC uptime check + monitoring service agent `roles/run.invoker`; DLQ subscription `godview-nervous-system-dlq-sub` (7d retention); audit sink GKE churn exclusions. |
 
@@ -111,9 +115,12 @@ terraform -chdir=infra/terraform/platform plan -input=false \
   -target=module.data.google_secret_manager_secret_version.godview_pg_readonly_password \
   -target=module.data.google_secret_manager_secret_iam_member.pg_readonly_pass_sense \
   -target=module.data.google_sql_user.godview_readonly \
+  -target=module.data.google_bigquery_table.events \
+  -target=module.data.google_bigquery_table.journeys \
   -target=module.godview.google_cloud_run_v2_service.sovereign \
   -target=module.godview.google_cloud_run_v2_service_iam_member.sovereign_invokers \
   -target=module.godview.google_monitoring_uptime_check_config.sovereign_health \
+  -target=module.godview.google_monitoring_alert_policy.sovereign_heartbeat \
   -target=module.godview.google_logging_project_sink.audit_to_nervous_system \
   -target=module.godview.google_pubsub_topic.nervous_system_dlq \
   -target=module.godview.google_pubsub_subscription.nervous_system_dlq \
@@ -123,6 +130,20 @@ terraform -chdir=infra/terraform/platform plan -input=false \
 terraform -chdir=infra/terraform/platform apply -input=false /usr/local/google/home/kambleashish/tmp/platform-v5.tfplan
 terraform -chdir=infra/terraform/platform output -json > infra/terraform/platform/outputs.json
 ```
+
+> [!IMPORTANT]
+> **Key Architecture Decisions for Rev 6 Apply:**
+> 1. **Password Rotation Dependency & Rollback Caveat**:
+>    `google_sql_user.godview_readonly` and `google_cloud_run_v2_service.sovereign` explicitly depend on `google_secret_manager_secret_version.godview_pg_readonly_password` and the IAM `secretAccessor` binding. The secret version and IAM are created BEFORE the Cloud SQL user password rotates and BEFORE the Sovereign revision is created, eliminating the rotation race.
+>    *Rollback Caveat*: Rolling back to a legacy revision (e.g. `god-view-sovereign-00006-mfk`) will fail DB authentication because legacy revisions expect the old plaintext password, whereas the Cloud SQL user is rotated. Any rollback must use a revision configured with `godview-pg-readonly-password:latest`.
+> 2. **Agent Engine Identity**:
+>    Reasoning engines run as `godview-sense-sa` (`ReasoningEngineSpec.service_account = godview-sense-sa@general-ak.iam.gserviceaccount.com`). The Reasoning Engine service agent (`serviceAccount:service-769002985772@gcp-sa-aiplatform-re.iam.gserviceaccount.com`) is granted `roles/iam.serviceAccountUser` on `godview-sense-sa`. The RE service agent is NOT added to `sovereign_invokers` because calls from engines authenticate as `godview-sense-sa` (already an authorized invoker).
+> 3. **Act SA Scoped Hibernate Role**:
+>    `godview-act-sa` is granted a custom project role `godview_hibernate_operator` containing only `compute.instances.{get,start,stop}`, `cloudsql.instances.{get,update}`, and `cloudscheduler.jobs.{get,pause,resume,run}` for the `god-view-hibernate-job` and operational remediation. Broad roles (`instanceAdmin.v1`, `cloudsql.editor`, `cloudscheduler.admin`, `run.developer`) are destroyed per plan §3.8.
+> 4. **BigQuery Ledger Tables Replacement**:
+>    `google_bigquery_table.events` and `google_bigquery_table.journeys` are recreated in this apply with the generic neutral schema (`entity_type`, `state_from`, `state_to`, `numeric_attributes`, `currency`, `total_value`). The tables currently hold 0 rows. Future schema changes to the ledger must be additive.
+> 5. **Uptime Check Replacement**:
+>    `google_monitoring_uptime_check_config.sovereign_health` uses `lifecycle { create_before_destroy = true }` and `google_monitoring_alert_policy.sovereign_heartbeat` is targeted in the same apply to prevent orphan alert errors.
 
 ### Step 2: Build, Pin, and Deploy v5 Sovereign Control Plane
 *(Run once `@verifier-core` posts PASS for runtime-core, discovery, sentinels, remediation.)*
@@ -148,11 +169,12 @@ COCKPIT_DIGEST="$(./infra/deploy/build_image.sh god-view-sre-web --pin)"
 ```bash
 SOV_URL="$(gcloud run services describe god-view-sovereign --project=general-ak --region=us-central1 --format='value(status.url)')"
 PYTHONPATH=. uv run --with "google-cloud-aiplatform[agent_engines,adk]" python infra/deploy/deploy_agent_engine.py \
-  --all-court \
+  --from-perceive \
   --sovereign-url "${SOV_URL}" \
   --project-id general-ak \
   --location us-central1 \
-  --staging-bucket gs://general-ak-god-view-agent-staging
+  --staging-bucket gs://general-ak-god-view-agent-staging \
+  --service-account godview-sense-sa@general-ak.iam.gserviceaccount.com
 ```
 
 ### Step 5: Verification & Acceptance Gates (Verifier-Live)

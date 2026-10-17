@@ -158,7 +158,12 @@ variable "sql_private_ip" {
   type = string
 }
 
-variable "sql_readonly_password" {
-  type      = string
-  sensitive = true
+variable "pg_readonly_secret_id" {
+  type    = string
+  default = "godview-pg-readonly-password"
+}
+
+variable "pg_readonly_secret_version_id" {
+  type    = string
+  default = ""
 }

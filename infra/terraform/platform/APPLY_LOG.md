@@ -115,13 +115,25 @@
     - **Secrets hygiene**: Moved `PG_READONLY_PASSWORD` and `DB_PASSWORD` from plaintext environment variables to Secret Manager `value_source.secret_key_ref` referencing `godview-pg-readonly-password:latest`.
     - **Log sink hygiene**: Added exclusions to `google_logging_project_sink.audit_to_nervous_system` for high-volume GKE Autopilot noise (`io.k8s.coordination.v1.leases`, `io.k8s.core.v1.configmaps`, `pods.binding`, `endpointslices`).
     - **Pub/Sub DLQ**: Created `google_pubsub_subscription.nervous_system_dlq` (`godview-nervous-system-dlq-sub`) with 7-day retention (`604800s`), ack retention, and subscriber IAM binding for `godview-sense-sa`. Set topic retention to 7 days.
+  - **Module `01-project-iam`**:
+    - Scoped `godview-sense-sa` project roles strictly to plan §3.8: removed broad `roles/viewer`; added `compute.viewer`, `run.viewer`, `pubsub.viewer`, `iam.securityReviewer`, `apigateway.viewer`, `container.viewer`, `cloudsql.viewer`, `bigquery.metadataViewer`, `secretmanager.viewer` alongside `logging.viewer`, `monitoring.viewer`, `datastore.user`, `bigquery.jobUser`, `cloudasset.viewer`, `aiplatform.user`, `cloudtrace.user`.
+    - Scoped `godview-act-sa` project roles strictly to plan §3.8: `roles/compute.securityAdmin`, `roles/run.admin`, `roles/pubsub.editor`, `roles/container.developer` (+ `roles/iam.serviceAccountUser` on `godview-runtime-sa`). Removed unapproved broad roles (`instanceAdmin.v1`, `cloudsql.editor`, `cloudscheduler.admin`, `run.developer`).
+    - Added custom role `godview_hibernate_operator` for `godview-act-sa` (per coordinator decision #47) with minimal permissions for `god-view-hibernate-job` (`compute.instances.{get,start,stop}`, `cloudsql.instances.{get,update}`, `cloudscheduler.jobs.{get,pause,resume,run}`).
+    - Granted `roles/iam.serviceAccountUser` on `godview-sense-sa` to Reasoning Engine service agent `serviceAccount:service-${var.project_number}@gcp-sa-aiplatform-re.iam.gserviceaccount.com` (engines run as `godview-sense-sa`).
   - **Module `03-data`**:
     - Created Secret Manager secret `godview-pg-readonly-password` and secret version.
     - Granted `roles/secretmanager.secretAccessor` on `godview-pg-readonly-password` to `godview-sense-sa`.
-    - Rotated Cloud SQL user password via `random_password.pg_readonly` rotation keeper `v5-secret-manager` and updated `google_sql_user.godview_readonly`.
-    - Exported `godview_pg_readonly_password` in `secret_ids`.
-  - **Module `01-project-iam`**:
-    - Scoped `godview-sense-sa` project roles strictly to plan §3.8: removed broad `roles/viewer`; added `compute.viewer`, `run.viewer`, `pubsub.viewer`, `iam.securityReviewer`, `apigateway.viewer`, `container.viewer`, `cloudsql.viewer` alongside `logging.viewer`, `monitoring.viewer`, `datastore.user`, `bigquery.jobUser`, `cloudasset.viewer`, `aiplatform.user`, `cloudtrace.user`.
-    - Scoped `godview-act-sa` project roles strictly to plan §3.8: `roles/compute.securityAdmin`, `roles/run.admin`, `roles/pubsub.editor`, `roles/container.developer` (+ `roles/iam.serviceAccountUser` on `godview-runtime-sa`). Removed unapproved broad roles.
+    - Rotated Cloud SQL user password via `random_password.pg_readonly` rotation keeper `v5-secret-manager` and updated `google_sql_user.godview_readonly` with explicit `depends_on` secret version and accessor to eliminate rotation lockout race.
+    - Exported `godview_pg_readonly_password` in `secret_ids` and exported `pg_readonly_secret_version_id`. Removed dead `sql_readonly_password` output.
+    - BigQuery schema sync: Synced `schemas/events.json` and `schemas/journeys.json` with `godview/ledger/schemas/` per `@neutrality` request (`entity_type`, `state_from`, `state_to`, `numeric_attributes`, `currency`, `total_value`). Recreating empty tables in targeted apply.
+  - **Module `05-godview`**:
+    - **Uptime check**: Updated `google_monitoring_uptime_check_config.sovereign_health` to probe the direct Sovereign Cloud Run `*.run.app` host with OIDC service agent authentication (`http_check.service_agent_authentication { type = "OIDC_TOKEN" }`), path `/public/healthz`, and `lifecycle { create_before_destroy = true }`.
+    - **Alert policy target**: Targeted `google_monitoring_alert_policy.sovereign_heartbeat` in the same apply to prevent orphan check deletion errors.
+    - **Sovereign IAM invokers**: Added `serviceAccount:service-769002985772@gcp-sa-monitoring-notification.iam.gserviceaccount.com` `roles/run.invoker` to `local.sovereign_invokers` (granted by hand at 17:09Z; imported by deployer).
+    - **Sovereign resources**: Allocated 2 vCPU / 2 GiB (`sovereign_cpu = "2"`, `sovereign_memory = "2Gi"`, `min=max=1`).
+    - **Sovereign environment variables**: Added `GOOGLE_CLOUD_PROJECT = var.project_id`, `GOOGLE_CLOUD_PROJECT_NUMBER = var.project_number`, `GODVIEW_REGIONS = "us-central1"`, `IAP_BACKEND_SERVICE_IDS` (numeric IDs of `god-view-bs-sovereign-api` and `god-view-bs-cockpit` resolved via data sources without cyclic module dependencies), `PERCEPTION_INTERVAL_SECONDS = "300"`, `GODVIEW_ENV = "gcp"`, and explicit `PG_READONLY_SECRET_VERSION` dependency.
+    - **Secrets hygiene**: Moved `PG_READONLY_PASSWORD` and `DB_PASSWORD` from plaintext environment variables to Secret Manager `value_source.secret_key_ref` referencing `var.pg_readonly_secret_id`. Removed dead `sql_readonly_password` variable.
+    - **Log sink hygiene**: Added exclusions to `google_logging_project_sink.audit_to_nervous_system` for high-volume GKE Autopilot churn using `protoPayload.methodName:"..."` (`leases`, `configmaps`, `pods.binding`, `endpointslices`).
+    - **Pub/Sub DLQ**: Created `google_pubsub_subscription.nervous_system_dlq` (`godview-nervous-system-dlq-sub`) with 7-day retention (`604800s`), ack retention, and subscriber IAM binding for `godview-sense-sa`. Set topic retention to 7 days.
   - **Module `04-tenant-compute`**:
     - Unchanged (tenant frozen; Cloud Armor WAF sensitivity 4 fault T1 preserved as God-View test case).

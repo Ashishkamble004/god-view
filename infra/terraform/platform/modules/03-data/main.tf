@@ -451,6 +451,11 @@ resource "google_sql_user" "godview_readonly" {
   name     = "godview_readonly"
   instance = google_sql_database_instance.god_view_pg.name
   password = random_password.pg_readonly.result
+
+  depends_on = [
+    google_secret_manager_secret_version.godview_pg_readonly_password,
+    google_secret_manager_secret_iam_member.pg_readonly_pass_sense,
+  ]
 }
 
 # --- Datastream CDC (Phase 2, gated by var.enable_datastream) ---

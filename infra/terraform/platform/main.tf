@@ -1,6 +1,7 @@
 module "project_iam" {
   source            = "./modules/01-project-iam"
   project_id        = var.project_id
+  project_number    = var.project_number
   region            = var.region
   github_repository = var.github_repository
 }
@@ -118,5 +119,6 @@ module "godview" {
   token_budget_daily_fleet_ceiling_usd = var.token_budget_daily_fleet_ceiling_usd
   token_budget_argon_reserve_pct       = var.token_budget_argon_reserve_pct
   sql_private_ip                       = module.data.sql_private_ip
-  sql_readonly_password                = module.data.sql_readonly_password
+  pg_readonly_secret_id                = module.data.secret_ids.godview_pg_readonly_password
+  pg_readonly_secret_version_id        = module.data.pg_readonly_secret_version_id
 }

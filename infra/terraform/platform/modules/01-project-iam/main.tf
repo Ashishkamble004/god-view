@@ -53,6 +53,8 @@ locals {
     "roles/cloudasset.viewer",
     "roles/datastore.user",
     "roles/bigquery.jobUser",
+    "roles/bigquery.metadataViewer",
+    "roles/secretmanager.viewer",
     "roles/cloudtrace.user",
   ])
 
@@ -170,6 +172,30 @@ resource "google_project_iam_member" "act_roles" {
   member   = "serviceAccount:${google_service_account.act.email}"
 }
 
+resource "google_project_iam_custom_role" "act_hibernate" {
+  project     = var.project_id
+  role_id     = "godview_hibernate_operator"
+  title       = "God-View Act SA Hibernate & Ops Role"
+  description = "Scoped permissions for hibernate job and infrastructure control"
+  permissions = [
+    "compute.instances.get",
+    "compute.instances.start",
+    "compute.instances.stop",
+    "cloudsql.instances.get",
+    "cloudsql.instances.update",
+    "cloudscheduler.jobs.get",
+    "cloudscheduler.jobs.pause",
+    "cloudscheduler.jobs.resume",
+    "cloudscheduler.jobs.run",
+  ]
+}
+
+resource "google_project_iam_member" "act_hibernate" {
+  project = var.project_id
+  role    = google_project_iam_custom_role.act_hibernate.id
+  member  = "serviceAccount:${google_service_account.act.email}"
+}
+
 resource "google_project_iam_member" "runtime_roles" {
   for_each = local.runtime_project_roles
   project  = var.project_id
@@ -200,6 +226,12 @@ resource "google_service_account_iam_member" "act_user_on_runtime" {
   service_account_id = google_service_account.runtime.name
   role               = "roles/iam.serviceAccountUser"
   member             = "serviceAccount:${google_service_account.act.email}"
+}
+
+resource "google_service_account_iam_member" "re_sa_user_sense" {
+  service_account_id = google_service_account.sense.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:service-${var.project_number}@gcp-sa-aiplatform-re.iam.gserviceaccount.com"
 }
 
 resource "google_iam_workload_identity_pool" "github" {

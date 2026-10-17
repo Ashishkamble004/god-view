@@ -85,25 +85,25 @@ resource "google_logging_project_sink" "audit_to_nervous_system" {
   exclusions {
     name        = "exclude-gke-leases"
     description = "Exclude GKE lease coordination churn"
-    filter      = "protoPayload.serviceName:(\"k8s.io\" OR \"container.googleapis.com\") AND (\"io.k8s.coordination.v1.leases\")"
+    filter      = "protoPayload.serviceName:(\"k8s.io\" OR \"container.googleapis.com\") AND protoPayload.methodName:\"io.k8s.coordination.v1.leases\""
   }
 
   exclusions {
     name        = "exclude-gke-configmaps"
     description = "Exclude GKE configmaps churn"
-    filter      = "protoPayload.serviceName:(\"k8s.io\" OR \"container.googleapis.com\") AND (\"io.k8s.core.v1.configmaps\")"
+    filter      = "protoPayload.serviceName:(\"k8s.io\" OR \"container.googleapis.com\") AND protoPayload.methodName:\"io.k8s.core.v1.configmaps\""
   }
 
   exclusions {
     name        = "exclude-gke-pods-binding"
     description = "Exclude GKE pods binding churn"
-    filter      = "protoPayload.serviceName:(\"k8s.io\" OR \"container.googleapis.com\") AND (\"pods.binding\")"
+    filter      = "protoPayload.serviceName:(\"k8s.io\" OR \"container.googleapis.com\") AND protoPayload.methodName:\"pods.binding\""
   }
 
   exclusions {
     name        = "exclude-gke-endpointslices"
     description = "Exclude GKE endpointslices churn"
-    filter      = "protoPayload.serviceName:(\"k8s.io\" OR \"container.googleapis.com\") AND (\"endpointslices\")"
+    filter      = "protoPayload.serviceName:(\"k8s.io\" OR \"container.googleapis.com\") AND protoPayload.methodName:\"endpointslices\""
   }
 }
 
@@ -208,10 +208,14 @@ resource "google_cloud_run_v2_service" "sovereign" {
         name = "PG_READONLY_PASSWORD"
         value_source {
           secret_key_ref {
-            secret  = "godview-pg-readonly-password"
+            secret  = var.pg_readonly_secret_id
             version = "latest"
           }
         }
+      }
+      env {
+        name  = "PG_READONLY_SECRET_VERSION"
+        value = var.pg_readonly_secret_version_id
       }
       env {
         name  = "GODVIEW_HINT_EXCLUDE"
@@ -321,7 +325,7 @@ resource "google_cloud_run_v2_service" "sovereign" {
         name = "DB_PASSWORD"
         value_source {
           secret_key_ref {
-            secret  = "godview-pg-readonly-password"
+            secret  = var.pg_readonly_secret_id
             version = "latest"
           }
         }
@@ -592,6 +596,10 @@ resource "google_monitoring_uptime_check_config" "sovereign_health" {
       project_id = var.project_id
       host       = replace(replace(google_cloud_run_v2_service.sovereign.uri, "https://", ""), "/", "")
     }
+  }
+
+  lifecycle {
+    create_before_destroy = true
   }
 }
 

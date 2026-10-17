@@ -41,7 +41,6 @@ output "secret_ids" {
   }
 }
 
-output "sql_readonly_password" {
-  value     = random_password.pg_readonly.result
-  sensitive = true
+output "pg_readonly_secret_version_id" {
+  value = google_secret_manager_secret_version.godview_pg_readonly_password.id
 }
