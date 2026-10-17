@@ -59,6 +59,11 @@ async def test_edge_adapter_discovery_and_waf_sensitivity(gcp_fixtures: dict[str
     assert "backend_service" in kinds
     assert "security_policy" in kinds
 
+    # Verify frontend has URL map host routes
+    fe_svc = next(s for s in res.services if s.kind == "lb_frontend")
+    assert len(fe_svc.routes) >= 1
+    assert any("host" in r for r in fe_svc.routes)
+
     # Verify backend service configuration
     backend_svcs = [s for s in res.services if s.kind == "backend_service"]
     assert len(backend_svcs) >= 1

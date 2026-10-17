@@ -396,6 +396,7 @@ class CloudEdgeAdapter(SenseAdapter):
             )
 
         # Parse URL map routing edges: frontend -> backend services
+        um_routes: list[dict[str, Any]] = []
         for um in url_maps:
             um_name = str(um.get("name", ""))
             default_bs = str(um.get("defaultService", "")).rsplit("/", 1)[-1]
@@ -406,16 +407,22 @@ class CloudEdgeAdapter(SenseAdapter):
                 all_target_bs.add(default_bs)
 
             for host_rule in um.get("hostRules", []):
+                hosts = host_rule.get("hosts", [])
                 pm_name = host_rule.get("pathMatcher")
                 for pm in um.get("pathMatchers", []):
                     if pm.get("name") == pm_name:
                         d_svc = str(pm.get("defaultService", "")).rsplit("/", 1)[-1]
                         if d_svc:
                             all_target_bs.add(d_svc)
+                            for h in hosts:
+                                um_routes.append({"host": h, "path": "/*", "backend_service": d_svc, "url_map": um_name})
                         for pr in pm.get("pathRules", []):
                             p_svc = str(pr.get("service", "")).rsplit("/", 1)[-1]
                             if p_svc:
                                 all_target_bs.add(p_svc)
+                                for p in pr.get("paths", []):
+                                    for h in hosts:
+                                        um_routes.append({"host": h, "path": p, "backend_service": p_svc, "url_map": um_name})
 
             for target_bs in all_target_bs:
                 dst_id = f"{self.env_id}__backend_service.{target_bs}"
@@ -432,6 +439,11 @@ class CloudEdgeAdapter(SenseAdapter):
                         last_seen=now_iso,
                     )
                 )
+
+        if um_routes:
+            for s in services:
+                if s.kind == "lb_frontend":
+                    s.routes = list(um_routes)
 
         return DiscoveryResult(
             services=services,
@@ -453,6 +465,28 @@ class CloudEdgeAdapter(SenseAdapter):
     ) -> Any:
         if capability_id == "edge.describe_backends":
             backends = await self._fetch_backend_services()
+            try:
+                url_maps = await self._fetch_url_maps()
+                backend_hosts: dict[str, list[str]] = {}
+                for um in url_maps:
+                    for hr in um.get("hostRules", []):
+                        hosts = hr.get("hosts", [])
+                        pm_name = hr.get("pathMatcher")
+                        for pm in um.get("pathMatchers", []):
+                            if pm.get("name") == pm_name:
+                                d_svc = str(pm.get("defaultService", "")).rsplit("/", 1)[-1]
+                                if d_svc:
+                                    backend_hosts.setdefault(d_svc, []).extend(hosts)
+                                for pr in pm.get("pathRules", []):
+                                    p_svc = str(pr.get("service", "")).rsplit("/", 1)[-1]
+                                    if p_svc:
+                                        backend_hosts.setdefault(p_svc, []).extend(hosts)
+                for b in backends:
+                    b_name = str(b.get("name", "")).rsplit("/", 1)[-1]
+                    if b_name in backend_hosts:
+                        b["hosts"] = sorted(set(backend_hosts[b_name]))
+            except Exception:
+                pass
             return backends
         if capability_id == "edge.describe_security_policies":
             policies = await self._fetch_security_policies()
