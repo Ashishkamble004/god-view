@@ -591,10 +591,11 @@ resource "google_monitoring_uptime_check_config" "sovereign_health" {
   }
 
   monitored_resource {
-    type = "uptime_url"
+    type = "cloud_run_revision"
     labels = {
-      project_id = var.project_id
-      host       = replace(replace(google_cloud_run_v2_service.sovereign.uri, "https://", ""), "/", "")
+      project_id   = var.project_id
+      location     = var.region
+      service_name = google_cloud_run_v2_service.sovereign.name
     }
   }
 
@@ -614,7 +615,7 @@ resource "google_monitoring_alert_policy" "sovereign_heartbeat" {
     display_name = "Sovereign Uptime Check Failure"
 
     condition_threshold {
-      filter          = "metric.type=\"monitoring.googleapis.com/uptime_check/check_passed\" AND resource.type=\"uptime_url\" AND metric.label.\"check_id\"=\"${google_monitoring_uptime_check_config.sovereign_health.uptime_check_id}\""
+      filter          = "metric.type=\"monitoring.googleapis.com/uptime_check/check_passed\" AND resource.type=\"cloud_run_revision\" AND metric.label.\"check_id\"=\"${google_monitoring_uptime_check_config.sovereign_health.uptime_check_id}\""
       duration        = "180s"
       comparison      = "COMPARISON_GT"
       threshold_value = 1
@@ -627,7 +628,7 @@ resource "google_monitoring_alert_policy" "sovereign_heartbeat" {
         alignment_period     = "60s"
         per_series_aligner   = "ALIGN_NEXT_OLDER"
         cross_series_reducer = "REDUCE_COUNT_FALSE"
-        group_by_fields      = ["resource.label.host"]
+        group_by_fields      = ["resource.label.service_name"]
       }
     }
   }

@@ -186,7 +186,7 @@ resource "google_project_iam_custom_role" "act_hibernate" {
     "cloudsql.instances.update",
     "cloudscheduler.jobs.get",
     "cloudscheduler.jobs.pause",
-    "cloudscheduler.jobs.resume",
+    "cloudscheduler.jobs.enable",
     "cloudscheduler.jobs.run",
     "aiplatform.reasoningEngines.get",
     "aiplatform.reasoningEngines.list",

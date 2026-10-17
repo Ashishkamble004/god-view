@@ -140,6 +140,11 @@
     "type": "string",
     "value": "projects/general-ak/locations/us-central1/templates/cymbal-text-guard"
   },
+  "nervous_system_dlq_subscription": {
+    "sensitive": false,
+    "type": "string",
+    "value": "godview-nervous-system-dlq-sub"
+  },
   "nervous_system_dlq_topic": {
     "sensitive": false,
     "type": "string",
@@ -192,13 +197,15 @@
       {
         "cymbal_pg_app_password": "string",
         "godview_github_app_key": "string",
-        "godview_github_webhook_secret": "string"
+        "godview_github_webhook_secret": "string",
+        "godview_pg_readonly_password": "string"
       }
     ],
     "value": {
       "cymbal_pg_app_password": "cymbal-pg-app-password",
       "godview_github_app_key": "godview-github-app-key",
-      "godview_github_webhook_secret": "godview-github-webhook-secret"
+      "godview_github_webhook_secret": "godview-github-webhook-secret",
+      "godview_pg_readonly_password": "godview-pg-readonly-password"
     }
   },
   "sense_sa_email": {

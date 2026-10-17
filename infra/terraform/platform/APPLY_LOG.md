@@ -137,3 +137,33 @@
     - **Pub/Sub DLQ**: Created `google_pubsub_subscription.nervous_system_dlq` (`godview-nervous-system-dlq-sub`) with 7-day retention (`604800s`), ack retention, and subscriber IAM binding for `godview-sense-sa`. Set topic retention to 7 days.
   - **Module `04-tenant-compute`**:
     - Unchanged (tenant frozen; Cloud Armor WAF sensitivity 4 fault T1 preserved as God-View test case).
+
+### Rev 7 — 2026-10-17 — Hibernate Role Permission & Uptime Check Cloud Run Resource Target
+- **Module `01-project-iam`**:
+  - In `google_project_iam_custom_role.act_hibernate`, replaced invalid permission `cloudscheduler.jobs.resume` with valid GCP permission `cloudscheduler.jobs.enable`.
+- **Module `05-godview`**:
+  - In `google_monitoring_uptime_check_config.sovereign_health`, updated `monitored_resource` from `uptime_url` to `cloud_run_revision` (`labels = { project_id, location = "us-central1", service_name = "god-view-sovereign" }`), enabling valid OIDC service agent authentication.
+  - In `google_monitoring_alert_policy.sovereign_heartbeat`, aligned condition filter to `resource.type="cloud_run_revision"` and aggregation `group_by_fields = ["resource.label.service_name"]`.
+
+## v5 deploy log
+
+- **2026-10-17T17:52:45Z**
+  - **Command**: `terraform -chdir=infra/terraform/platform import 'module.godview.google_cloud_run_v2_service_iam_member.sovereign_invokers["serviceAccount:service-769002985772@gcp-sa-monitoring-notification.iam.gserviceaccount.com"]' 'projects/general-ak/locations/us-central1/services/god-view-sovereign roles/run.invoker serviceAccount:service-769002985772@gcp-sa-monitoring-notification.iam.gserviceaccount.com'`
+  - **Result**: Imported pre-granted monitoring SA run.invoker IAM member into state.
+  - **Rollback**: `terraform -chdir=infra/terraform/platform state rm 'module.godview.google_cloud_run_v2_service_iam_member.sovereign_invokers["serviceAccount:service-769002985772@gcp-sa-monitoring-notification.iam.gserviceaccount.com"]'`
+
+- **2026-10-17T17:53:50Z**
+  - **Command**: `terraform -chdir=infra/terraform/platform apply -input=false $HOME/tmp/platform-pass1a.tfplan` (targets: `module.project_iam`, `module.data.random_password.pg_readonly`, `module.data.google_secret_manager_secret.godview_pg_readonly_password`, `module.data.google_secret_manager_secret_version.godview_pg_readonly_password`, `module.data.google_secret_manager_secret_iam_member.pg_readonly_pass_sense`, `module.data.google_bigquery_table.events`, `module.data.google_bigquery_table.journeys`, `module.godview.google_cloud_run_v2_service.sovereign`, `module.godview.google_cloud_run_v2_service_iam_member.sovereign_invokers`, `module.godview.google_monitoring_uptime_check_config.sovereign_health`, `module.godview.google_monitoring_alert_policy.sovereign_heartbeat`, `module.godview.google_logging_project_sink.audit_to_nervous_system`, `module.godview.google_pubsub_topic.nervous_system_dlq`, `module.godview.google_pubsub_subscription.nervous_system_dlq`, `module.godview.google_pubsub_subscription_iam_member.dlq_sense_subscriber`)
+  - **Result**: 23 added, 4 changed, 9 destroyed. BigQuery ledger tables recreated with neutral schemas; Secret Manager password version 1 mounted; `god-view-sovereign` deployed revision `god-view-sovereign-00007-fqm` (Ready, 0 plaintext passwords); DLQ subscription `godview-nervous-system-dlq-sub` created; IAM roles scoped. Note: custom role `godview_hibernate_operator` and uptime check returned 400 errors pending infra adjustment.
+  - **Rollback**: Restore from `gs://general-ak-god-view-tfstate/platform/default.tfstate` backup taken before apply.
+
+- **2026-10-17T17:55:28Z**
+  - **Command**: `terraform -chdir=infra/terraform/platform apply -input=false $HOME/tmp/platform-pass1b.tfplan` (target: `module.data.google_sql_user.godview_readonly`)
+  - **Result**: 1 changed. Cloud SQL user `godview_readonly` password rotated in-place to match Secret Manager `godview-pg-readonly-password:latest`.
+  - **Rollback**: Re-apply previous password via `gcloud sql users set-password godview_readonly --instance=god-view-pg --password=...`
+
+- **2026-10-17T17:56:04Z**
+  - **Command**: `terraform -chdir=infra/terraform/platform apply -input=false $HOME/tmp/platform-pass1c.tfplan` (targets: `module.data.google_bigquery_table.events`, `state_transitions`, `journeys`, `kpi_rollups` with `-var="ledger_table_deletion_protection=true"`)
+  - **Result**: 4 changed. Deletion protection locked (`true`) on all 4 BigQuery ledger tables. Outputs exported to `outputs.json`.
+  - **Rollback**: `terraform -chdir=infra/terraform/platform apply -input=false -var="ledger_table_deletion_protection=false" ...`
+
