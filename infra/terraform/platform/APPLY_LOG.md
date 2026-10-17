@@ -141,8 +141,10 @@
 ### Rev 7 — 2026-10-17 — Hibernate Role Permission & Uptime Check Cloud Run Resource Target
 - **Module `01-project-iam`**:
   - In `google_project_iam_custom_role.act_hibernate`, replaced invalid permission `cloudscheduler.jobs.resume` with valid GCP permission `cloudscheduler.jobs.enable`.
+- **Module `03-data`**:
+  - In `variables.tf`, flipped default of `ledger_table_deletion_protection` from `false` to `true` post-Step 1c.
 - **Module `05-godview`**:
-  - In `google_monitoring_uptime_check_config.sovereign_health`, updated `monitored_resource` from `uptime_url` to `cloud_run_revision` (`labels = { project_id, location = "us-central1", service_name = "god-view-sovereign" }`), enabling valid OIDC service agent authentication.
+  - In `google_monitoring_uptime_check_config.sovereign_health`, updated `monitored_resource` from `uptime_url` to `cloud_run_revision` (`labels = { project_id, location = "us-central1", service_name = "god-view-sovereign" }`), enabling valid OIDC service agent authentication. Removed `validate_ssl` (only supported on `uptime_url` checks).
   - In `google_monitoring_alert_policy.sovereign_heartbeat`, aligned condition filter to `resource.type="cloud_run_revision"` and aggregation `group_by_fields = ["resource.label.service_name"]`.
 
 ## v5 deploy log
@@ -166,4 +168,10 @@
   - **Command**: `terraform -chdir=infra/terraform/platform apply -input=false $HOME/tmp/platform-pass1c.tfplan` (targets: `module.data.google_bigquery_table.events`, `state_transitions`, `journeys`, `kpi_rollups` with `-var="ledger_table_deletion_protection=true"`)
   - **Result**: 4 changed. Deletion protection locked (`true`) on all 4 BigQuery ledger tables. Outputs exported to `outputs.json`.
   - **Rollback**: `terraform -chdir=infra/terraform/platform apply -input=false -var="ledger_table_deletion_protection=false" ...`
+
+- **2026-10-17T18:04:59Z**
+  - **Command**: `terraform -chdir=infra/terraform/platform apply -input=false $HOME/tmp/platform-infra-rev4.tfplan` (targets: `module.project_iam.google_project_iam_custom_role.act_hibernate`, `module.project_iam.google_project_iam_member.act_hibernate`, `module.godview.google_monitoring_uptime_check_config.sovereign_health`, `module.godview.google_monitoring_alert_policy.sovereign_heartbeat`)
+  - **Result**: 3 added, 2 changed, 1 destroyed. Custom role `projects/general-ak/roles/godview_hibernate_operator` created with valid permission `cloudscheduler.jobs.enable` and bound to `godview-act-sa`. Uptime check replaced with `monitored_resource { type = "cloud_run_revision" }` and OIDC service agent authentication against path `/public/healthz`. Alert policy condition filter and group_by updated to match.
+  - **Rollback**: `terraform destroy -target=module.project_iam.google_project_iam_member.act_hibernate ...`
+
 

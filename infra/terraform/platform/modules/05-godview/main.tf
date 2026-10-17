@@ -580,10 +580,9 @@ resource "google_monitoring_uptime_check_config" "sovereign_health" {
   user_labels  = local.godview_labels
 
   http_check {
-    path         = "/public/healthz"
-    port         = 443
-    use_ssl      = true
-    validate_ssl = true
+    path    = "/public/healthz"
+    port    = 443
+    use_ssl = true
 
     service_agent_authentication {
       type = "OIDC_TOKEN"
