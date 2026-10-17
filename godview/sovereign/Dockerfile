@@ -41,7 +41,19 @@ COPY godview/sovereign /app/godview/sovereign
 COPY godview /app/godview
 
 RUN rm -rf /app/godview/god-view-sre-web \
-    && pip install --no-cache-dir /app/shared /app/godview/sovereign \
+    && pip install --no-cache-dir \
+        google-cloud-firestore \
+        google-cloud-bigquery \
+        google-cloud-pubsub \
+        "google-cloud-aiplatform[agent_engines,adk]" \
+        google-adk \
+        a2a-sdk \
+        google-genai \
+        google-auth \
+        PyJWT \
+        cryptography \
+        /app/shared \
+        /app/godview/sovereign \
     && useradd --create-home --uid 10001 appuser \
     && chown -R appuser:appuser /app
 

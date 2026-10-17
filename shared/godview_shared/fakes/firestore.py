@@ -9,6 +9,22 @@ from typing import Any
 
 from godview_shared.contracts import FIRESTORE_COLLECTIONS, FIRESTORE_VECTOR_INDEXES
 
+V5_COLLECTIONS: tuple[str, ...] = (
+    "incidents",
+    "operator_state",
+    "audit_records",
+    "skills",
+    "harness_trees",
+    "harness_scenarios",
+    "proposals",
+    "golden_signals",
+    "evidence_packs",
+)
+
+ALL_FIRESTORE_COLLECTIONS: tuple[str, ...] = tuple(
+    dict.fromkeys(FIRESTORE_COLLECTIONS + V5_COLLECTIONS)
+)
+
 
 def _cosine_similarity(vec_a: Sequence[float], vec_b: Sequence[float]) -> float:
     if len(vec_a) != 768 or len(vec_b) != 768:
@@ -24,18 +40,18 @@ def _cosine_similarity(vec_a: Sequence[float], vec_b: Sequence[float]) -> float:
 
 
 class InMemoryFirestore:
-    """Hermetic in-memory implementation of Firestore Native DB god-view-memory-db."""
+    """Hermetic in-memory implementation of Firestore Native DocumentStore."""
 
     def __init__(self) -> None:
         self._collections: dict[str, dict[str, dict[str, Any]]] = {
-            col: {} for col in FIRESTORE_COLLECTIONS
+            col: {} for col in ALL_FIRESTORE_COLLECTIONS
         }
         self._subcollections: dict[tuple[str, str, str], dict[str, dict[str, Any]]] = {}
 
     def _validate_collection(self, collection: str) -> None:
         if collection not in self._collections:
             raise ValueError(
-                f"Unknown Firestore collection '{collection}' (allowed: {FIRESTORE_COLLECTIONS})"
+                f"Unknown Firestore collection '{collection}' (allowed: {ALL_FIRESTORE_COLLECTIONS})"
             )
 
     def set(
@@ -158,10 +174,14 @@ class InMemoryFirestore:
         self._validate_collection(collection)
         if len(query_vector) != 768:
             raise ValueError(f"Query vector must be 768-dimensional (got {len(query_vector)})")
-        if (collection, vector_field) not in FIRESTORE_VECTOR_INDEXES:
+        allowed_indexes = FIRESTORE_VECTOR_INDEXES + (
+            ("incidents", "symptom_embedding"),
+            ("skills", "trigger_embedding"),
+        )
+        if (collection, vector_field) not in allowed_indexes:
             raise ValueError(
                 f"No vector index configured for {collection}.{vector_field}; "
-                f"configured indexes: {FIRESTORE_VECTOR_INDEXES}"
+                f"configured indexes: {allowed_indexes}"
             )
         bucket = self._collections[collection]
         scored: list[tuple[dict[str, Any], float]] = []

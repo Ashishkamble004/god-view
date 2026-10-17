@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "godview-sovereign"
 version = "4.0.0"
 description = "God-View v4 Sovereign runtime (Perception, Sentinel Engine, Nervous System, Court Manager, Trust Ladder, Control API)"
-requires-python = ">=3.13"
+requires-python = ">=3.13,<3.14"
 dependencies = [
     "godview-shared",
     "fastapi>=0.115.0",
@@ -15,6 +15,16 @@ dependencies = [
     "pydantic>=2.7.0",
     "pyyaml>=6.0.1",
     "sqlglot>=25.0.0",
+    "google-cloud-firestore>=2.16.0",
+    "google-cloud-bigquery>=3.25.0",
+    "google-cloud-pubsub>=2.21.0",
+    "google-cloud-aiplatform[agent_engines,adk]>=1.60.0",
+    "google-adk>=2.0.0",
+    "a2a-sdk>=1.0.0",
+    "google-genai>=0.1.0",
+    "google-auth>=2.30.0",
+    "PyJWT>=2.8.0",
+    "cryptography>=42.0.0",
 ]
 
 [project.optional-dependencies]

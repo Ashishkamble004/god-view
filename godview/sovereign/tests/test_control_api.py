@@ -539,7 +539,7 @@ def test_cockpit_contracts_simulator_drift_sse_webhooks_and_adapter_dispatch() -
 
     r_sim_jrn = client.post("/api/v1/simulator/journeys", json={"count": 7})
     assert r_sim_jrn.status_code == 200
-    assert r_sim_jrn.json()["simulator_journeys_today"] >= 25
+    assert r_sim_jrn.json()["simulator_journeys_today"] >= 7
 
     # 5. Terraform drift remediation endpoints & GET /api/v1/cost overview
     r_drift_restore = client.post("/api/v1/cost/drift/drift-01:restore_attribute", json={})

@@ -9,6 +9,7 @@ Implements TDD §1.2, §3.1, §3.4, §3.6, §3.7 and Coordinator Decisions A3, A
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -24,22 +25,13 @@ from typing import Any, Literal
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Request
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from godview_shared.adapter_contract import SenseAdapter
-from godview_shared.capabilities import (
-    get_capability,
-)
 from godview_shared.config import (
-    DEFAULT_AGENT_FALLBACK_MODEL_ID,
-    DEFAULT_AGENT_MODEL_ID,
-    MODEL_TABLE,
     GodViewSettings,
     is_excluded_resource,
 )
 from godview_shared.contracts import (
     CHAOS_SCENARIO_IDS,
     ChangeEventDoc,
-    CourtAgentDoc,
-    SentinelDefinition,
-    SentinelState,
     TrustViolation,
 )
 from godview_shared.fakes import (
@@ -49,7 +41,7 @@ from godview_shared.fakes import (
     InMemoryPubSub,
 )
 from godview_shared.otel import parse_otlp_spans
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
 from godview.ledger.exporter import LedgerSpanExporter
 from godview.sovereign.bootstrap import SovereignContext, build_context
@@ -60,40 +52,9 @@ from godview.sovereign.control_api.mcp import (
 )
 from godview.sovereign.court_manager import CourtManager
 from godview.sovereign.nervous_system import NervousSystemRouter
-from godview.sovereign.perception import PerceptionOrgan, PerceptionReport
-from godview.sovereign.sentinel_engine import SentinelEngine
 from godview.sovereign.trust_ladder import TrustGate
 
 logger = logging.getLogger("godview.sovereign.control_api")
-
-class PerceiveRequest(BaseModel):
-    reset: bool = False
-
-
-class SentinelPatchRequest(BaseModel):
-    state: SentinelState
-
-
-class CapabilityInvokeBody(BaseModel):
-    agent_id: str
-    incident_id: str | None = None
-    target_resource: str = "resource"
-    blast_radius_resources: int = 1
-    approval_id: str | None = None
-    novel_skill_first_step: bool = False
-    args: dict[str, Any] = Field(default_factory=dict)
-    reversal_recipe: dict[str, Any] | None = None
-    narrative: str = "Remediation action"
-    rupee_impact: float = 0.0
-
-
-class KillSwitchRequest(BaseModel):
-    enabled: bool = True
-    reason: str = "Operator kill switch"
-
-
-class HibernateRequest(BaseModel):
-    enabled: bool = True
 
 
 class SimulatorStateRequest(BaseModel):
@@ -172,7 +133,6 @@ def create_app(
     else:
         secret = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
     router_ns = NervousSystemRouter(pubsub=ps)
-    perception = PerceptionOrgan(firestore=fs, pubsub=ps, adapters=ctx.adapters, settings=cfg)
     court_manager = CourtManager(
         firestore=fs,
         pubsub=ps,
@@ -185,34 +145,25 @@ def create_app(
         pubsub=ps,
         token_governor=court_manager.token_governor,
     )
-    sentinel_engine = SentinelEngine(
-        firestore=fs,
-        bigquery=bq,
-        pubsub=ps,
-        agent_engine=ae,
-        token_governor=court_manager.token_governor,
-        trust_gate=trust_gate,
-    )
     ledger_exporter = LedgerSpanExporter(
         bq,
         env_id=cfg.env_mode,
         default_journey_name="discovered_journey",
     )
     mcp_manager = McpSubprocessManager(env_mode=cfg.env_mode, adapters=ctx.adapters, executors=ctx.executors)
+    mcp_manager.register_adapters(ctx.adapters)
     if cfg.env_mode == "hermetic":
         if "k8s.rollout_restart" not in ctx.executors:
             ctx.executors["k8s.rollout_restart"] = lambda **kwargs: {"ok": True, "restarted": True}
         if "obs.get_trace" not in ctx.executors:
             ctx.executors["obs.get_trace"] = lambda **kwargs: {"ok": True, "trace": "tr-123"}
 
-    if not ctx.hooks.perception_tick:
-        ctx.hooks.perception_tick.append(perception.perceive)
-    if not ctx.hooks.sentinel_tick:
-        ctx.hooks.sentinel_tick.append(sentinel_engine.evaluate_tick)
+    if hasattr(ctx, "perception") and ctx.perception is not None:
+        if not ctx.hooks.perception_tick:
+            ctx.hooks.perception_tick.append(ctx.perception.perceive)
     if not ctx.hooks.agent_warmth_tick:
         ctx.hooks.agent_warmth_tick.append(court_manager.evaluate_earned_warmth)
 
-    now_init = datetime.now(tz=UTC).isoformat()
     runtime_state: dict[str, Any] = {
         "kill_switch_enabled": False,
         "kill_switch_reason": None,
@@ -220,23 +171,10 @@ def create_app(
         "kill_switch_updated_at": None,
         "tenant_paused": False,
         "simulator_enabled": True,
-        "simulator_journeys_today": 18,
+        "simulator_journeys_today": 0,
         "hibernate_enabled": False,
         "active_drills": {},
-        "drift_diffs": {
-            "drift-01": {
-                "id": "drift-01",
-                "resource_address": "google_cloud_run_v2_service.svc_alpha_01",
-                "resource_kind": "cloud_run_v2_service",
-                "attribute": "template.scaling.max_instance_count",
-                "expected_tfstate": "2",
-                "live_value": "5",
-                "classification": "unplanned_manual_edit",
-                "detected_at": now_init,
-                "remediation_hcl": "max_instance_count = 2",
-                "status": "open",
-            }
-        },
+        "drift_diffs": {},
     }
 
     def _operator_state() -> dict[str, Any]:
@@ -262,7 +200,7 @@ def create_app(
                 "fault_class": "infrastructure",
                 "fault_type": drill_id,
                 "title": drill_id,
-                "target_service": "svc-alpha-01",
+                "target_service": "",
                 "infra_golden_signals": "amber",
                 "expected_detection": "sentinel_engine",
                 "mttd_target": "30s",
@@ -290,169 +228,6 @@ def create_app(
             "details": active_entry,
         }
 
-    def _enrich_court_agent(doc: CourtAgentDoc) -> dict[str, Any]:
-        raw = doc.model_dump(mode="json")
-        agent_id = doc.doc_id or doc.namespace
-        trust_docs = fs.list_docs(
-            "trust_records", predicate=lambda d: d.get("agent_id") == agent_id
-        )
-        enriched_trust: list[dict[str, Any]] = []
-        for td in trust_docs:
-            rec_id = td.get("doc_id") or td.get("_id") or f"{agent_id}__{td.get('action_type', '')}"
-            enriched_trust.append({**td, "id": rec_id})
-
-        subdocs = fs.list_subdocs("court_agents", agent_id, "living_model")
-        living_model_dict: dict[str, list[dict[str, Any]]] = {
-            "entities": [],
-            "rules": [],
-            "state_machines": [],
-            "routes": [],
-            "dependencies": [],
-            "decision_boundaries": [],
-            "feature_flags": [],
-            "commit_diffs": [],
-        }
-        for sd in subdocs:
-            sec = str(sd.get("section") or sd.get("_id") or "rules")
-            if sec in living_model_dict and isinstance(sd.get("items"), list):
-                living_model_dict[sec] = list(sd["items"])
-
-        spent_usd = float(court_manager.token_governor.get_usd_spent(agent_id))
-        spent_tokens = int(
-            court_manager.token_governor.get_tokens_spent(agent_id) or doc.tokens_spent_today
-        )
-        return {
-            **raw,
-            "id": agent_id,
-            "doc_id": agent_id,
-            "token_budget_daily_usd": float(doc.token_budget_daily),
-            "tokens_spent_today_usd": spent_usd,
-            "tokens_spent_today": spent_tokens,
-            "budget_exhausted": bool(
-                court_manager.token_governor.is_agent_degraded_to_l1(agent_id)
-            ),
-            "trust_records": enriched_trust,
-            "living_model": living_model_dict,
-            "living_model_subdocs": subdocs,
-        }
-
-    def _format_perception_response(report: PerceptionReport) -> dict[str, Any]:
-        base = report.model_dump(mode="json")
-        services_raw = fs.list_docs("discovered_services")
-        services_list: list[dict[str, Any]] = []
-        for s in services_raw:
-            sid = (
-                s.get("doc_id")
-                or s.get("_id")
-                or f"{s.get('env_id')}__{s.get('kind')}.{s.get('name')}"
-            )
-            routes_out = []
-            for r in s.get("routes", []):
-                routes_out.append(
-                    {
-                        **r,
-                        "probe_safe": bool(
-                            r.get("probe_safe", r.get("x-godview-probe-safe", False))
-                        ),
-                    }
-                )
-            services_list.append(
-                {
-                    **s,
-                    "id": sid,
-                    "routes": routes_out,
-                    "golden_signals": s.get(
-                        "golden_signals",
-                        {
-                            "p50_ms": 18.0,
-                            "p95_ms": 42.0,
-                            "p99_ms": 85.0,
-                            "rps": 12.4,
-                            "error_rate_pct": 0.0,
-                            "saturation_pct": 22.0,
-                            "status": "green",
-                        },
-                    ),
-                }
-            )
-
-        edges_list = [
-            {**e, "id": e.get("doc_id") or e.get("_id") or f"{e.get('src')}__to__{e.get('dst')}"}
-            for e in fs.list_docs("discovered_edges")
-        ]
-        entities_list = [
-            {
-                **ent,
-                "id": ent.get("doc_id") or ent.get("_id") or f"{report.env_id}__{ent.get('name')}",
-            }
-            for ent in fs.list_docs("discovered_entities")
-        ]
-
-        if report.adapter_health:
-            senses_list = [
-                {
-                    "adapter_family": h.family,
-                    "availability": h.state,
-                    "evidence": json.dumps(h.evidence),
-                    "discovered_count": report.services_count,
-                    "last_checked_at": report.perceived_at,
-                }
-                for h in report.adapter_health
-            ]
-        else:
-            senses_list = [
-                {
-                    "adapter_family": fam,
-                    "availability": "available",
-                    "evidence": "Sense adapter active",
-                    "discovered_count": report.services_count,
-                    "last_checked_at": report.perceived_at,
-                }
-                for fam in ("gcp", "k8s", "sql", "http_prom", "git_iac", "local")
-            ]
-
-        return {
-            **base,
-            "sovereign_id": "god-view-sovereign-01",
-            "sovereign_status": (
-                "hibernating" if runtime_state["hibernate_enabled"] else "healthy"
-            ),
-            "heartbeat_at": report.perceived_at,
-            "sentinel_cadence_s": sentinel_engine.cadence_s,
-            "tokens_at_rest": 0,
-            "sovereign_budget_daily_usd": float(
-                court_manager.token_governor.get_daily_budget_usd("sovereign")
-            ),
-            "sovereign_spent_today_usd": float(
-                court_manager.token_governor.get_usd_spent("sovereign")
-            ),
-            "court_ceiling_daily_usd": float(court_manager.token_governor.court_daily_ceiling_usd),
-            "monthly_ceiling_usd": 600.0,
-            "escalation_reserve_pct": int(
-                court_manager.token_governor.escalation_reserve_fraction * 100
-            ),
-            "reasoning_model": DEFAULT_AGENT_MODEL_ID,
-            "escalation_model": MODEL_TABLE["escalation"].model_id,
-            "fallback_model": DEFAULT_AGENT_FALLBACK_MODEL_ID,
-            "embedding_model": MODEL_TABLE["embedding"].model_id,
-            "managed_scope_label": "godview_managed=true",
-            "warm_tier_spec": f"max {court_manager.max_warm_agents} warm (09:00–17:00 IST)",
-            "active_window_label": "09:00–17:00 IST (Mon–Fri)",
-            "approval_window_label": "30m TTL",
-            "hibernate_job_name": "god-view-hibernate-job",
-            "memory_db_name": "god-view-memory-db",
-            "simulator_target_daily": 100,
-            "simulator_image_ratio_label": "1 in 5 journeys",
-            "controls_enabled": True,
-            "senses": senses_list,
-            "discovered_services": services_list,
-            "discovered_edges": edges_list,
-            "discovered_entities": entities_list,
-            "court_spawn_plan": [item["agent_id"] for item in report.spawn_plan],
-            "baseline_sentinels_registered": len(sentinel_engine.list_sentinels()),
-            "operator_state": _operator_state(),
-        }
-
     app = FastAPI(
         title="God-View Sovereign Control API",
         version="0.1.0",
@@ -461,10 +236,10 @@ def create_app(
     app.state.bigquery = bq
     app.state.pubsub = ps
     app.state.agent_engine = ae
-    app.state.perception = perception
+    app.state.perception = getattr(ctx, "perception", None)
     app.state.court_manager = court_manager
     app.state.trust_gate = trust_gate
-    app.state.sentinel_engine = sentinel_engine
+    app.state.sentinel_engine = getattr(ctx, "sentinel_engine", None)
     app.state.ledger_exporter = ledger_exporter
     app.state.mcp_manager = mcp_manager
 
@@ -486,6 +261,7 @@ def create_app(
             except Exception:
                 pass
 
+        cadence_s = getattr(getattr(ctx, "sentinel_engine", None), "cadence_s", cfg.sentinel_cadence_s)
         return {
             "status": "ok",
             "mode": cfg.env_mode,
@@ -505,19 +281,25 @@ def create_app(
             ),
             "loop_heartbeats": {k: v.isoformat() for k, v in ctx.loop_heartbeats.items()},
             "mcp_servers": list(MCP_SERVER_COMMANDS.keys()),
-            "sentinel_cadence_s": sentinel_engine.cadence_s,
-            "sentinel_interval_seconds": sentinel_engine.cadence_s,
+            "sentinel_cadence_s": cadence_s,
+            "sentinel_interval_seconds": cadence_s,
             "timestamp": datetime.now(tz=UTC).isoformat(),
         }
 
     @app.get("/metrics", response_class=PlainTextResponse)
     async def metrics() -> str:
         active_agents = len(court_manager.list_active_agents())
-        sentinels_count = len(sentinel_engine.list_sentinels())
+        sentinels_count = ctx.sentinels_registered
+        if sentinels_count == 0:
+            try:
+                sentinels_count = len(fs.list_docs("sentinels"))
+            except Exception:
+                pass
+        cadence_s = getattr(getattr(ctx, "sentinel_engine", None), "cadence_s", cfg.sentinel_cadence_s)
         lines = [
             "# HELP godview_sentinel_cadence_seconds Current sentinel evaluation cadence in seconds",
             "# TYPE godview_sentinel_cadence_seconds gauge",
-            f"godview_sentinel_cadence_seconds {sentinel_engine.cadence_s}",
+            f"godview_sentinel_cadence_seconds {cadence_s}",
             "# HELP godview_court_active_agents Active court specialists count",
             "# TYPE godview_court_active_agents gauge",
             f"godview_court_active_agents {active_agents}",
@@ -604,7 +386,12 @@ def create_app(
         ),
     ) -> dict[str, Any]:
         cleaned = _clean_iap_email(x_goog_authenticated_user_email)
-        email = cleaned or "operator@local.dev"
+        if ctx.settings.env_mode == "hermetic":
+            email = cleaned or "operator@local.dev"
+        else:
+            if not cleaned:
+                raise HTTPException(status_code=401, detail="Unauthorized: IAP email required")
+            email = cleaned
         principal = f"accounts.google.com:{email}"
         return {
             "email": email,
@@ -628,7 +415,11 @@ def create_app(
                     "sovereign_status": (
                         "hibernating" if runtime_state["hibernate_enabled"] else "healthy"
                     ),
-                    "sentinel_cadence_s": sentinel_engine.cadence_s,
+                    "sentinel_cadence_s": getattr(
+                        getattr(ctx, "sentinel_engine", None),
+                        "cadence_s",
+                        cfg.sentinel_cadence_s,
+                    ),
                     "tokens_at_rest": 0,
                 },
             }
@@ -639,97 +430,6 @@ def create_app(
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
-
-    @api.post("/perceive")
-    async def run_perceive(body: PerceiveRequest | None = None) -> dict[str, Any]:
-        reset_flag = body.reset if body is not None else False
-        mcp_manager.register_adapters(perception._adapters)
-        report = await perception.perceive(reset=reset_flag)
-        for item in report.spawn_plan:
-            await court_manager.spawn_agent(
-                agent_type=item["agent_type"],
-                subject_ref=item["subject_ref"],
-            )
-        return _format_perception_response(report)
-
-    @api.get("/perceive")
-    async def get_perceive() -> dict[str, Any]:
-        mcp_manager.register_adapters(perception._adapters)
-        if perception.last_report is None:
-            report = await perception.perceive(reset=False)
-            for item in report.spawn_plan:
-                await court_manager.spawn_agent(
-                    agent_type=item["agent_type"],
-                    subject_ref=item["subject_ref"],
-                )
-            return _format_perception_response(report)
-        return _format_perception_response(perception.last_report)
-
-    @api.get("/court")
-    async def list_court() -> dict[str, Any]:
-        agents = [_enrich_court_agent(a) for a in court_manager.list_active_agents()]
-        return {
-            "agents": agents,
-            "max_agents": court_manager.max_agents,
-            "court_daily_ceiling_usd": str(court_manager.token_governor.court_daily_ceiling_usd),
-        }
-
-    @api.get("/court/{agent_id}")
-    async def get_court_agent(agent_id: str) -> dict[str, Any]:
-        doc = court_manager.get_agent(agent_id)
-        if doc is None:
-            raise HTTPException(status_code=404, detail=f"Unknown court agent '{agent_id}'")
-        enriched = _enrich_court_agent(doc)
-        return {
-            **enriched,
-            "agent": enriched,
-        }
-
-    @api.post("/court/{agent_id}:wake")
-    async def wake_court_agent(agent_id: str) -> dict[str, Any]:
-        doc = court_manager.get_agent(agent_id)
-        if doc is None:
-            raise HTTPException(status_code=404, detail=f"Unknown court agent '{agent_id}'")
-        now_iso = datetime.now(tz=UTC).isoformat()
-        updated = doc.model_copy(
-            update={
-                "wakes_7d": doc.wakes_7d + 1,
-                "last_wake_at": now_iso,
-                "state": "awake",
-            }
-        )
-        fs.set("court_agents", agent_id, updated.model_dump(mode="json"))
-        await router_ns.emit(
-            "godview.court.warm",
-            source="//sovereign/control-api",
-            subject=agent_id,
-            data={"agent_id": agent_id, "manual_wake": True},
-        )
-        return _enrich_court_agent(updated)
-
-    @api.post("/court/{agent_id}:warm")
-    async def warm_court_agent(agent_id: str) -> dict[str, Any]:
-        try:
-            updated = await court_manager.set_warmth(agent_id, 1)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        return _enrich_court_agent(updated)
-
-    @api.post("/court/{agent_id}:cool")
-    async def cool_court_agent(agent_id: str) -> dict[str, Any]:
-        try:
-            updated = await court_manager.set_warmth(agent_id, 0)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        return _enrich_court_agent(updated)
-
-    @api.post("/court/{agent_id}:retire")
-    async def retire_court_agent(agent_id: str) -> dict[str, Any]:
-        try:
-            updated = await court_manager.retire_agent(agent_id)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        return _enrich_court_agent(updated)
 
     @api.post("/trust-records/{record_id}:whitelist")
     async def whitelist_trust_record(
@@ -764,411 +464,38 @@ def create_app(
     async def list_invariants() -> dict[str, Any]:
         return {"invariants": fs.list_docs("invariants")}
 
-    @api.get("/sentinels")
-    async def get_sentinels() -> dict[str, Any]:
-        return {
-            "sentinels": [
-                {**s.model_dump(mode="json", by_alias=True), "id": s.sentinel_id}
-                for s in sentinel_engine.list_sentinels()
-            ]
-        }
-
-    @api.post("/sentinels")
-    async def create_sentinel(payload: dict[str, Any]) -> dict[str, Any]:
-        if "invariant_id" in payload and "sentinel_id" not in payload:
-            inv_id = str(payload.get("invariant_id") or "").strip()
-            if not inv_id:
-                raise HTTPException(status_code=422, detail="invariant_id must not be empty")
-            inv_doc = fs.get("invariants", inv_id) or {}
-            slug = inv_id.removeprefix("inv-")
-            check_cfg = inv_doc.get("check") if isinstance(inv_doc.get("check"), dict) else {}
-            wake_cfg = (
-                inv_doc.get("wake_condition")
-                if isinstance(inv_doc.get("wake_condition"), dict)
-                else {}
-            )
-            stmt = str(
-                check_cfg.get("statement")
-                or "SELECT COUNT(*) AS violations FROM events WHERE http_status >= 500"
-            )
-            dialect = str(check_cfg.get("dialect") or "bigquery")
-            target_agent = str(
-                wake_cfg.get("target_agent_id")
-                or payload.get("target_agent_id")
-                or "business_line__primary_business_flow"
-            )
-            snt = SentinelDefinition.model_validate(
-                {
-                    "sentinel_id": f"snt-invariant_sql-{slug}",
-                    "class": "invariant_sql",
-                    "source_ref": inv_id,
-                    "check": {"dialect": dialect, "statement": stmt, "window_s": 300},
-                    "cadence_s": 10,
-                    "baseline": {"model": "same_hour", "window_days": 7},
-                    "wake_condition": {
-                        "operator": str(wake_cfg.get("operator") or ">="),
-                        "threshold": float(wake_cfg.get("threshold") or 1.0),
-                        "consecutive": int(wake_cfg.get("consecutive") or 2),
-                        "window_s": 300,
-                        "target_agent_id": target_agent,
-                    },
-                    "target_agent_id": target_agent,
-                    "state": "shadow",
-                    "compiled_by": target_agent,
-                    "compiled_at": datetime.now(tz=UTC).isoformat(),
-                }
-            )
-        else:
-            try:
-                snt = SentinelDefinition.model_validate(payload)
-            except ValidationError as exc:
-                raise HTTPException(status_code=422, detail=exc.errors()) from exc
-
-        saved = sentinel_engine.register_sentinel(snt)
-        return {**saved.model_dump(mode="json", by_alias=True), "id": saved.sentinel_id}
-
-    @api.patch("/sentinels/{sentinel_id}")
-    async def patch_sentinel(sentinel_id: str, body: SentinelPatchRequest) -> dict[str, Any]:
-        try:
-            updated = sentinel_engine.update_sentinel_state(sentinel_id, body.state)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        return {**updated.model_dump(mode="json", by_alias=True), "id": updated.sentinel_id}
-
     @api.get("/journeys")
     async def get_journeys() -> dict[str, Any]:
         return {"journeys": fs.list_docs("journeys")}
 
-    @api.get("/incidents")
-    async def list_incidents() -> dict[str, Any]:
-        return {"incidents": fs.list_docs("episodic_incidents")}
-
-    @api.get("/incidents/{incident_id}")
-    async def get_incident(incident_id: str) -> dict[str, Any]:
-        raw = fs.get("episodic_incidents", incident_id)
-        if raw is None:
-            raise HTTPException(status_code=404, detail=f"Unknown incident '{incident_id}'")
-        return raw
-
-    @api.get("/approvals")
-    async def list_approvals() -> dict[str, Any]:
-        return {"approvals": fs.list_docs("approvals")}
-
-    @api.post("/approvals/{approval_id}:approve")
-    async def approve_card(
-        approval_id: str,
-        x_goog_authenticated_user_email: str | None = Header(
-            default=None, alias="X-Goog-Authenticated-User-Email"
-        ),
-    ) -> dict[str, Any]:
-        iap_email = _clean_iap_email(x_goog_authenticated_user_email)
-        if not iap_email:
-            raise HTTPException(
-                status_code=401,
-                detail="X-Goog-Authenticated-User-Email IAP header is required",
-            )
-        try:
-            card, audit = trust_gate.decide_approval(
-                approval_id, decision="approved", decided_by=iap_email
-            )
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        except TrustViolation as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-        await router_ns.emit(
-            "godview.operator.note",
-            source="//sovereign/control-api",
-            subject=approval_id,
-            incident_id=card.incident_id,
-            data={
-                "approval_id": approval_id,
-                "decision": "approved",
-                "decided_by": card.decided_by,
-                "audit_id": audit.audit_id,
-            },
-        )
-        return {**card.model_dump(mode="json"), "audit_id": audit.audit_id}
-
-    @api.post("/approvals/{approval_id}:reject")
-    async def reject_card(
-        approval_id: str,
-        x_goog_authenticated_user_email: str | None = Header(
-            default=None, alias="X-Goog-Authenticated-User-Email"
-        ),
-    ) -> dict[str, Any]:
-        iap_email = _clean_iap_email(x_goog_authenticated_user_email)
-        if not iap_email:
-            raise HTTPException(
-                status_code=401,
-                detail="X-Goog-Authenticated-User-Email IAP header is required",
-            )
-        try:
-            card, audit = trust_gate.decide_approval(
-                approval_id, decision="rejected", decided_by=iap_email
-            )
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        except TrustViolation as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-        await router_ns.emit(
-            "godview.operator.note",
-            source="//sovereign/control-api",
-            subject=approval_id,
-            incident_id=card.incident_id,
-            data={
-                "approval_id": approval_id,
-                "decision": "rejected",
-                "decided_by": card.decided_by,
-                "audit_id": audit.audit_id,
-            },
-        )
-        return {**card.model_dump(mode="json"), "audit_id": audit.audit_id}
-
-    @api.post("/approvals/{approval_id}:snooze")
-    async def snooze_card(approval_id: str) -> dict[str, Any]:
-        raw = fs.get("approvals", approval_id)
-        if raw is None:
-            raise HTTPException(status_code=404, detail=f"Unknown approval '{approval_id}'")
-        new_expiry = (datetime.now(tz=UTC) + timedelta(minutes=30)).isoformat()
-        fs.set(
-            "approvals",
-            approval_id,
-            {"expires_at": new_expiry, "decision": "snoozed"},
-            merge=True,
-        )
-        return fs.get("approvals", approval_id) or {}
-
-    @api.post("/capabilities/{capability_id}:invoke")
-    async def invoke_capability_endpoint(
-        capability_id: str, body: CapabilityInvokeBody
-    ) -> dict[str, Any]:
-        """Single TrustGate enforcement endpoint for all court agent tool calls (Decision A3)."""
-        mcp_manager.register_adapters(perception._adapters)
-        try:
-            spec = get_capability(capability_id)
-            decision = trust_gate.authorize(
-                agent_id=body.agent_id,
-                capability_id=capability_id,
-                target_resource=body.target_resource,
-                blast_radius_resources=body.blast_radius_resources,
-                approval_id=body.approval_id,
-                novel_skill_first_step=body.novel_skill_first_step,
-            )
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        except TrustViolation as exc:
-            raise HTTPException(status_code=403, detail=str(exc)) from exc
-
-        if not decision.authorized:
-            inc_id = body.incident_id or "inc-20261016-0001"
-            card = trust_gate.create_approval_request(
-                incident_id=inc_id,
-                agent_id=body.agent_id,
-                capability_id=capability_id,
-                target_resource=body.target_resource,
-                trust_level_required=decision.required_level,
-                narrative=body.narrative,
-                evidence_pack_id="evp-20261016-0001",
-                rupee_impact=body.rupee_impact,
-                reversal_recipe=body.reversal_recipe,
-            )
-            await router_ns.emit(
-                "godview.operator.note",
-                source="//sovereign/trust-gate",
-                subject=card.approval_id,
-                incident_id=inc_id,
-                data={
-                    "kind": "approval_requested",
-                    "approval_id": card.approval_id,
-                    "agent_id": body.agent_id,
-                    "capability_id": capability_id,
-                },
-            )
-            return {
-                "status": "approval_required",
-                "approval_id": card.approval_id,
-                "decision": decision.model_dump(mode="json"),
-            }
-
-        exec_result = await mcp_manager.invoke_capability_async(capability_id, body.args, decision)
-        if spec.mutating:
-            audit = trust_gate.record_audit(
-                actor=body.agent_id,
-                action=capability_id,
-                target=body.target_resource,
-                trust_level=decision.effective_level,
-                approval_id=decision.approval_id,
-                incident_id=body.incident_id,
-                reversal_recipe=body.reversal_recipe,
-                outcome="success",
-            )
-            await router_ns.emit(
-                "godview.audit.config_change",
-                source="//sovereign/trust-gate",
-                subject=body.target_resource,
-                incident_id=body.incident_id,
-                data={
-                    "capability_id": capability_id,
-                    "agent_id": body.agent_id,
-                    "audit_id": audit.audit_id,
-                },
-            )
-            return {
-                "status": "executed",
-                "capability_id": capability_id,
-                "audit_id": audit.audit_id,
-                "sa_impersonated": decision.sa_to_impersonate,
-                "result": exec_result,
-            }
-
-        return {
-            "status": "executed",
-            "capability_id": capability_id,
-            "sa_impersonated": decision.sa_to_impersonate,
-            "result": exec_result,
-        }
-
-    @api.post("/tenant/kill-switch")
-    async def tenant_kill_switch(
-        body: KillSwitchRequest,
-        x_goog_authenticated_user_email: str | None = Header(
-            default=None, alias="X-Goog-Authenticated-User-Email"
-        ),
-    ) -> dict[str, Any]:
-        actor = _clean_iap_email(x_goog_authenticated_user_email) or "operator@local.dev"
-        now_iso = datetime.now(tz=UTC).isoformat()
-        sentinel_engine.set_planned_operator_action(
-            active=body.enabled, reason=body.reason if body.enabled else None
-        )
-        drain = trust_gate.set_global_kill_switch(enabled=body.enabled, actor=actor)
-        runtime_state["kill_switch_enabled"] = body.enabled
-        runtime_state["kill_switch_reason"] = body.reason if body.enabled else None
-        runtime_state["kill_switch_actor"] = actor
-        runtime_state["kill_switch_updated_at"] = now_iso
-
-        if body.enabled:
-            cleared = len(runtime_state["active_drills"])
-            runtime_state["active_drills"].clear()
-            runtime_state["tenant_paused"] = True
-            runtime_state["simulator_enabled"] = False
-            await court_manager.cool_all_agents()
-            ce_type: str = "godview.operator.kill_switch"
-        else:
-            cleared = 0
-            runtime_state["tenant_paused"] = False
-            runtime_state["simulator_enabled"] = True
-            ce_type = "godview.schedule.resume"
-
-        await router_ns.emit(
-            ce_type,
-            source="//sovereign/control-api",
-            subject="tenant",
-            data={"enabled": body.enabled, "reason": body.reason, "actor": actor},
-        )
-        return {
-            **_operator_state(),
-            "active_drills_cleared": cleared,
-            "cloud_event_type": ce_type,
-            "drain": drain,
-        }
-
-    @api.post("/tenant/pause")
-    @api.post("/lifecycle/tenant-pause")
-    async def tenant_pause() -> dict[str, Any]:
-        runtime_state["tenant_paused"] = True
-        runtime_state["simulator_enabled"] = False
-        sentinel_engine.set_planned_operator_action(active=True, reason="Scheduled Pause")
-        await court_manager.cool_all_agents()
-        await router_ns.emit(
-            "godview.schedule.pause",
-            source="//sovereign/control-api",
-            subject="tenant",
-            data={"tenant_paused": True, "warm_agents_count": 0},
-        )
-        return {
-            **_operator_state(),
-            "warm_agents_count": 0,
-            "cloud_event_type": "godview.schedule.pause",
-        }
-
-    @api.post("/tenant/resume")
-    @api.post("/lifecycle/tenant-resume")
-    async def tenant_resume() -> dict[str, Any]:
-        runtime_state["tenant_paused"] = False
-        runtime_state["simulator_enabled"] = True
-        sentinel_engine.set_planned_operator_action(active=False, reason=None)
-        await router_ns.emit(
-            "godview.schedule.resume",
-            source="//sovereign/control-api",
-            subject="tenant",
-            data={"tenant_paused": False},
-        )
-        return {
-            **_operator_state(),
-            "cloud_event_type": "godview.schedule.resume",
-        }
-
-    @api.post("/probes/run")
-    async def run_probes(payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Execute synthetic verification probes and sentinel evaluation cycle (Cloud Scheduler godview-probe-run)."""
-        now_iso = datetime.now(tz=UTC).isoformat()
-        if (
-            runtime_state["kill_switch_enabled"]
-            or runtime_state["tenant_paused"]
-            or runtime_state["hibernate_enabled"]
-        ):
-            return {
-                "status": "skipped",
-                "action": "probe_run",
-                "reason": "paused_or_hibernating",
-                "sentinels_evaluated": 0,
-                "wakes_triggered": 0,
-                "checked_at": now_iso,
-            }
-        tick = await sentinel_engine.evaluate_tick()
-        return {
-            "status": "ok",
-            "action": "probe_run",
-            "source": (payload or {}).get("source", "cloud_scheduler"),
-            "sentinels_evaluated": tick.evaluated_count,
-            "wakes_triggered": len(tick.wakes_sent),
-            "checked_at": now_iso,
-        }
-
-    @api.post("/memory/reflect")
-    async def reflect_memory(payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Run nightly episodic-to-procedural memory consolidation (Cloud Scheduler godview-agent-reflection)."""
-        now_iso = datetime.now(tz=UTC).isoformat()
-        agents = court_manager.list_active_agents()
-        for doc in agents:
-            aid = doc.doc_id or doc.namespace
-            updated = doc.model_copy(update={"last_reflection_at": now_iso})
-            fs.set("court_agents", aid, updated.model_dump(mode="json"))
-        await router_ns.emit(
-            "godview.operator.note",
-            source="//sovereign/control-api",
-            subject="memory",
-            data={
-                "kind": "nightly_memory_reflection",
-                "source": (payload or {}).get("source", "cloud_scheduler"),
-                "agents_reflected": len(agents),
-                "reflected_at": now_iso,
-            },
-        )
-        return {
-            "status": "ok",
-            "action": "reflect",
-            "agents_reflected": len(agents),
-            "reflected_at": now_iso,
-        }
-
+    @app.post("/nervous-system/push")
     @api.post("/nervous-system/push")
-    async def receive_nervous_system_push(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def receive_nervous_system_push(
+        request: Request,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Receive Pub/Sub push notifications on godview-sovereign-push (Cloud Audit Logs & CloudEvents)."""
-        now_iso = datetime.now(tz=UTC).isoformat()
-        body = payload or {}
+        now = datetime.now(tz=UTC)
+        now_iso = now.isoformat()
+
+        # OIDC verification: outside hermetic, require valid OIDC with audience and email godview-sense-sa
+        if cfg.env_mode != "hermetic":
+            principal = ctx.auth.verify_google_oidc(request)
+            if principal is None:
+                raise HTTPException(status_code=401, detail="Unauthorized: valid OIDC token required")
+            if not principal.email.startswith("godview-sense-sa") and not principal.email.startswith("godview-"):
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Forbidden: sense-sa identity required, got {principal.email}",
+                )
+
+        body = payload
+        if body is None:
+            try:
+                body = await request.json()
+            except Exception:
+                body = {}
+
         decoded_event: dict[str, Any] = {}
         msg = body.get("message")
         if isinstance(msg, dict) and isinstance(msg.get("data"), str):
@@ -1183,6 +510,7 @@ def create_app(
             decoded_event = body
 
         proto = decoded_event.get("protoPayload")
+        chg_doc: ChangeEventDoc | None = None
         if isinstance(proto, dict):
             method_name = str(proto.get("methodName") or "cloud_audit_activity")
             resource_name = str(proto.get("resourceName") or "gcp-resource")
@@ -1192,6 +520,7 @@ def create_app(
                 else hashlib.sha256(f"{resource_name}:{now_iso}".encode()).hexdigest()[:12]
             )
             chg_id = f"chg-audit-{msg_id}"
+            expires_at = (now + timedelta(days=7)).isoformat()
             chg = ChangeEventDoc(
                 doc_id=chg_id,
                 repo=resource_name,
@@ -1200,7 +529,19 @@ def create_app(
                 occurred_at=str(decoded_event.get("timestamp") or now_iso),
                 business_summary=f"Cloud Audit activity: {method_name} on {resource_name}",
             )
-            fs.set("change_events", chg_id, chg.model_dump(mode="json"))
+            data_dict = chg.model_dump(mode="json")
+            data_dict["expires_at"] = expires_at
+            fs.set("change_events", chg_id, data_dict)
+            chg_doc = chg
+
+        if chg_doc is not None:
+            for hook in ctx.hooks.on_change_event:
+                try:
+                    res = hook(chg_doc)
+                    if asyncio.iscoroutine(res):
+                        await res
+                except Exception as exc:
+                    logger.warning("Error in on_change_event hook: %s", exc)
 
         return {
             "status": "acknowledged",
@@ -1221,36 +562,6 @@ def create_app(
             int(runtime_state["simulator_journeys_today"]) + burst
         )
         return _operator_state()
-
-    @api.post("/hibernate")
-    async def set_hibernate_mode(body: HibernateRequest) -> dict[str, Any]:
-        runtime_state["hibernate_enabled"] = body.enabled
-        cadence_s = sentinel_engine.set_hibernate(body.enabled)
-        sentinel_engine.set_planned_operator_action(
-            active=body.enabled,
-            reason="Environment Hibernate" if body.enabled else None,
-        )
-        if body.enabled:
-            await court_manager.cool_all_agents()
-            job = "god-view-hibernate-job"
-            ce_type = "godview.operator.hibernate"
-        else:
-            job = "god-view-wake-job"
-            ce_type = "godview.schedule.resume"
-
-        await router_ns.emit(
-            ce_type,
-            source="//sovereign/control-api",
-            subject="environment",
-            data={"hibernate_enabled": body.enabled, "sentinel_cadence_s": cadence_s},
-        )
-        return {
-            **_operator_state(),
-            "hibernate_enabled": body.enabled,
-            "sentinel_cadence_s": cadence_s,
-            "job_triggered": job,
-            "cloud_event_type": ce_type,
-        }
 
     @api.get("/chaos/drills")
     async def list_chaos_drills() -> dict[str, Any]:
@@ -1304,29 +615,44 @@ def create_app(
         return _format_drill(drill_id)
 
     @api.get("/changes")
-    async def list_changes() -> dict[str, Any]:
-        return {"changes": fs.list_docs("change_events")}
+    async def list_changes(
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        capped_limit = min(max(1, limit), 200)
+        docs = fs.list_docs("change_events", limit=capped_limit, cursor=cursor)
+        next_cursor = (
+            docs[-1].get("_id") or docs[-1].get("doc_id")
+            if len(docs) == capped_limit
+            else None
+        )
+        return {
+            "changes": docs,
+            "cursor": next_cursor,
+            "has_more": len(docs) == capped_limit,
+            "limit": capped_limit,
+        }
 
     @api.get("/cost")
     async def get_cost_summary() -> dict[str, Any]:
         cost_docs = [
             {**d, "id": d.get("doc_id") or d.get("_id")} for d in fs.list_docs("cost_findings")
         ]
-        drift_list = list(runtime_state["drift_diffs"].values())
-        court_ceiling = float(court_manager.token_governor.court_daily_ceiling_usd)
-        court_spent = float(court_manager.token_governor.total_court_usd_spent)
+        court_gov = getattr(court_manager, "token_governor", None)
+        court_ceiling = float(court_gov.court_daily_ceiling_usd) if court_gov else 5.0
+        court_spent = float(court_gov.total_court_usd_spent) if court_gov else 0.0
         return {
             "monthly_ceiling_usd": 600.0,
-            "projected_active_month_usd": 195.0,
-            "projected_hibernated_month_usd": 42.0,
+            "projected_active_month_usd": None,
+            "projected_hibernated_month_usd": None,
             "budget_thresholds_pct": [50, 80, 100],
-            "current_month_spend_usd": round(18.5 + court_spent, 2),
+            "current_month_spend_usd": round(court_spent, 2),
             "daily_court_ceiling_usd": court_ceiling,
             "daily_court_spent_usd": court_spent,
             "court_daily_ceiling_usd": court_ceiling,
             "court_spent_today_usd": court_spent,
             "escalation_reserve_pct": int(
-                court_manager.token_governor.escalation_reserve_fraction * 100
+                court_gov.escalation_reserve_fraction * 100 if court_gov else 20
             ),
             "tier_budgets_summary": "App/Biz/Change $0.75/d · Data/Platform $0.50/d · Sovereign $1.50/d",
             "cost_findings_subtitle": "Idle resources, warm-tier right-sizing, and token budget alerts",
@@ -1334,7 +660,7 @@ def create_app(
             "last_drift_scan_at": datetime.now(tz=UTC).isoformat(),
             "cost_findings": cost_docs,
             "findings": cost_docs,
-            "drift_diffs": drift_list,
+            "drift_diffs": [],
         }
 
     @api.post("/cost/drift/{drift_id}:restore_attribute")
@@ -1394,17 +720,6 @@ def create_app(
             "journeys_updated": batch.journeys_updated,
         }
 
-    from godview.agents.inspection_routes import create_harness_inspection_router
-    from godview.agents.server import create_a2a_router
-
-    api.include_router(
-        create_harness_inspection_router(
-            firestore=fs,
-            token_governor=court_manager.token_governor,
-            trust_gate=trust_gate,
-        )
-    )
-    
     routers_dir = Path(__file__).parent / "routers"
     if routers_dir.exists():
         for file_path in sorted(routers_dir.glob("*.py")):
@@ -1419,8 +734,9 @@ def create_app(
                         api.include_router(sub_router)
             except Exception as exc:
                 logger.error("Failed to load router %s: %s", module_name, exc)
+                if ctx.settings.env_mode != "hermetic":
+                    raise
 
-    app.include_router(create_a2a_router())
     app.include_router(api, prefix="/v1")
     app.include_router(api, prefix="/api/v1")
     return app

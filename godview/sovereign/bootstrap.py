@@ -44,6 +44,8 @@ class SovereignHooks:
         default_factory=list
     )
     on_incident: list[Callable[[Any], Awaitable[None] | None]] = field(default_factory=list)
+    on_incident_closed: list[Callable[[Any], Awaitable[None] | None]] = field(default_factory=list)
+    on_approval_decided: list[Callable[[Any], Awaitable[None] | None]] = field(default_factory=list)
     agent_warmth_tick: list[Callable[[], Awaitable[None] | None]] = field(default_factory=list)
     dlq_watchdog_tick: list[Callable[[], Awaitable[None] | None]] = field(default_factory=list)
 
@@ -65,11 +67,24 @@ class SovereignContext:
     loop_heartbeats: dict[str, datetime] = field(default_factory=dict)
     last_perception_at: datetime | None = None
     sentinels_registered: int = 0
+    court_orchestrator: Any | None = None
     executors: dict[str, Callable[..., Any]] = field(default_factory=dict)
 
 
 def _default_clock() -> datetime:
     return datetime.now(tz=UTC)
+
+
+def _fetch_metadata(path: str) -> str | None:
+    import urllib.request
+
+    url = f"http://metadata.google.internal/computeMetadata/v1/{path.lstrip('/')}"
+    try:
+        req = urllib.request.Request(url, headers={"Metadata-Flavor": "Google"})
+        with urllib.request.urlopen(req, timeout=1.5) as resp:
+            return resp.read().decode("utf-8").strip()
+    except Exception:
+        return None
 
 
 def build_context(env: Mapping[str, str] | None = None) -> SovereignContext:
@@ -122,8 +137,14 @@ def build_context(env: Mapping[str, str] | None = None) -> SovereignContext:
         project_id = (
             env_source.get("GOOGLE_CLOUD_PROJECT")
             or os.environ.get("GOOGLE_CLOUD_PROJECT")
+            or _fetch_metadata("project/project-id")
             or ""
         )
+        if not project_id:
+            err_msg = "FATAL: Production mode GODVIEW_ENV=gcp requires project_id from GOOGLE_CLOUD_PROJECT or metadata server."
+            logger.critical(err_msg)
+            sys.stderr.write(err_msg + "\n")
+            sys.exit(1)
         fs_db = env_source.get("FIRESTORE_DATABASE") or "god-view-memory-db"
         bq_dataset = env_source.get("BIGQUERY_LEDGER_DATASET") or "godview_ledger"
         ps_topic = env_source.get("NERVOUS_SYSTEM_TOPIC") or "godview-nervous-system"
@@ -142,19 +163,24 @@ def build_context(env: Mapping[str, str] | None = None) -> SovereignContext:
         except Exception as exc:
             logger.warning("Could not auto-load GCP adapters: %s", exc)
 
+        healthy_adapters = [
+            a for a in adapters
+            if getattr(a, "healthy", True) and (not callable(getattr(a, "healthy", None)) or a.healthy())
+        ]
+
         # STARTUP ASSERTION (Binding: §0, §3.1)
-        # GODVIEW_ENV=gcp must exit(1) if any InMemory* store or zero adapters
+        # GODVIEW_ENV=gcp must exit(1) if any InMemory* store or zero adapters healthy
         if (
             isinstance(docs, InMemoryFirestore)
             or isinstance(ledger, InMemoryBigQuery)
             or isinstance(bus, InMemoryPubSub)
             or isinstance(agents, InMemoryAgentEngine)
-            or len(adapters) == 0
+            or len(healthy_adapters) == 0
         ):
             err_msg = (
-                f"FATAL: Production mode GODVIEW_ENV=gcp requires real GCP stores and at least one adapter. "
+                f"FATAL: Production mode GODVIEW_ENV=gcp requires real GCP stores and at least one healthy adapter. "
                 f"docs={type(docs).__name__}, ledger={type(ledger).__name__}, "
-                f"bus={type(bus).__name__}, agents={type(agents).__name__}, adapters_count={len(adapters)}"
+                f"bus={type(bus).__name__}, agents={type(agents).__name__}, healthy_adapters_count={len(healthy_adapters)}"
             )
             logger.critical(err_msg)
             sys.stderr.write(err_msg + "\n")
@@ -172,21 +198,26 @@ def build_context(env: Mapping[str, str] | None = None) -> SovereignContext:
             clock=clock,
         )
 
-    # local mode
-    from godview_shared.fakes import (
-        InMemoryAgentEngine,
-        InMemoryBigQuery,
-        InMemoryFirestore,
-        InMemoryPubSub,
-    )
+    # local mode per Plan §1.1: LocalDocumentStore / DuckDB ledger + local adapters
+    from godview_shared.fakes import InMemoryAgentEngine, InMemoryPubSub
+    from godview_shared.stores.duckdb_ledger import DuckDBLedger
+    from godview_shared.stores.local_document_store import LocalDocumentStore
+
+    local_adapters: list[SenseAdapter] = []
+    try:
+        from godview.adapters.local import build_hermetic_local_adapters
+
+        local_adapters = list(build_hermetic_local_adapters())
+    except Exception as exc:
+        logger.warning("Could not auto-load local adapters: %s", exc)
 
     return SovereignContext(
         settings=settings,
-        docs=InMemoryFirestore(),
-        ledger=InMemoryBigQuery(),
+        docs=LocalDocumentStore(),
+        ledger=DuckDBLedger(),
         bus=InMemoryPubSub(),
         agents=InMemoryAgentEngine(),
-        adapters=[],
+        adapters=local_adapters,
         auth=auth,
         llm=llm,
         clock=clock,

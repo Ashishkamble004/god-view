@@ -4,15 +4,18 @@ Implements:
 - Google ADC token provider and AuthorizedSession support
 - id_token_for(audience) using metadata server or google.oauth2.id_token
 - verify_iap_jwt: verifies X-Goog-IAP-JWT-Assertion using google.oauth2.id_token
-  and IAP public keys, checking against IAP_BACKEND_SERVICE_IDS
-- verify_google_oidc: verifies Bearer tokens using Google OIDC certificates
+  and IAP public keys, strictly validating audience against IAP_BACKEND_SERVICE_IDS
+  and issuer == IAP_ISSUER
+- verify_google_oidc: verifies Bearer tokens using Google OIDC certificates,
+  validating audience and allowed service account principals
 - FastAPI dependencies: require_operator, require_service, optional_principal
-- Hermetic test principal support via X-Godview-Test-Principal
+- Hermetic test principal support via X-Godview-Test-Principal and X-Goog-Authenticated-User-Email
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -22,9 +25,12 @@ from fastapi import HTTPException, Request
 
 from godview_shared.config import GodViewSettings
 
+logger = logging.getLogger("godview.auth")
+
 IAP_CERTS_URL = "https://www.gstatic.com/iap/verify/public_key-jwk"
 IAP_ISSUER = "https://cloud.google.com/iap"
 GOOGLE_OIDC_ISSUER = "https://accounts.google.com"
+METADATA_HEADER = {"Metadata-Flavor": "Google"}
 
 
 @dataclass
@@ -40,6 +46,20 @@ class Principal:
     is_service: bool = False
 
 
+def _fetch_metadata(path: str) -> str | None:
+    """Fetch metadata from the Google Cloud metadata server."""
+    import urllib.error
+    import urllib.request
+
+    url = f"http://metadata.google.internal/computeMetadata/v1/{path.lstrip('/')}"
+    try:
+        req = urllib.request.Request(url, headers=METADATA_HEADER)
+        with urllib.request.urlopen(req, timeout=1.5) as resp:
+            return resp.read().decode("utf-8").strip()
+    except Exception:
+        return None
+
+
 class AuthService:
     """Authentication and identity verification service."""
 
@@ -48,17 +68,34 @@ class AuthService:
         settings: GodViewSettings | None = None,
         credentials: Any = None,
         iap_backend_service_ids: Sequence[str] | None = None,
+        service_principals: Sequence[str] | None = None,
     ) -> None:
         self.settings = settings or GodViewSettings.from_env()
         self._credentials = credentials
-        self._iap_backend_service_ids = list(
+        raw_iap_ids = (
             iap_backend_service_ids
-            or [
+            if iap_backend_service_ids is not None
+            else [
                 s.strip()
                 for s in os.environ.get("IAP_BACKEND_SERVICE_IDS", "").split(",")
                 if s.strip()
             ]
         )
+        self._iap_backend_service_ids = list(raw_iap_ids)
+
+        raw_principals = (
+            service_principals
+            if service_principals is not None
+            else [
+                s.strip()
+                for s in os.environ.get("GODVIEW_SERVICE_PRINCIPALS", "").split(",")
+                if s.strip()
+            ]
+        )
+        act_sa = os.environ.get("GODVIEW_ACT_SA_EMAIL")
+        if act_sa and act_sa not in raw_principals:
+            raw_principals.append(act_sa)
+        self._allowed_service_principals = set(raw_principals)
         self._auth_request: Any = None
 
     def _get_auth_request(self) -> Any:
@@ -88,8 +125,6 @@ class AuthService:
                 self._credentials.refresh(req)
             return str(self._credentials.token)
         except Exception as exc:
-            if self.settings.env_mode == "local":
-                return "local-dev-token"
             raise RuntimeError(f"Failed to obtain access token via ADC: {exc}") from exc
 
     def id_token_for(self, audience: str) -> str:
@@ -103,14 +138,19 @@ class AuthService:
 
             return id_token.fetch_id_token(req, audience)
         except Exception as exc:
-            if self.settings.env_mode == "local":
-                return f"local-id-token-for-{audience}"
             raise RuntimeError(
                 f"Failed to fetch ID token for audience '{audience}': {exc}"
             ) from exc
 
     def verify_iap_jwt(self, request_or_token: Request | str) -> Principal | None:
-        """Verify an IAP JWT assertion and return the operator Principal."""
+        """Verify an IAP JWT assertion and return the operator Principal.
+
+        Enforces:
+        - Must be present
+        - Signature verified against Google IAP JWKs
+        - Issuer must equal https://cloud.google.com/iap
+        - Audience must match one of IAP_BACKEND_SERVICE_IDS (fail closed if none match or none configured)
+        """
         token: str | None = None
         test_principal_hdr: str | None = None
         legacy_email_hdr: str | None = None
@@ -154,8 +194,7 @@ class AuthService:
                     audience="hermetic",
                     is_operator=True,
                 )
-            if not token:
-                # Default hermetic operator fallback
+            if token and token.startswith("hermetic-"):
                 return Principal(
                     email="operator@local.dev",
                     subject="sub-operator-local",
@@ -163,56 +202,63 @@ class AuthService:
                     audience="hermetic",
                     is_operator=True,
                 )
+            return Principal(
+                email="operator@hermetic.test",
+                subject="sub-operator-hermetic",
+                issuer="hermetic",
+                audience="hermetic",
+                is_operator=True,
+            )
 
+        # In non-hermetic modes, fail closed if token or backend IDs are missing
         if not token:
             return None
+
+        if not self._iap_backend_service_ids:
+            logger.error("IAP verification failed closed: IAP_BACKEND_SERVICE_IDS is empty")
+            return None
+
+        project_number = self._get_project_number()
 
         try:
             from google.oauth2 import id_token
 
             req = self._get_auth_request()
-            # If backend service IDs are configured, verify audience against them
             claims: dict[str, Any] = {}
-            if self._iap_backend_service_ids:
-                verified = False
-                last_exc = None
-                for bs_id in self._iap_backend_service_ids:
-                    # Target audience can be full path or just the ID
-                    expected_aud = (
-                        bs_id
-                        if bs_id.startswith("/projects/")
-                        else f"/projects/{self._get_project_number()}/global/backendServices/{bs_id}"
+            verified = False
+
+            for bs_id in self._iap_backend_service_ids:
+                expected_aud = (
+                    bs_id
+                    if bs_id.startswith("/projects/")
+                    else (
+                        f"/projects/{project_number}/global/backendServices/{bs_id}"
+                        if project_number
+                        else bs_id
                     )
-                    try:
-                        claims = id_token.verify_token(
-                            token,
-                            req,
-                            audience=expected_aud,
-                            certs_url=IAP_CERTS_URL,
-                        )
-                        verified = True
-                        break
-                    except Exception as err:
-                        last_exc = err
-                        continue
-                if not verified:
-                    # Also try verifying with audience=None if specific aud check failed
-                    try:
-                        claims = id_token.verify_token(
-                            token, req, certs_url=IAP_CERTS_URL
-                        )
-                    except Exception as err:
-                        if last_exc:
-                            raise last_exc from err
-                        raise
-            else:
-                claims = id_token.verify_token(
-                    token, req, certs_url=IAP_CERTS_URL
                 )
+                try:
+                    claims = id_token.verify_token(
+                        token,
+                        req,
+                        audience=expected_aud,
+                        certs_url=IAP_CERTS_URL,
+                    )
+                    verified = True
+                    break
+                except Exception:
+                    continue
+
+            if not verified:
+                return None
+
+            iss = claims.get("iss", "")
+            if iss != IAP_ISSUER:
+                logger.warning("IAP token rejected: invalid issuer %s", iss)
+                return None
 
             email = claims.get("email", "")
             sub = claims.get("sub", "")
-            iss = claims.get("iss", IAP_ISSUER)
             aud = claims.get("aud", "")
             return Principal(
                 email=email,
@@ -226,7 +272,11 @@ class AuthService:
             return None
 
     def _get_project_number(self) -> str:
-        return os.environ.get("GOOGLE_CLOUD_PROJECT_NUMBER", "769002985772")
+        env_num = os.environ.get("GOOGLE_CLOUD_PROJECT_NUMBER", "")
+        if env_num:
+            return env_num
+        meta_num = _fetch_metadata("project/numeric-project-id")
+        return meta_num or ""
 
     def verify_google_oidc(
         self,
@@ -245,13 +295,19 @@ class AuthService:
         else:
             token = request_or_token
 
+        effective_audience = (
+            audience
+            or os.environ.get("GODVIEW_SOVEREIGN_URL")
+            or os.environ.get("SERVICE_URL")
+        )
+
         if self.settings.env_mode == "hermetic":
             if test_principal_hdr:
                 return Principal(
                     email=test_principal_hdr,
                     subject="sub-service-test",
                     issuer="hermetic",
-                    audience=audience or "hermetic",
+                    audience=effective_audience or "hermetic",
                     is_service=True,
                 )
             if token and token.startswith("hermetic-"):
@@ -259,30 +315,53 @@ class AuthService:
                     email="godview-sense-sa@hermetic.iam.gserviceaccount.com",
                     subject="sub-service-hermetic",
                     issuer="hermetic",
-                    audience=audience or "hermetic",
+                    audience=effective_audience or "hermetic",
                     is_service=True,
                 )
-            # Default service principal in hermetic if requested
-            return Principal(
-                email="godview-sense-sa@hermetic.iam.gserviceaccount.com",
-                subject="sub-service-hermetic",
-                issuer="hermetic",
-                audience=audience or "hermetic",
-                is_service=True,
-            )
+            return None
 
         if not token:
+            return None
+
+        if not effective_audience:
+            logger.error("OIDC verification failed: audience is required")
             return None
 
         try:
             from google.oauth2 import id_token
 
             req = self._get_auth_request()
-            claims = id_token.verify_oauth2_token(token, req, audience=audience)
+            claims = id_token.verify_oauth2_token(
+                token, req, audience=effective_audience
+            )
+
+            iss = claims.get("iss", "")
+            if iss not in (GOOGLE_OIDC_ISSUER, "accounts.google.com"):
+                return None
+
             email = claims.get("email", "")
+            # Verify against allowed service accounts
+            if self._allowed_service_principals:
+                if email not in self._allowed_service_principals:
+                    # Also permit standard naming pattern: godview-*-sa@*.iam.gserviceaccount.com
+                    if not (
+                        email.startswith("godview-")
+                        and email.endswith(".iam.gserviceaccount.com")
+                    ):
+                        logger.warning("OIDC rejected: email %s not in allowed principals", email)
+                        return None
+            else:
+                if not (
+                    email.startswith("godview-")
+                    and email.endswith(".iam.gserviceaccount.com")
+                ):
+                    logger.warning(
+                        "OIDC rejected: email %s does not match service principal pattern", email
+                    )
+                    return None
+
             sub = claims.get("sub", "")
-            iss = claims.get("iss", GOOGLE_OIDC_ISSUER)
-            aud = claims.get("aud", audience or "")
+            aud = claims.get("aud", effective_audience)
             return Principal(
                 email=email,
                 subject=sub,
@@ -308,13 +387,8 @@ class AuthService:
         self,
         audience_or_request: Any = None,
     ) -> Any:
-        """FastAPI dependency for service authentication (OIDC).
-
-        Can be used directly as a dependency: `Depends(ctx.auth.require_service)`
-        or as a parameterized factory: `Depends(ctx.auth.require_service(audience="..."))`.
-        """
+        """FastAPI dependency for service authentication (OIDC)."""
         if isinstance(audience_or_request, Request):
-            # Called directly as dependency without args: require_service(request)
             return self._verify_service_dep(audience_or_request, audience=None)
 
         audience = audience_or_request if isinstance(audience_or_request, str) else None

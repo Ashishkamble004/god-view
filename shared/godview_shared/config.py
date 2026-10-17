@@ -245,6 +245,8 @@ class GodViewSettings(BaseModel):
     default_model_location: Literal["global", "us-central1"] = Field(
         default=DEFAULT_AGENT_MODEL_LOCATION
     )
+    service_url: str = Field(default="")
+    gcp_project_id: str = Field(default="")
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> GodViewSettings:
@@ -254,14 +256,21 @@ class GodViewSettings(BaseModel):
         or if required budget env vars are missing in 'gcp' or 'local' mode (A9).
         """
         source = env if env is not None else os.environ
-        if "GODVIEW_ENV" not in source:
+        if "GODVIEW_ENV" in source:
+            raw_env = source["GODVIEW_ENV"].strip().lower()
+        elif "K_SERVICE" in source:
+            raw_env = "gcp"
+        elif "PYTEST_CURRENT_TEST" in source or "PYTEST_VERSION" in source:
             raw_env = "hermetic"
         else:
-            raw_env = source["GODVIEW_ENV"].strip().lower()
-            if raw_env not in ("hermetic", "local", "gcp"):
-                raise ValueError(
-                    f"Invalid GODVIEW_ENV={source['GODVIEW_ENV']!r}; must be one of 'hermetic', 'local', 'gcp'"
-                )
+            raise ValueError(
+                "GODVIEW_ENV environment variable is required ('gcp', 'local', or 'hermetic')"
+            )
+
+        if raw_env not in ("hermetic", "local", "gcp"):
+            raise ValueError(
+                f"Invalid GODVIEW_ENV={raw_env!r}; must be one of 'hermetic', 'local', 'gcp'"
+            )
         max_agents = int(source.get("GODVIEW_COURT_MAX_AGENTS", str(DEFAULT_COURT_MAX_AGENTS)))
         if max_agents < 1 or max_agents > DEFAULT_COURT_MAX_AGENTS:
             raise ValueError(
@@ -317,6 +326,17 @@ class GodViewSettings(BaseModel):
         if court_ceiling <= Decimal("0") or any(v <= Decimal("0") for v in budgets.values()):
             raise ValueError("All daily token budgets and ceiling must be strictly positive (> 0)")
 
+        service_url = (
+            source.get("GODVIEW_SERVICE_URL")
+            or source.get("SERVICE_URL")
+            or ""
+        )
+        gcp_project_id = (
+            source.get("GOOGLE_CLOUD_PROJECT")
+            or source.get("GCP_PROJECT")
+            or ""
+        )
+
         return cls(
             env_mode=raw_env,  # type: ignore[arg-type]
             court_max_agents=max_agents,
@@ -327,4 +347,6 @@ class GodViewSettings(BaseModel):
             court_daily_ceiling_usd=court_ceiling,
             escalation_reserve_fraction=reserve,
             agent_daily_budgets_usd=budgets,
+            service_url=service_url,
+            gcp_project_id=gcp_project_id,
         )

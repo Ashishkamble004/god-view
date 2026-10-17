@@ -2,7 +2,24 @@
 name = "god-view"
 version = "4.0.0"
 description = "God-View v4 — The Sovereign SRE Organism & Proving Ground"
-requires-python = ">=3.13"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "godview-sovereign",
+    "godview-shared",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.2.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=5.0.0",
+    "ruff>=0.6.0",
+    "import-linter>=2.15",
+]
+
+[tool.uv.sources]
+godview-sovereign = { workspace = true }
+godview-shared = { workspace = true }
 
 [tool.uv.workspace]
 members = [
