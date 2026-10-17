@@ -104,8 +104,9 @@ from pydantic import ValidationError
 @pytest.mark.unit
 @pytest.mark.contract
 def test_tenant_9_tables_and_no_telemetry_in_patient() -> None:
-    """TDD §2.1 & I-04: Tenant business tables loaded from runtime fixture; telemetry tables forbidden."""
-    assert len(TENANT_BUSINESS_TABLES) == 9
+    """TDD §2.1 & I-04: Tenant business tables are schema-agnostic/empty by default; telemetry tables forbidden."""
+    # Sovereign core contracts do not load tenant tables at import time
+    assert len(TENANT_BUSINESS_TABLES) == 0
     for forbidden in ("service_metric_rollups", "otel_trace_spans"):
         assert forbidden in FORBIDDEN_TELEMETRY_TABLES
         assert forbidden not in TENANT_BUSINESS_TABLES
@@ -128,15 +129,13 @@ def test_ledger_row_models_and_tables() -> None:
         service="svc-alpha",
         operation="POST /evaluate",
         event_type="item.decided",
-        customer_id="cust-01",
         entity_type="item_record",
         entity_id="rec-01",
-        decision="APPROVED",
         http_status=200,
         duration_ms=145,
         is_synthetic=True,
         source="otel",
-        attributes={"rules_version": "abc1234"},
+        attributes={"customer_id": "cust-01", "decision": "APPROVED", "rules_version": "abc1234"},
         numeric_attributes={"ratio": 48.5, "score": 740.0},
     )
     assert ev.source == "otel"
@@ -1232,7 +1231,17 @@ def test_lint_brands_and_lint_neutrality_both_directions(tmp_path) -> None:
 
     # Clean repo check
     assert lint_brands.scan_paths([repo_root / "shared"]) == []
-    assert lint_neutrality.scan_neutrality([repo_root / "shared"], repo_root=repo_root) == []
+    assert (
+        lint_neutrality.scan_neutrality(
+            [
+                repo_root / "shared",
+                repo_root / "godview" / "ledger",
+                repo_root / "godview" / "invariants",
+            ],
+            repo_root=repo_root,
+        )
+        == []
+    )
 
     # Negative check: file with forbidden brand or tenant name must be caught
     bad_file = tmp_path / "bad_sample.py"
@@ -1240,8 +1249,15 @@ def test_lint_brands_and_lint_neutrality_both_directions(tmp_path) -> None:
     assert len(lint_brands.scan_paths([bad_file])) == 1
 
     bad_tenant = tmp_path / "bad_tenant.py"
-    bad_tenant.write_text("svc = '" + ("lo" + "an") + "-svc'\n", encoding="utf-8")
-    assert len(lint_neutrality.scan_neutrality([bad_tenant], repo_root=tmp_path)) == 1
+    bad_tenant.write_text(
+        "svc = '" + ("lo" + "an") + "-svc'\n"
+        "status = 'DISB" + "URSED'\n"
+        "kpi = 'rup" + "ees_per_hour'\n"
+        "flag = 'ky" + "c_status'\n"
+        "ip = '10." + "10.0.1'\n",
+        encoding="utf-8",
+    )
+    assert len(lint_neutrality.scan_neutrality([bad_tenant], repo_root=tmp_path)) == 5
 
 
 @pytest.mark.unit

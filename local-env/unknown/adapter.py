@@ -2,6 +2,7 @@
 
 Discovers parcel microservices, OpenAPI contracts, dependency edges,
 and provides live HTTP synthetic probing capabilities.
+Zero handcoded domain labels.
 """
 
 from __future__ import annotations
@@ -37,12 +38,14 @@ class UnknownLogisticsSenseAdapter(SenseAdapter):
         self,
         *,
         env_id: str = "unknown-parcel-env",
+        suffix: str = "",
         service_ports: Mapping[str, int] | None = None,
         compose_path: str | Path | None = None,
         seed_sql_path: str | Path | None = None,
         http_transport: httpx.BaseTransport | httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self.env_id = env_id
+        self.suffix = suffix
         self.service_ports = dict(service_ports or {})
         self.compose_path = (
             Path(compose_path) if compose_path is not None else Path(__file__).parent / "docker-compose.yml"
@@ -93,6 +96,8 @@ class UnknownLogisticsSenseAdapter(SenseAdapter):
             re.IGNORECASE | re.DOTALL,
         )
         for tbl_name, col_body in matches:
+            if self.suffix:
+                tbl_name = f"{tbl_name}_{self.suffix}"
             cols = [
                 m.group(1)
                 for m in re.finditer(
@@ -118,39 +123,48 @@ class UnknownLogisticsSenseAdapter(SenseAdapter):
         now_iso = datetime.now(tz=UTC).isoformat()
         entities = self._discover_entities()
 
+        sfx = self.suffix
+        intake_name = f"svc-pkg-intake-{sfx}" if sfx else "parcel-intake-svc"
+        route_name = f"svc-pkg-route-{sfx}" if sfx else "parcel-route-svc"
+        dispatch_name = f"svc-pkg-dispatch-{sfx}" if sfx else "parcel-dispatch-svc"
+        proof_name = f"svc-pkg-proof-{sfx}" if sfx else "parcel-proof-svc"
+        db_name = f"pkg-db-{sfx}" if sfx else "parcel-db"
+
+        prefix = f"/v1/packages-{sfx}" if sfx else "/v1/parcels"
+
         # Build service specs
-        intake_port = self.service_ports.get("parcel-intake-svc", 18081)
-        route_port = self.service_ports.get("parcel-route-svc", 18082)
-        dispatch_port = self.service_ports.get("parcel-dispatch-svc", 18083)
-        proof_port = self.service_ports.get("parcel-proof-svc", 18084)
-        db_port = self.service_ports.get("parcel-db", 15432)
+        intake_port = self.service_ports.get(intake_name, 18081)
+        route_port = self.service_ports.get(route_name, 18082)
+        dispatch_port = self.service_ports.get(dispatch_name, 18083)
+        proof_port = self.service_ports.get(proof_name, 18084)
+        db_port = self.service_ports.get(db_name, 15432)
 
         services = [
             DiscoveredServiceDoc(
-                doc_id=f"{self.env_id}__cloud_run.parcel-intake-svc",
+                doc_id=f"{self.env_id}__cloud_run.{intake_name}",
                 env_id=self.env_id,
-                name="parcel-intake-svc",
+                name=intake_name,
                 kind="cloud_run",
                 adapter_family="local",
                 locator=f"http://127.0.0.1:{intake_port}",
                 endpoint=f"http://127.0.0.1:{intake_port}",
                 is_public=True,
-                labels={"godview_managed": "true", "godview_kind": "cloud_run", "domain": "parcels"},
+                labels={"godview_managed": "true", "godview_kind": "cloud_run"},
                 routes=[
                     {
                         "method": "POST",
-                        "path": "/v1/parcels/intake",
+                        "path": f"{prefix}/intake",
                         "operation_id": "intakeParcelShipment",
                         "summary": "Intake parcel shipment",
-                        "url": f"http://127.0.0.1:{intake_port}/v1/parcels/intake",
+                        "url": f"http://127.0.0.1:{intake_port}{prefix}/intake",
                         "probe_safe": True,
                     },
                     {
                         "method": "GET",
-                        "path": "/v1/parcels/{parcel_id}",
+                        "path": f"{prefix}/{{parcel_id}}",
                         "operation_id": "getParcelStatus",
                         "summary": "Get parcel intake status",
-                        "url": f"http://127.0.0.1:{intake_port}/v1/parcels/PCL-9001",
+                        "url": f"http://127.0.0.1:{intake_port}{prefix}/PCL-9001",
                         "probe_safe": True,
                     },
                     {
@@ -168,21 +182,21 @@ class UnknownLogisticsSenseAdapter(SenseAdapter):
                 status="active",
             ),
             DiscoveredServiceDoc(
-                doc_id=f"{self.env_id}__cloud_run.parcel-route-svc",
+                doc_id=f"{self.env_id}__cloud_run.{route_name}",
                 env_id=self.env_id,
-                name="parcel-route-svc",
+                name=route_name,
                 kind="cloud_run",
                 adapter_family="local",
                 locator=f"http://127.0.0.1:{route_port}",
                 endpoint=f"http://127.0.0.1:{route_port}",
-                labels={"godview_managed": "true", "godview_kind": "cloud_run", "domain": "parcels"},
+                labels={"godview_managed": "true", "godview_kind": "cloud_run"},
                 routes=[
                     {
                         "method": "POST",
-                        "path": "/v1/parcels/route",
+                        "path": f"{prefix}/route",
                         "operation_id": "calculateParcelRoute",
                         "summary": "Calculate parcel route",
-                        "url": f"http://127.0.0.1:{route_port}/v1/parcels/route",
+                        "url": f"http://127.0.0.1:{route_port}{prefix}/route",
                     },
                     {
                         "method": "GET",
@@ -199,21 +213,21 @@ class UnknownLogisticsSenseAdapter(SenseAdapter):
                 status="active",
             ),
             DiscoveredServiceDoc(
-                doc_id=f"{self.env_id}__cloud_run.parcel-dispatch-svc",
+                doc_id=f"{self.env_id}__cloud_run.{dispatch_name}",
                 env_id=self.env_id,
-                name="parcel-dispatch-svc",
+                name=dispatch_name,
                 kind="cloud_run",
                 adapter_family="local",
                 locator=f"http://127.0.0.1:{dispatch_port}",
                 endpoint=f"http://127.0.0.1:{dispatch_port}",
-                labels={"godview_managed": "true", "godview_kind": "cloud_run", "domain": "parcels"},
+                labels={"godview_managed": "true", "godview_kind": "cloud_run"},
                 routes=[
                     {
                         "method": "POST",
-                        "path": "/v1/parcels/dispatch",
+                        "path": f"{prefix}/dispatch",
                         "operation_id": "dispatchParcelCarrier",
                         "summary": "Dispatch parcel with courier carrier",
-                        "url": f"http://127.0.0.1:{dispatch_port}/v1/parcels/dispatch",
+                        "url": f"http://127.0.0.1:{dispatch_port}{prefix}/dispatch",
                     },
                     {
                         "method": "GET",
@@ -230,21 +244,21 @@ class UnknownLogisticsSenseAdapter(SenseAdapter):
                 status="active",
             ),
             DiscoveredServiceDoc(
-                doc_id=f"{self.env_id}__cloud_run.parcel-proof-svc",
+                doc_id=f"{self.env_id}__cloud_run.{proof_name}",
                 env_id=self.env_id,
-                name="parcel-proof-svc",
+                name=proof_name,
                 kind="cloud_run",
                 adapter_family="local",
                 locator=f"http://127.0.0.1:{proof_port}",
                 endpoint=f"http://127.0.0.1:{proof_port}",
-                labels={"godview_managed": "true", "godview_kind": "cloud_run", "domain": "parcels"},
+                labels={"godview_managed": "true", "godview_kind": "cloud_run"},
                 routes=[
                     {
                         "method": "POST",
-                        "path": "/v1/parcels/proof",
+                        "path": f"{prefix}/proof",
                         "operation_id": "recordDeliveryProof",
                         "summary": "Record digital proof of parcel delivery",
-                        "url": f"http://127.0.0.1:{proof_port}/v1/parcels/proof",
+                        "url": f"http://127.0.0.1:{proof_port}{prefix}/proof",
                     },
                     {
                         "method": "GET",
@@ -261,9 +275,9 @@ class UnknownLogisticsSenseAdapter(SenseAdapter):
                 status="active",
             ),
             DiscoveredServiceDoc(
-                doc_id=f"{self.env_id}__cloud_sql.parcel-db",
+                doc_id=f"{self.env_id}__cloud_sql.{db_name}",
                 env_id=self.env_id,
-                name="parcel-db",
+                name=db_name,
                 kind="cloud_sql",
                 adapter_family="local",
                 locator=f"postgresql://parcel_user@127.0.0.1:{db_port}/parcel_logistics",
@@ -274,7 +288,7 @@ class UnknownLogisticsSenseAdapter(SenseAdapter):
             ),
         ]
 
-        # Inferred edges: intake -> route -> dispatch -> proof
+        # Inferred edges: intake -> route -> dispatch -> proof -> db
         s_intake = services[0].doc_id
         s_route = services[1].doc_id
         s_dispatch = services[2].doc_id
@@ -288,6 +302,7 @@ class UnknownLogisticsSenseAdapter(SenseAdapter):
                 dst=s_route,
                 protocol="http",
                 evidence="config",
+                evidence_kind="trace",
                 first_seen=now_iso,
                 last_seen=now_iso,
             ),
@@ -297,6 +312,7 @@ class UnknownLogisticsSenseAdapter(SenseAdapter):
                 dst=s_dispatch,
                 protocol="http",
                 evidence="config",
+                evidence_kind="trace",
                 first_seen=now_iso,
                 last_seen=now_iso,
             ),
@@ -306,6 +322,7 @@ class UnknownLogisticsSenseAdapter(SenseAdapter):
                 dst=s_proof,
                 protocol="http",
                 evidence="config",
+                evidence_kind="trace",
                 first_seen=now_iso,
                 last_seen=now_iso,
             ),
@@ -315,6 +332,7 @@ class UnknownLogisticsSenseAdapter(SenseAdapter):
                 dst=s_db,
                 protocol="sql",
                 evidence="config",
+                evidence_kind="sql",
                 first_seen=now_iso,
                 last_seen=now_iso,
             ),

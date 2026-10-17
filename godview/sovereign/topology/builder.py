@@ -84,7 +84,7 @@ class TopologyJourneyStep(BaseModel):
 class TopologyJourney(BaseModel):
     name: str
     steps: list[TopologyJourneyStep] = Field(default_factory=list)
-    health: Literal["green", "amber", "red"] = "green"
+    health: Literal["green", "amber", "red", "unknown"] = "green"
     confidence: float = 0.0
 
 
@@ -108,9 +108,9 @@ class TopologyReport(BaseModel):
     layout_hint: LayoutHint = Field(default_factory=LayoutHint)
 
 
-def classify_tier(kind: str, name: str, labels: dict[str, str]) -> TopologyTier:
+def classify_tier(kind: str, name: str, labels: dict[str, str], classification: str = "") -> TopologyTier:
     """Classify node tier according to kind and observer labels."""
-    if labels.get("godview_role") == "observer" or is_excluded_resource(name, labels):
+    if labels.get("godview_role") == "observer" or classification == "observer" or is_excluded_resource(name, labels):
         return "observer"
     if kind in ("lb_frontend", "backend_service", "security_policy", "api_gateway"):
         return "edge"
@@ -158,10 +158,19 @@ class TopologyBuilder:
         incidents_by_node: dict[str, int] | None = None,
         golden_by_node: dict[str, dict[str, Any]] | None = None,
         posture_by_node: dict[str, Posture] | None = None,
+        *,
+        incidents: dict[str, Any] | None = None,
+        golden_signals: dict[str, Any] | None = None,
     ) -> TopologyReport:
         now_iso = datetime.now(tz=UTC).isoformat()
-        incidents_map = incidents_by_node or {}
-        golden_map = golden_by_node or {}
+        if incidents_by_node is None and incidents is not None:
+            incidents_map = {
+                k: (len(v) if isinstance(v, list) else int(v))
+                for k, v in incidents.items()
+            }
+        else:
+            incidents_map = incidents_by_node or {}
+        golden_map = golden_by_node or golden_signals or {}
         posture_map = posture_by_node or {}
 
         # 1. Deduplicate services by node_id / name+kind
@@ -191,6 +200,7 @@ class TopologyBuilder:
 
         # 2. Build TopologyNode list
         nodes: list[TopologyNode] = []
+        status_by_node: dict[str, TopologyStatus] = {}
         tier_groups: dict[str, list[str]] = {
             "edge": [],
             "compute": [],
@@ -205,7 +215,7 @@ class TopologyBuilder:
             name = s.name
             kind = s.kind
             labels = s.labels
-            tier = classify_tier(kind, name, labels)
+            tier = classify_tier(kind, name, labels, s.classification or "")
 
             # Business context summary
             bc = s.business_context
@@ -248,6 +258,9 @@ class TopologyBuilder:
                 status = "green"
             else:
                 status = "unknown"
+
+            status_by_node[node_id] = status
+            status_by_node[name] = status
 
             # Posture
             pos = s.posture or posture_map.get(node_id) or posture_map.get(name)
@@ -320,7 +333,7 @@ class TopologyBuilder:
                     evidence_kind=evidence_kind,
                     rps=e.rps,
                     error_ratio=e.error_ratio,
-                    confidence=e.confidence if e.confidence > 0.0 else 0.8,
+                    confidence=float(e.confidence or 0.0),
                 )
             )
 
@@ -338,15 +351,30 @@ class TopologyBuilder:
                             )
                         )
                     elif isinstance(s, str):
-                        steps.append(TopologyJourneyStep(node=s, operation="EXECUTE"))
+                        steps.append(TopologyJourneyStep(node=s, operation=""))
 
-                conf = getattr(j, "confidence", 0.0) or 0.8
+                # Calculate health from member nodes
+                member_statuses = [
+                    status_by_node.get(step.node, "unknown")
+                    for step in steps
+                    if step.node in status_by_node
+                ]
+                if any(st == "red" for st in member_statuses):
+                    j_health = "red"
+                elif any(st == "amber" for st in member_statuses):
+                    j_health = "amber"
+                elif member_statuses and all(st == "green" for st in member_statuses):
+                    j_health = "green"
+                else:
+                    j_health = "unknown"
+
+                conf = float(getattr(j, "confidence", 0.0) or 0.0)
                 topology_journeys.append(
                     TopologyJourney(
                         name=j.name,
                         steps=steps,
-                        health="green",
-                        confidence=conf if conf > 0.0 else 0.8,
+                        health=j_health,
+                        confidence=conf,
                     )
                 )
 

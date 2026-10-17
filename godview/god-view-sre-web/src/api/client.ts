@@ -485,6 +485,8 @@ export const cockpitApi = {
 
     if (topologyRes && topologyRes.status === 'fulfilled') {
       partial.topology = topologyRes.value;
+    } else if (topologyRes && topologyRes.status === 'rejected') {
+      recordErr('topology' as any, topologyRes.reason, '/api/v1/topology');
     }
 
     return {

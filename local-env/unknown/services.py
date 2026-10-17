@@ -1,16 +1,17 @@
 """Fictional Parcel Logistics Microservices for Unknown-Environment E2E.
 
 Services:
-1. parcel-intake-svc: POST /v1/parcels/intake, GET /v1/parcels/{parcel_id}, GET /healthz
-2. parcel-route-svc: POST /v1/parcels/route, GET /v1/parcels/routes/{route_id}, GET /healthz
-3. parcel-dispatch-svc: POST /v1/parcels/dispatch, GET /v1/parcels/dispatches/{dispatch_id}, GET /healthz
-4. parcel-proof-svc: POST /v1/parcels/proof, GET /v1/parcels/proofs/{proof_id}, GET /healthz
+1. Intake service: POST /v1/packages-{suffix}/intake, GET /v1/packages-{suffix}/{package_id}, GET /healthz
+2. Route service: POST /v1/packages-{suffix}/route, GET /v1/packages-{suffix}/routes/{route_id}, GET /healthz
+3. Dispatch service: POST /v1/packages-{suffix}/dispatch, GET /v1/packages-{suffix}/dispatches/{dispatch_id}, GET /healthz
+4. Proof service: POST /v1/packages-{suffix}/proof, GET /v1/packages-{suffix}/proofs/{proof_id}, GET /healthz
 
 Includes:
 - OpenAPI specs automatically served at /openapi.json
 - Synthetic probe-safe indicators
 - Configurable fault injection (404 route, 5xx burst)
 - OTLP telemetry reporting helper
+- Dynamic randomisation support per test run
 """
 
 from __future__ import annotations
@@ -28,12 +29,7 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
 # Global fault state dictionary: service_name -> fault_type (e.g. "404", "500")
-_ACTIVE_FAULTS: dict[str, str | None] = {
-    "parcel-intake-svc": None,
-    "parcel-route-svc": None,
-    "parcel-dispatch-svc": None,
-    "parcel-proof-svc": None,
-}
+_ACTIVE_FAULTS: dict[str, str | None] = {}
 
 
 def set_service_fault(service_name: str, fault_type: str | None) -> None:
@@ -107,30 +103,32 @@ class DeliveryProofResponse(BaseModel):
 # --- App Factories ---
 
 
-def create_intake_app() -> FastAPI:
-    """Create parcel-intake-svc FastAPI application."""
+def create_intake_app(*, suffix: str = "") -> FastAPI:
+    """Create parcel intake FastAPI application."""
+    svc_name = f"svc-pkg-intake-{suffix}" if suffix else "parcel-intake-svc"
+    prefix = f"/v1/packages-{suffix}" if suffix else "/v1/parcels"
     app = FastAPI(
-        title="parcel-intake-svc",
+        title=svc_name,
         version="1.0.0",
         description="Fictional Parcel Logistics Intake Service",
     )
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
-        return {"status": "ok", "service": "parcel-intake-svc"}
+        return {"status": "ok", "service": svc_name}
 
     @app.get("/metrics", response_class=PlainTextResponse)
     def metrics() -> str:
-        return "# TYPE http_requests_total counter\nhttp_requests_total{service=\"parcel-intake-svc\"} 42\n"
+        return f'# TYPE http_requests_total counter\nhttp_requests_total{{service="{svc_name}"}} 42\n'
 
     @app.post(
-        "/v1/parcels/intake",
+        f"{prefix}/intake",
         response_model=ParcelIntakeResponse,
         summary="Intake new parcel shipment",
         operation_id="intakeParcelShipment",
     )
     def intake_parcel(req: ParcelIntakeRequest) -> ParcelIntakeResponse:
-        fault = get_service_fault("parcel-intake-svc")
+        fault = get_service_fault(svc_name)
         if fault == "500":
             raise HTTPException(status_code=500, detail="Injected parcel intake service failure")
         if fault == "404":
@@ -142,12 +140,12 @@ def create_intake_app() -> FastAPI:
         )
 
     @app.get(
-        "/v1/parcels/{parcel_id}",
+        f"{prefix}/{{parcel_id}}",
         summary="Get parcel intake status",
         operation_id="getParcelStatus",
     )
     def get_parcel(parcel_id: str) -> dict[str, Any]:
-        fault = get_service_fault("parcel-intake-svc")
+        fault = get_service_fault(svc_name)
         if fault == "404":
             raise HTTPException(status_code=404, detail=f"Parcel {parcel_id} not found (fault injected)")
         if fault == "500":
@@ -162,30 +160,32 @@ def create_intake_app() -> FastAPI:
     return app
 
 
-def create_route_app() -> FastAPI:
-    """Create parcel-route-svc FastAPI application."""
+def create_route_app(*, suffix: str = "") -> FastAPI:
+    """Create parcel route optimization FastAPI application."""
+    svc_name = f"svc-pkg-route-{suffix}" if suffix else "parcel-route-svc"
+    prefix = f"/v1/packages-{suffix}" if suffix else "/v1/parcels"
     app = FastAPI(
-        title="parcel-route-svc",
+        title=svc_name,
         version="1.0.0",
         description="Fictional Parcel Logistics Route Optimization Service",
     )
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
-        return {"status": "ok", "service": "parcel-route-svc"}
+        return {"status": "ok", "service": svc_name}
 
     @app.get("/metrics", response_class=PlainTextResponse)
     def metrics() -> str:
-        return "# TYPE http_requests_total counter\nhttp_requests_total{service=\"parcel-route-svc\"} 29\n"
+        return f'# TYPE http_requests_total counter\nhttp_requests_total{{service="{svc_name}"}} 29\n'
 
     @app.post(
-        "/v1/parcels/route",
+        f"{prefix}/route",
         response_model=TransitRouteResponse,
         summary="Calculate optimal parcel route",
         operation_id="calculateParcelRoute",
     )
     def calculate_route(req: TransitRouteRequest) -> TransitRouteResponse:
-        fault = get_service_fault("parcel-route-svc")
+        fault = get_service_fault(svc_name)
         if fault == "500":
             raise HTTPException(status_code=500, detail="Injected routing engine 500 burst")
         if fault == "404":
@@ -197,12 +197,12 @@ def create_route_app() -> FastAPI:
         )
 
     @app.get(
-        "/v1/parcels/routes/{route_id}",
+        f"{prefix}/routes/{{route_id}}",
         summary="Get parcel transit route details",
         operation_id="getTransitRoute",
     )
     def get_route(route_id: str) -> dict[str, Any]:
-        fault = get_service_fault("parcel-route-svc")
+        fault = get_service_fault(svc_name)
         if fault == "404":
             raise HTTPException(status_code=404, detail=f"Route {route_id} not found")
         if fault == "500":
@@ -217,30 +217,32 @@ def create_route_app() -> FastAPI:
     return app
 
 
-def create_dispatch_app() -> FastAPI:
-    """Create parcel-dispatch-svc FastAPI application."""
+def create_dispatch_app(*, suffix: str = "") -> FastAPI:
+    """Create courier dispatch FastAPI application."""
+    svc_name = f"svc-pkg-dispatch-{suffix}" if suffix else "parcel-dispatch-svc"
+    prefix = f"/v1/packages-{suffix}" if suffix else "/v1/parcels"
     app = FastAPI(
-        title="parcel-dispatch-svc",
+        title=svc_name,
         version="1.0.0",
         description="Fictional Parcel Logistics Courier Dispatch Service",
     )
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
-        return {"status": "ok", "service": "parcel-dispatch-svc"}
+        return {"status": "ok", "service": svc_name}
 
     @app.get("/metrics", response_class=PlainTextResponse)
     def metrics() -> str:
-        return "# TYPE http_requests_total counter\nhttp_requests_total{service=\"parcel-dispatch-svc\"} 18\n"
+        return f'# TYPE http_requests_total counter\nhttp_requests_total{{service="{svc_name}"}} 18\n'
 
     @app.post(
-        "/v1/parcels/dispatch",
+        f"{prefix}/dispatch",
         response_model=CourierDispatchResponse,
         summary="Dispatch parcel with courier carrier",
         operation_id="dispatchParcelCarrier",
     )
     def dispatch_parcel(req: CourierDispatchRequest) -> CourierDispatchResponse:
-        fault = get_service_fault("parcel-dispatch-svc")
+        fault = get_service_fault(svc_name)
         if fault == "500":
             raise HTTPException(status_code=500, detail="Injected courier dispatch error")
         return CourierDispatchResponse(
@@ -250,46 +252,48 @@ def create_dispatch_app() -> FastAPI:
         )
 
     @app.get(
-        "/v1/parcels/dispatches/{dispatch_id}",
+        f"{prefix}/dispatches/{{dispatch_id}}",
         summary="Get courier dispatch status",
-        operation_id="getDispatchStatus",
+        operation_id="getCourierDispatch",
     )
     def get_dispatch(dispatch_id: str) -> dict[str, Any]:
         return {
             "dispatch_id": dispatch_id,
             "courier_id": "CR-101",
-            "dispatch_status": "OUT_FOR_DELIVERY",
+            "status": "DISPATCHED",
         }
 
     return app
 
 
-def create_proof_app() -> FastAPI:
-    """Create parcel-proof-svc FastAPI application."""
+def create_proof_app(*, suffix: str = "") -> FastAPI:
+    """Create delivery proof FastAPI application."""
+    svc_name = f"svc-pkg-proof-{suffix}" if suffix else "parcel-proof-svc"
+    prefix = f"/v1/packages-{suffix}" if suffix else "/v1/parcels"
     app = FastAPI(
-        title="parcel-proof-svc",
+        title=svc_name,
         version="1.0.0",
         description="Fictional Parcel Logistics Proof of Delivery Service",
     )
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
-        return {"status": "ok", "service": "parcel-proof-svc"}
+        return {"status": "ok", "service": svc_name}
 
     @app.get("/metrics", response_class=PlainTextResponse)
     def metrics() -> str:
-        return "# TYPE http_requests_total counter\nhttp_requests_total{service=\"parcel-proof-svc\"} 15\n"
+        return f'# TYPE http_requests_total counter\nhttp_requests_total{{service="{svc_name}"}} 12\n'
 
     @app.post(
-        "/v1/parcels/proof",
+        f"{prefix}/proof",
         response_model=DeliveryProofResponse,
-        summary="Record digital proof of parcel delivery",
-        operation_id="recordDeliveryProof",
+        summary="Submit delivery signature proof",
+        operation_id="submitDeliveryProof",
     )
-    def record_proof(req: DeliveryProofRequest) -> DeliveryProofResponse:
-        fault = get_service_fault("parcel-proof-svc")
+    def submit_proof(req: DeliveryProofRequest) -> DeliveryProofResponse:
+        fault = get_service_fault(svc_name)
         if fault == "500":
-            raise HTTPException(status_code=500, detail="Injected delivery proof write error")
+            raise HTTPException(status_code=500, detail="Injected delivery proof signature verification error")
         return DeliveryProofResponse(
             parcel_id=req.parcel_id,
             verified=True,
@@ -297,7 +301,7 @@ def create_proof_app() -> FastAPI:
         )
 
     @app.get(
-        "/v1/parcels/proofs/{proof_id}",
+        f"{prefix}/proofs/{{proof_id}}",
         summary="Get delivery proof signature",
         operation_id="getDeliveryProof",
     )
@@ -363,13 +367,18 @@ class RunningService:
             self._thread.join(timeout=2.0)
 
 
-def start_parcel_stack() -> dict[str, RunningService]:
+def start_parcel_stack(*, suffix: str = "") -> dict[str, RunningService]:
     """Start all 4 parcel logistics services on free ephemeral ports."""
+    intake_name = f"svc-pkg-intake-{suffix}" if suffix else "parcel-intake-svc"
+    route_name = f"svc-pkg-route-{suffix}" if suffix else "parcel-route-svc"
+    dispatch_name = f"svc-pkg-dispatch-{suffix}" if suffix else "parcel-dispatch-svc"
+    proof_name = f"svc-pkg-proof-{suffix}" if suffix else "parcel-proof-svc"
+
     services = {
-        "parcel-intake-svc": RunningService("parcel-intake-svc", create_intake_app(), find_free_port()),
-        "parcel-route-svc": RunningService("parcel-route-svc", create_route_app(), find_free_port()),
-        "parcel-dispatch-svc": RunningService("parcel-dispatch-svc", create_dispatch_app(), find_free_port()),
-        "parcel-proof-svc": RunningService("parcel-proof-svc", create_proof_app(), find_free_port()),
+        intake_name: RunningService(intake_name, create_intake_app(suffix=suffix), find_free_port()),
+        route_name: RunningService(route_name, create_route_app(suffix=suffix), find_free_port()),
+        dispatch_name: RunningService(dispatch_name, create_dispatch_app(suffix=suffix), find_free_port()),
+        proof_name: RunningService(proof_name, create_proof_app(suffix=suffix), find_free_port()),
     }
     for svc in services.values():
         svc.start()
@@ -393,6 +402,8 @@ def stop_parcel_stack(services: dict[str, RunningService]) -> None:
 
 def build_parcel_otlp_spans(
     parcel_id: str,
+    *,
+    suffix: str = "",
     intake_port: int,
     route_port: int,
     dispatch_port: int,
@@ -406,12 +417,19 @@ def build_parcel_otlp_spans(
     span_dispatch_id = uuid.uuid4().hex[:16]
     span_proof_id = uuid.uuid4().hex[:16]
 
+    intake_name = f"svc-pkg-intake-{suffix}" if suffix else "parcel-intake-svc"
+    route_name = f"svc-pkg-route-{suffix}" if suffix else "parcel-route-svc"
+    dispatch_name = f"svc-pkg-dispatch-{suffix}" if suffix else "parcel-dispatch-svc"
+    proof_name = f"svc-pkg-proof-{suffix}" if suffix else "parcel-proof-svc"
+
+    prefix = f"/v1/packages-{suffix}" if suffix else "/v1/parcels"
+
     return {
         "resourceSpans": [
             {
                 "resource": {
                     "attributes": [
-                        {"key": "service.name", "value": {"stringValue": "parcel-intake-svc"}}
+                        {"key": "service.name", "value": {"stringValue": intake_name}}
                     ]
                 },
                 "scopeSpans": [
@@ -420,12 +438,12 @@ def build_parcel_otlp_spans(
                             {
                                 "traceId": trace_id,
                                 "spanId": span_intake_id,
-                                "name": "POST /v1/parcels/intake",
+                                "name": f"POST {prefix}/intake",
                                 "startTimeUnixNano": str(now_ns),
                                 "endTimeUnixNano": str(now_ns + 50_000_000),
                                 "attributes": [
                                     {"key": "http.method", "value": {"stringValue": "POST"}},
-                                    {"key": "http.route", "value": {"stringValue": "/v1/parcels/intake"}},
+                                    {"key": "http.route", "value": {"stringValue": f"{prefix}/intake"}},
                                     {"key": "http.status_code", "value": {"intValue": 200}},
                                     {"key": "parcel.id", "value": {"stringValue": parcel_id}},
                                     {"key": "entity_type", "value": {"stringValue": "parcel"}},
@@ -441,7 +459,7 @@ def build_parcel_otlp_spans(
             {
                 "resource": {
                     "attributes": [
-                        {"key": "service.name", "value": {"stringValue": "parcel-route-svc"}}
+                        {"key": "service.name", "value": {"stringValue": route_name}}
                     ]
                 },
                 "scopeSpans": [
@@ -451,13 +469,14 @@ def build_parcel_otlp_spans(
                                 "traceId": trace_id,
                                 "spanId": span_route_id,
                                 "parentSpanId": span_intake_id,
-                                "name": "POST /v1/parcels/route",
-                                "startTimeUnixNano": str(now_ns + 60_000_000),
-                                "endTimeUnixNano": str(now_ns + 100_000_000),
+                                "name": f"POST {prefix}/route",
+                                "startTimeUnixNano": str(now_ns + 55_000_000),
+                                "endTimeUnixNano": str(now_ns + 90_000_000),
                                 "attributes": [
                                     {"key": "http.method", "value": {"stringValue": "POST"}},
-                                    {"key": "http.route", "value": {"stringValue": "/v1/parcels/route"}},
+                                    {"key": "http.route", "value": {"stringValue": f"{prefix}/route"}},
                                     {"key": "http.status_code", "value": {"intValue": 200}},
+                                    {"key": "parcel.id", "value": {"stringValue": parcel_id}},
                                     {"key": "entity_type", "value": {"stringValue": "parcel"}},
                                     {"key": "entity_id", "value": {"stringValue": parcel_id}},
                                     {"key": "state_from", "value": {"stringValue": "INTAKEN"}},
@@ -471,7 +490,7 @@ def build_parcel_otlp_spans(
             {
                 "resource": {
                     "attributes": [
-                        {"key": "service.name", "value": {"stringValue": "parcel-dispatch-svc"}}
+                        {"key": "service.name", "value": {"stringValue": dispatch_name}}
                     ]
                 },
                 "scopeSpans": [
@@ -481,13 +500,14 @@ def build_parcel_otlp_spans(
                                 "traceId": trace_id,
                                 "spanId": span_dispatch_id,
                                 "parentSpanId": span_route_id,
-                                "name": "POST /v1/parcels/dispatch",
-                                "startTimeUnixNano": str(now_ns + 110_000_000),
+                                "name": f"POST {prefix}/dispatch",
+                                "startTimeUnixNano": str(now_ns + 95_000_000),
                                 "endTimeUnixNano": str(now_ns + 140_000_000),
                                 "attributes": [
                                     {"key": "http.method", "value": {"stringValue": "POST"}},
-                                    {"key": "http.route", "value": {"stringValue": "/v1/parcels/dispatch"}},
+                                    {"key": "http.route", "value": {"stringValue": f"{prefix}/dispatch"}},
                                     {"key": "http.status_code", "value": {"intValue": 200}},
+                                    {"key": "parcel.id", "value": {"stringValue": parcel_id}},
                                     {"key": "entity_type", "value": {"stringValue": "parcel"}},
                                     {"key": "entity_id", "value": {"stringValue": parcel_id}},
                                     {"key": "state_from", "value": {"stringValue": "ROUTED"}},
@@ -501,7 +521,7 @@ def build_parcel_otlp_spans(
             {
                 "resource": {
                     "attributes": [
-                        {"key": "service.name", "value": {"stringValue": "parcel-proof-svc"}}
+                        {"key": "service.name", "value": {"stringValue": proof_name}}
                     ]
                 },
                 "scopeSpans": [
@@ -511,13 +531,14 @@ def build_parcel_otlp_spans(
                                 "traceId": trace_id,
                                 "spanId": span_proof_id,
                                 "parentSpanId": span_dispatch_id,
-                                "name": "POST /v1/parcels/proof",
-                                "startTimeUnixNano": str(now_ns + 150_000_000),
+                                "name": f"POST {prefix}/proof",
+                                "startTimeUnixNano": str(now_ns + 145_000_000),
                                 "endTimeUnixNano": str(now_ns + 180_000_000),
                                 "attributes": [
                                     {"key": "http.method", "value": {"stringValue": "POST"}},
-                                    {"key": "http.route", "value": {"stringValue": "/v1/parcels/proof"}},
+                                    {"key": "http.route", "value": {"stringValue": f"{prefix}/proof"}},
                                     {"key": "http.status_code", "value": {"intValue": 200}},
+                                    {"key": "parcel.id", "value": {"stringValue": parcel_id}},
                                     {"key": "entity_type", "value": {"stringValue": "parcel"}},
                                     {"key": "entity_id", "value": {"stringValue": parcel_id}},
                                     {"key": "state_from", "value": {"stringValue": "DISPATCHED"}},

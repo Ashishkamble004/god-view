@@ -25,7 +25,6 @@ TERMINAL_JOURNEY_STATUSES: frozenset[str] = frozenset(
         "FAILED",
         "CANCELLED",
         "REJECTED",
-        "DISBURSED",
     }
 )
 
@@ -93,7 +92,7 @@ def classify_journey_conformance(
 
     # If marked terminal/complete, all required steps through the final step must have been executed
     if (
-        final_status in ("COMPLETED", "RESOLVED", "SUCCESS", "DISBURSED")
+        final_status in ("COMPLETED", "RESOLVED", "SUCCESS")
         and effective_order
         and len(known_indices) < len(effective_order)
     ):

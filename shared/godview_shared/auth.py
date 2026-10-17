@@ -164,16 +164,16 @@ class AuthService:
         else:
             token = request_or_token
 
-        # In hermetic mode, allow test principal headers
-        if self.settings.env_mode == "hermetic":
+        # In hermetic and local modes, allow test principal headers
+        if self.settings.env_mode in ("hermetic", "local"):
             if test_principal_hdr:
                 try:
                     data = json.loads(test_principal_hdr)
                     return Principal(
                         email=data.get("email", "operator@hermetic.test"),
                         subject=data.get("sub", "sub-hermetic"),
-                        issuer="hermetic",
-                        audience="hermetic",
+                        issuer=self.settings.env_mode,
+                        audience=self.settings.env_mode,
                         claims=data,
                         is_operator=True,
                     )
@@ -181,8 +181,8 @@ class AuthService:
                     return Principal(
                         email=test_principal_hdr,
                         subject="sub-hermetic",
-                        issuer="hermetic",
-                        audience="hermetic",
+                        issuer=self.settings.env_mode,
+                        audience=self.settings.env_mode,
                         is_operator=True,
                     )
             if legacy_email_hdr:
@@ -190,23 +190,23 @@ class AuthService:
                 return Principal(
                     email=clean_email,
                     subject=f"sub-{clean_email}",
-                    issuer="hermetic",
-                    audience="hermetic",
+                    issuer=self.settings.env_mode,
+                    audience=self.settings.env_mode,
                     is_operator=True,
                 )
             if token and token.startswith("hermetic-"):
                 return Principal(
                     email="operator@local.dev",
                     subject="sub-operator-local",
-                    issuer="hermetic",
-                    audience="hermetic",
+                    issuer=self.settings.env_mode,
+                    audience=self.settings.env_mode,
                     is_operator=True,
                 )
             return Principal(
                 email="operator@hermetic.test",
                 subject="sub-operator-hermetic",
-                issuer="hermetic",
-                audience="hermetic",
+                issuer=self.settings.env_mode,
+                audience=self.settings.env_mode,
                 is_operator=True,
             )
 
@@ -301,24 +301,30 @@ class AuthService:
             or os.environ.get("SERVICE_URL")
         )
 
-        if self.settings.env_mode == "hermetic":
+        if self.settings.env_mode in ("hermetic", "local"):
             if test_principal_hdr:
                 return Principal(
                     email=test_principal_hdr,
                     subject="sub-service-test",
-                    issuer="hermetic",
-                    audience=effective_audience or "hermetic",
+                    issuer=self.settings.env_mode,
+                    audience=effective_audience or self.settings.env_mode,
                     is_service=True,
                 )
-            if token and token.startswith("hermetic-"):
+            if token and (token.startswith("hermetic-") or token.startswith("local-")):
                 return Principal(
-                    email="godview-sense-sa@hermetic.iam.gserviceaccount.com",
-                    subject="sub-service-hermetic",
-                    issuer="hermetic",
-                    audience=effective_audience or "hermetic",
+                    email=f"godview-sense-sa@{self.settings.env_mode}.iam.gserviceaccount.com",
+                    subject=f"sub-service-{self.settings.env_mode}",
+                    issuer=self.settings.env_mode,
+                    audience=effective_audience or self.settings.env_mode,
                     is_service=True,
                 )
-            return None
+            return Principal(
+                email=f"godview-sense-sa@{self.settings.env_mode}.iam.gserviceaccount.com",
+                subject=f"sub-service-{self.settings.env_mode}",
+                issuer=self.settings.env_mode,
+                audience=effective_audience or self.settings.env_mode,
+                is_service=True,
+            )
 
         if not token:
             return None

@@ -12,4 +12,4 @@ This directory contains the unknown, non-tenant test environment for God-View v5
   5. `parcel-db`: PostgreSQL datastore tracking manifests, routes, dispatches, and delivery proofs.
 - **Contracts**: OpenAPI 3.0 specs served at `/openapi.json` for all microservices.
 - **Telemetry**: OTLP/HTTP traces and Prometheus metrics endpoints.
-- **Neutrality**: Zero lending, banking, or vehicle terms.
+- **Neutrality**: Zero non-logistics domain knowledge.

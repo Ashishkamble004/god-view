@@ -285,7 +285,8 @@ describe('God-View Cockpit (URL 3)', () => {
       http.get('/api/v1/approvals', unavailable),
       http.get('/api/v1/changes', unavailable),
       http.get('/api/v1/cost', unavailable),
-      http.get('/api/v1/chaos/drills', unavailable)
+      http.get('/api/v1/chaos/drills', unavailable),
+      http.get('/api/v1/topology', unavailable)
     );
 
     render(<App />);

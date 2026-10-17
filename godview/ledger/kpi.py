@@ -26,7 +26,7 @@ KPI_SQL_TEMPLATES: dict[str, str] = {
     "completion_rate": """
 WITH current_win AS (
   SELECT
-    SAFE_DIVIDE(COUNTIF(state_to IN ('COMPLETED', 'RESOLVED', 'SUCCESS', 'OK')), COUNT(*)) AS val,
+    SAFE_DIVIDE(COUNTIF(state_to IN {success_states}), COUNT(*)) AS val,
     COUNT(*) AS sample_n
   FROM `{dataset}.events`
   WHERE COALESCE(source, 'otel') != 'probe'
@@ -35,7 +35,7 @@ WITH current_win AS (
 baseline_hourly AS (
   SELECT
     DATE(event_time) AS d,
-    SAFE_DIVIDE(COUNTIF(state_to IN ('COMPLETED', 'RESOLVED', 'SUCCESS', 'OK')), COUNT(*)) AS day_val
+    SAFE_DIVIDE(COUNTIF(state_to IN {success_states}), COUNT(*)) AS day_val
   FROM `{dataset}.events`
   WHERE COALESCE(source, 'otel') != 'probe'
     AND event_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {baseline_days} DAY)
@@ -64,7 +64,7 @@ CROSS JOIN baseline_stats AS b
 WITH current_win AS (
   SELECT
     SAFE_DIVIDE(
-      COUNT(DISTINCT IF(state_to IN ('COMPLETED', 'RESOLVED', 'SUCCESS'), journey_id, NULL)),
+      COUNT(DISTINCT IF(state_to IN {success_states}, journey_id, NULL)),
       COUNT(DISTINCT journey_id)
     ) AS val,
     COUNT(DISTINCT journey_id) AS sample_n
@@ -76,7 +76,7 @@ baseline_hourly AS (
   SELECT
     DATE(event_time) AS d,
     SAFE_DIVIDE(
-      COUNT(DISTINCT IF(state_to IN ('COMPLETED', 'RESOLVED', 'SUCCESS'), journey_id, NULL)),
+      COUNT(DISTINCT IF(state_to IN {success_states}, journey_id, NULL)),
       COUNT(DISTINCT journey_id)
     ) AS day_val
   FROM `{dataset}.events`
@@ -87,7 +87,10 @@ baseline_hourly AS (
   GROUP BY d
 ),
 baseline_stats AS (
-  SELECT AVG(day_val) AS mean_val, STDDEV_POP(day_val) AS std_val FROM baseline_hourly
+  SELECT
+    AVG(day_val) AS mean_val,
+    STDDEV_POP(day_val) AS std_val
+  FROM baseline_hourly
 )
 SELECT
   'step_conversion' AS kpi,
@@ -215,12 +218,23 @@ def build_kpi_rollup_sql(
     dataset: str = "godview_ledger",
     baseline_days: int = DEFAULT_SENTINEL_BASELINE_WINDOW_DAYS,
     custom_template: str | None = None,
+    success_states: Sequence[str] | None = None,
 ) -> str:
     """Return the BigQuery Standard SQL query for a given KPI with same-hour baseline."""
+    states_tuple = tuple(str(s).upper() for s in (success_states or ("COMPLETED", "RESOLVED", "SUCCESS", "OK")))
+    states_clause = (
+        f"({', '.join(repr(s) for s in states_tuple)})"
+        if len(states_tuple) > 1
+        else f"('{states_tuple[0]}')" if states_tuple else "('COMPLETED')"
+    )
     if custom_template:
-        return custom_template.strip().format(dataset=dataset, baseline_days=baseline_days, kpi=kpi)
+        return custom_template.strip().format(
+            dataset=dataset, baseline_days=baseline_days, kpi=kpi, success_states=states_clause
+        )
     if kpi in KPI_SQL_TEMPLATES:
-        return KPI_SQL_TEMPLATES[kpi].strip().format(dataset=dataset, baseline_days=baseline_days)
+        return KPI_SQL_TEMPLATES[kpi].strip().format(
+            dataset=dataset, baseline_days=baseline_days, success_states=states_clause
+        )
     # Generic fallback SQL template
     return f"""
 WITH current_win AS (
@@ -287,19 +301,22 @@ def _compute_kpi_from_events(
     events: Sequence[dict[str, Any]],
     *,
     window_hours: float = 1.0,
+    success_states: Sequence[str] | None = None,
 ) -> tuple[float, int]:
     """Compute a single KPI's observed value and sample_n from a slice of non-probe events."""
     if not events:
         return 0.0, 0
     kpi_name = kpi.lower() if isinstance(kpi, str) else str(kpi)
     n = len(events)
+    valid_success = set(
+        str(s).upper() for s in (success_states or ("COMPLETED", "RESOLVED", "SUCCESS", "OK"))
+    )
 
-    if kpi_name in ("completion_rate", "approval_rate") or kpi_name.endswith("_rate"):
+    if kpi_name == "completion_rate" or kpi_name.endswith("_rate"):
         completed = [
             e
             for e in events
-            if str(e.get("state_to") or e.get("status_to") or e.get("decision") or "").upper()
-            in ("COMPLETED", "RESOLVED", "SUCCESS", "APPROVED", "OK")
+            if str(e.get("state_to") or e.get("status_to") or "").upper() in valid_success
         ]
         return len(completed) / n, n
 
@@ -309,8 +326,7 @@ def _compute_kpi_from_events(
             e.get("journey_id")
             for e in events
             if e.get("journey_id")
-            and str(e.get("state_to") or e.get("status_to") or "").upper()
-            in ("COMPLETED", "RESOLVED", "SUCCESS", "DISBURSED")
+            and str(e.get("state_to") or e.get("status_to") or "").upper() in valid_success
         }
         return (len(completed_j) / len(total_j)) if total_j else 0.0, len(total_j)
 
@@ -326,7 +342,7 @@ def _compute_kpi_from_events(
         std_d = math.sqrt(sum((x - mean_d) ** 2 for x in durations) / len(durations))
         return std_d, len(durations)
 
-    if kpi_name.endswith("_per_hour") or kpi_name in ("throughput_per_hour", "rupees_per_hour"):
+    if kpi_name.endswith("_per_hour") or kpi_name == "throughput_per_hour":
         scale = 1.0 / max(window_hours, 1e-6)
         return float(n) * scale, n
 

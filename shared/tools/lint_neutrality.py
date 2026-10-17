@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Strict Environment Neutrality Linter.
 
-Scans `godview/` and `shared/` for hardcoded tenant service names, domain terms,
-environment project IDs, buckets, hostnames, ports, and finance/lending vocabulary.
+Scans target trees for hardcoded tenant service names, domain terms,
+environment project IDs, buckets, hostnames, ports, IP prefixes, and finance/lending stems.
 
 Zero allowlist. Returns 0 hits when codebase is fully neutral.
 """
@@ -13,37 +13,54 @@ import re
 import sys
 from pathlib import Path
 
-# Split token parts so this file never triggers a raw string search
-_BANNED_FINANCE_LENDING_PARTS: tuple[tuple[str, str], ...] = (
+# Word stems for finance/lending domain concepts.
+# Split into parts so this script source does not match raw substrings.
+_BANNED_STEMS_PARTS: tuple[tuple[str, str], ...] = (
     ("lo", "an"),
-    ("lend", "ing"),
-    ("borrow", "er"),
-    ("lend", "er"),
+    ("disb", "urs"),
+    ("rup", "ee"),
+    ("le", "nd"),
+    ("borr", "ow"),
+    ("ky", "c"),
+    ("under", "writ"),
+    ("ins", "ur"),
     ("sanct", "ion"),
-    ("under", "writing"),
-    ("disburse", "ment"),
+    ("vehic", "le"),
     ("cib", "il"),
     ("fo", "ir"),
-    ("em", "i"),
-    ("rup", "ee"),
-    ("in", "r"),
-    ("ky", "c"),
-    ("insur", "ance"),
 )
 
-_BANNED_ENVIRONMENT_PARTS: tuple[tuple[str, str], ...] = (
+# Acronyms where prefix/suffix boundary is needed to avoid false positives (e.g. emit, emitter)
+_BANNED_ACRONYMS_PARTS: tuple[tuple[str, str], ...] = (
+    ("em", "i"),
+    ("in", "r"),
+)
+
+# Known environment identifiers, tenant services, IP prefixes, and infrastructure identifiers
+_BANNED_ENV_IDENTIFIERS_PARTS: tuple[tuple[str, str], ...] = (
     ("cym", "bal"),
     ("general", "-ak"),
     ("ak-", "demos"),
     ("76900298", "5772"),
     ("altostrat", ".com"),
+    ("godview", "_lms"),
     ("god-view-edge-", "policy"),
+    ("loan-orchestrator-", "api"),
+    ("customer-loan-portal-", "web"),
+    ("vehicle-fleet-catalog-", "service"),
+    ("underwriting-los-", "svc"),
+    ("motor-insurance-", "svc"),
+    ("core-banking-cibil-", "vm"),
+    ("10.", "10."),
+    ("10.", "128."),
+    ("34.", "120."),
     ("80", "85"),
 )
 
-BANNED_TERMS: tuple[str, ...] = tuple(
-    a + b for a, b in (_BANNED_FINANCE_LENDING_PARTS + _BANNED_ENVIRONMENT_PARTS)
-)
+BANNED_STEMS: tuple[str, ...] = tuple(a + b for a, b in _BANNED_STEMS_PARTS)
+BANNED_ACRONYMS: tuple[str, ...] = tuple(a + b for a, b in _BANNED_ACRONYMS_PARTS)
+BANNED_ENV_IDENTIFIERS: tuple[str, ...] = tuple(a + b for a, b in _BANNED_ENV_IDENTIFIERS_PARTS)
+BANNED_TERMS: tuple[str, ...] = BANNED_STEMS + BANNED_ACRONYMS + BANNED_ENV_IDENTIFIERS
 
 _EXCLUDED_DIR_NAMES: frozenset[str] = frozenset(
     {
@@ -58,20 +75,21 @@ _EXCLUDED_DIR_NAMES: frozenset[str] = frozenset(
     }
 )
 
-_EXCLUDED_FILE_NAMES: frozenset[str] = frozenset(
-    {
-        "lint_neutrality.py",
-        "lint_brands.py",
-        "check_neutrality.py",
-    }
-)
 
-
-def _compile_pattern() -> re.Pattern[str]:
+def compile_pattern() -> re.Pattern[str]:
     patterns: list[str] = []
-    for term in BANNED_TERMS:
-        # Word boundary style check: bounded by non-alphanumeric characters
-        patterns.append(rf"(?<![a-zA-Z0-9]){re.escape(term)}(?![a-zA-Z0-9])")
+    # Stems: preceded by word boundary / non-alphanumeric, matched as a prefix of inflected forms
+    for stem in BANNED_STEMS:
+        patterns.append(rf"(?<![a-zA-Z0-9]){re.escape(stem)}")
+
+    # Acronyms: bounded so they match EMI, emi, emi_amount, emis, but not emit or gemini
+    for acr in BANNED_ACRONYMS:
+        patterns.append(rf"(?<![a-zA-Z0-9]){re.escape(acr)}(?=[_sS\b]|\Z)")
+
+    # Environment identifiers
+    for ident in BANNED_ENV_IDENTIFIERS:
+        patterns.append(re.escape(ident))
+
     return re.compile("|".join(patterns), re.IGNORECASE)
 
 
@@ -80,7 +98,7 @@ def scan_neutrality(
     repo_root: Path | None = None,
 ) -> list[str]:
     """Strictly scan target paths for hardcoded tenant/environment terms. Zero allowlist."""
-    pattern = _compile_pattern()
+    pattern = compile_pattern()
     self_path = Path(__file__).resolve()
     violations: list[str] = []
 
@@ -94,7 +112,8 @@ def scan_neutrality(
             else [p for p in target_resolved.rglob("*") if p.is_file()]
         )
         for file_path in sorted(files):
-            if file_path == self_path or file_path.name in _EXCLUDED_FILE_NAMES:
+            # Only self-exemption allowed: this linter script itself
+            if file_path == self_path:
                 continue
             if any(part in _EXCLUDED_DIR_NAMES for part in file_path.parts):
                 continue

@@ -251,6 +251,7 @@ export function App() {
           changes: settled.partial.changes ?? prev?.changes ?? [],
           cost: settled.partial.cost ?? prev?.cost ?? FALLBACK_COST,
           drills: settled.partial.drills ?? prev?.drills ?? [],
+          topology: settled.partial.topology ?? prev?.topology ?? null,
         };
         return merged;
       });
