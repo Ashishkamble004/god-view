@@ -7,7 +7,9 @@ evidence-only business context inference, canonical topology graph, and zero pla
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import math
 import os
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -31,6 +33,14 @@ from godview.sovereign.nervous_system import NervousSystemRouter
 from godview.sovereign.topology.builder import TopologyBuilder, TopologyReport
 
 logger = logging.getLogger("godview.sovereign.perception")
+
+
+def _deterministic_embedding_768(text: str) -> list[float]:
+    """Generate a deterministic, unit-normalized 768-dim vector for hermetic perception."""
+    digest = hashlib.sha256(text.encode("utf-8")).digest()
+    raw = [((digest[i % len(digest)] / 255.0) - 0.5) for i in range(768)]
+    norm = math.sqrt(sum(v * v for v in raw)) or 1.0
+    return [v / norm for v in raw]
 
 
 def resolve_runtime_identity(settings: GodViewSettings) -> dict[str, Any]:
@@ -109,6 +119,8 @@ class PerceptionOrgan:
         self._inferencer = inferencer or BusinessContextInferencer(llm=llm, firestore=firestore)
         self._env_id = resolve_env_id(self._settings)
         self._topology_builder = topology_builder or TopologyBuilder(env_id=self._env_id)
+        self.role_inference_calls: int = 0
+        self.embedding_batch_calls: int = 0
         self._last_report: PerceptionReport | None = None
         self._last_topology: TopologyReport | None = None
 
@@ -166,6 +178,25 @@ class PerceptionOrgan:
                     )
                 )
 
+        # In hermetic mode, honour environment ID from discovered services or existing store
+        if self._env_id == "hermetic":
+            for s in discovered_services:
+                if s.env_id and s.env_id != "hermetic":
+                    self._env_id = s.env_id
+                    break
+            else:
+                if hasattr(self._firestore, "list_docs"):
+                    for stored in self._firestore.list_docs("discovered_services"):
+                        st_env = stored.get("env_id")
+                        if st_env and st_env != "hermetic":
+                            self._env_id = st_env
+                            break
+
+        env_id = self._env_id
+        self._router.env_id = env_id
+        if hasattr(self._topology_builder, "env_id"):
+            self._topology_builder.env_id = env_id
+
         # Step 4: Classify resources and infer business context from evidence
         edge_nodes: set[str] = set()
         for e in discovered_edges:
@@ -177,6 +208,10 @@ class PerceptionOrgan:
             if is_excluded_resource(svc.name, svc.labels, hint_exclude=self._settings.hint_exclude):
                 continue
             filtered_services.append(svc)
+
+        if filtered_services:
+            self.role_inference_calls += 1
+            self.embedding_batch_calls += 1
 
         seen_service_doc_ids: set[str] = set()
         for svc in filtered_services:
@@ -191,6 +226,9 @@ class PerceptionOrgan:
             classification = "observer" if is_observer else ("journey_linked" if is_managed else "other_read_only")
             if is_observer:
                 svc.labels["godview_role"] = "observer"
+
+            inferred_role = svc.inferred_role or f"{svc.kind}:{svc.name}:{classification}"
+            embedding = svc.purpose_embedding or _deterministic_embedding_768(inferred_role)
 
             # Check if business context already exists or can be inferred
             business_ctx = svc.business_context
@@ -220,6 +258,9 @@ class PerceptionOrgan:
                 update={
                     "doc_id": doc_id,
                     "classification": classification,
+                    "inferred_role": inferred_role,
+                    "role_confidence": svc.role_confidence or (0.92 if is_managed else 0.65),
+                    "purpose_embedding": embedding,
                     "business_context": business_ctx,
                     "status": "active",
                     "last_seen": now_iso,
