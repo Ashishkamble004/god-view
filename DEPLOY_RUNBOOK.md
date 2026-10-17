@@ -142,9 +142,10 @@ terraform -chdir=infra/terraform/platform output -json > infra/terraform/platfor
 
 ### Step 1c: Enable BigQuery Deletion Protection
 *(Run immediately after table recreation in Step 1a to safeguard ledger data.)*
-Set `deletion_protection = true` on `google_bigquery_table` resources in `infra/terraform/platform/modules/03-data/main.tf` (`events`, `state_transitions`, `journeys`, `kpi_rollups`), then apply:
+Apply deletion protection on the 4 ledger tables using `-var="ledger_table_deletion_protection=true"`:
 ```bash
 terraform -chdir=infra/terraform/platform apply -input=false \
+  -var="ledger_table_deletion_protection=true" \
   -target=module.data.google_bigquery_table.events \
   -target=module.data.google_bigquery_table.state_transitions \
   -target=module.data.google_bigquery_table.journeys \

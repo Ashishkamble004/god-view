@@ -329,7 +329,7 @@ resource "google_bigquery_table" "events" {
   project             = var.project_id
   dataset_id          = google_bigquery_dataset.godview_ledger.dataset_id
   table_id            = "events"
-  deletion_protection = false
+  deletion_protection = var.ledger_table_deletion_protection
   labels              = local.godview_labels
   # Resolves godview/ledger/schemas/events.json once delivered by ledger-invariants, with module-local fallback
   schema     = fileexists("${local.repo_schema_dir}/events.json") ? file("${local.repo_schema_dir}/events.json") : file("${local.local_schema_dir}/events.json")
@@ -345,7 +345,7 @@ resource "google_bigquery_table" "state_transitions" {
   project             = var.project_id
   dataset_id          = google_bigquery_dataset.godview_ledger.dataset_id
   table_id            = "state_transitions"
-  deletion_protection = false
+  deletion_protection = var.ledger_table_deletion_protection
   labels              = local.godview_labels
   schema              = fileexists("${local.repo_schema_dir}/state_transitions.json") ? file("${local.repo_schema_dir}/state_transitions.json") : file("${local.local_schema_dir}/state_transitions.json")
   clustering          = ["entity", "journey_id", "status_to"]
@@ -360,7 +360,7 @@ resource "google_bigquery_table" "journeys" {
   project             = var.project_id
   dataset_id          = google_bigquery_dataset.godview_ledger.dataset_id
   table_id            = "journeys"
-  deletion_protection = false
+  deletion_protection = var.ledger_table_deletion_protection
   labels              = local.godview_labels
   schema              = fileexists("${local.repo_schema_dir}/journeys.json") ? file("${local.repo_schema_dir}/journeys.json") : file("${local.local_schema_dir}/journeys.json")
   clustering          = ["journey_name", "conformance", "final_status"]
@@ -375,7 +375,7 @@ resource "google_bigquery_table" "kpi_rollups" {
   project             = var.project_id
   dataset_id          = google_bigquery_dataset.godview_ledger.dataset_id
   table_id            = "kpi_rollups"
-  deletion_protection = false
+  deletion_protection = var.ledger_table_deletion_protection
   labels              = local.godview_labels
   schema              = fileexists("${local.repo_schema_dir}/kpi_rollups.json") ? file("${local.repo_schema_dir}/kpi_rollups.json") : file("${local.local_schema_dir}/kpi_rollups.json")
   clustering          = ["journey_name", "kpi"]

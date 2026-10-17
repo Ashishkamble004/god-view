@@ -41,3 +41,9 @@ variable "sense_sa_email" {
 variable "runtime_sa_email" {
   type = string
 }
+
+variable "ledger_table_deletion_protection" {
+  description = "Enable deletion protection on BigQuery ledger tables"
+  type        = bool
+  default     = false
+}

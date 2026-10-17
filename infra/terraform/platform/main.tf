@@ -27,18 +27,19 @@ module "network_edge" {
 }
 
 module "data" {
-  source                = "./modules/03-data"
-  project_id            = var.project_id
-  region                = var.region
-  network_id            = module.network_edge.network_id
-  psa_connection_id     = module.network_edge.psa_connection_id
-  sql_tier              = var.sql_tier
-  sql_disk_gb           = var.sql_disk_gb
-  sql_availability_type = var.sql_availability_type
-  hibernate             = var.hibernate
-  enable_datastream     = var.enable_datastream
-  sense_sa_email        = module.project_iam.sense_sa_email
-  runtime_sa_email      = module.project_iam.runtime_sa_email
+  source                           = "./modules/03-data"
+  project_id                       = var.project_id
+  region                           = var.region
+  network_id                       = module.network_edge.network_id
+  psa_connection_id                = module.network_edge.psa_connection_id
+  sql_tier                         = var.sql_tier
+  sql_disk_gb                      = var.sql_disk_gb
+  sql_availability_type            = var.sql_availability_type
+  hibernate                        = var.hibernate
+  enable_datastream                = var.enable_datastream
+  sense_sa_email                   = module.project_iam.sense_sa_email
+  runtime_sa_email                 = module.project_iam.runtime_sa_email
+  ledger_table_deletion_protection = var.ledger_table_deletion_protection
 }
 
 module "tenant_compute" {

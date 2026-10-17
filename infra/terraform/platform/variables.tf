@@ -130,6 +130,12 @@ variable "traffic_pause_cron" {
   default     = "0 17 * * *"
 }
 
+variable "ledger_table_deletion_protection" {
+  description = "Enable deletion protection on BigQuery ledger tables (Step 1c)"
+  type        = bool
+  default     = false
+}
+
 variable "simulator_tick_cron" {
   description = "Cron schedule for AI customer simulator per-minute tick (09:00-16:59 IST)"
   type        = string
