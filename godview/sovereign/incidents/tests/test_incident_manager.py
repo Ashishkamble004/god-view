@@ -50,10 +50,12 @@ async def test_incident_dedupe_and_lifecycle_auto_close() -> None:
     now = datetime(2026, 10, 17, 12, 0, 0, tzinfo=UTC)
 
     court_notified: list[Any] = []
+    closed_notified: list[Any] = []
 
     class MockHooks:
-        def on_incident(self, inc: Any) -> None:
-            court_notified.append(inc)
+        def __init__(self) -> None:
+            self.on_incident = [lambda inc: court_notified.append(inc)]
+            self.on_incident_closed = [lambda inc: closed_notified.append(inc)]
 
     mgr = IncidentManager(
         firestore=fs,
@@ -103,6 +105,7 @@ async def test_incident_dedupe_and_lifecycle_auto_close() -> None:
     assert closed[0].doc_id == inc1.doc_id
     assert closed[0].outcome == "resolved"
     assert closed[0].closed_at is not None
+    assert len(closed_notified) == 1
 
 
 @pytest.mark.unit

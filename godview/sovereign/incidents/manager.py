@@ -386,6 +386,27 @@ class IncidentManager:
         except Exception:
             pass
 
+    async def _notify_incident_closed(self, inc: IncidentDoc) -> None:
+        """Invoke on_incident_closed hook whether registered as a list or single callable."""
+        if self._hooks is None or not hasattr(self._hooks, "on_incident_closed"):
+            return
+        hook_target = self._hooks.on_incident_closed
+        if isinstance(hook_target, list):
+            for hook_fn in hook_target:
+                try:
+                    res = hook_fn(inc)
+                    if hasattr(res, "__await__"):
+                        await res
+                except Exception:
+                    pass
+        elif callable(hook_target):
+            try:
+                res = hook_target(inc)
+                if hasattr(res, "__await__"):
+                    await res
+            except Exception:
+                pass
+
     async def _notify_court(self, incident: IncidentDoc, evp: EvidencePack) -> None:
         """Hand off incident to court via ctx.hooks.on_incident and A2A wake."""
         now_iso = incident.opened_at if isinstance(incident.opened_at, str) else incident.opened_at.isoformat()
@@ -527,15 +548,7 @@ class IncidentManager:
                 del self._active_incidents[k]
                 closed_incidents.append(inc)
                 await self._emit_incident_event("incident.closed", inc)
-
-                # Call ctx.hooks.on_incident_closed if available
-                if self._hooks is not None and hasattr(self._hooks, "on_incident_closed"):
-                    try:
-                        res = self._hooks.on_incident_closed(inc)
-                        if hasattr(res, "__await__"):
-                            await res
-                    except Exception:
-                        pass
+                await self._notify_incident_closed(inc)
 
         return closed_incidents
 
@@ -592,6 +605,7 @@ class IncidentManager:
 
         self._persist_incident(target)
         await self._emit_incident_event("incident.closed", target)
+        await self._notify_incident_closed(target)
         return target
 
     def on_change_event(self, event: Any) -> None:

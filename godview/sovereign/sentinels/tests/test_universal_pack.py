@@ -34,22 +34,22 @@ async def test_compile_universal_sentinels() -> None:
     """Verifies automated sentinel generation across discovered services and edges."""
     services = [
         DiscoveredServiceDoc(
-            name="customer-loan-portal-web",
+            name="customer-portal-web",
             kind="cloud_run",
-            routes=[{"path": "/", "url": "https://cymbal.ak-demos.com"}],
+            routes=[{"path": "/", "url": "https://app.example.com"}],
             env_id="test-env",
             adapter_family="gcp",
-            locator="projects/test/locations/us-central1/services/customer-loan-portal-web",
+            locator="projects/test/locations/us-central1/services/customer-portal-web",
             first_seen="2026-10-17T00:00:00Z",
             last_seen="2026-10-17T12:00:00Z",
         ),
         DiscoveredServiceDoc(
-            name="god-view-edge-policy",
+            name="edge-security-policy",
             kind="security_policy",
             endpoint="",
             env_id="test-env",
             adapter_family="gcp",
-            locator="projects/test/global/securityPolicies/god-view-edge-policy",
+            locator="projects/test/global/securityPolicies/edge-security-policy",
             first_seen="2026-10-17T00:00:00Z",
             last_seen="2026-10-17T12:00:00Z",
         ),
@@ -85,7 +85,7 @@ async def test_t1_lb_requests_denied_by_security_policy_and_negative() -> None:
             "timestamp": "2026-10-17T12:05:01Z",
             "httpRequest": {
                 "requestMethod": "POST",
-                "requestUrl": "https://api.cymbal.ak-demos.com/v1/loans/apply",
+                "requestUrl": "https://api.example.com/v1/orders/apply",
                 "status": 403,
                 "remoteIp": "35.192.10.5",
             },
@@ -93,7 +93,7 @@ async def test_t1_lb_requests_denied_by_security_policy_and_negative() -> None:
                 "statusDetails": "denied_by_security_policy",
                 "requestHeaders": {"content-type": "application/json"},
                 "enforcedSecurityPolicy": {
-                    "name": "god-view-edge-policy",
+                    "name": "edge-security-policy",
                     "priority": 1000,
                     "outcome": "DENY",
                     "preconfiguredExprIds": ["owasp-crs-v030301-id942432-sqli"],
@@ -104,14 +104,14 @@ async def test_t1_lb_requests_denied_by_security_policy_and_negative() -> None:
             "timestamp": "2026-10-17T12:05:05Z",
             "httpRequest": {
                 "requestMethod": "GET",
-                "requestUrl": "https://los.cymbal.ak-demos.com/_gcp_gatekeeper/authenticate?state=xyz",
+                "requestUrl": "https://login.example.com/_gcp_gatekeeper/authenticate?state=xyz",
                 "status": 403,
                 "remoteIp": "35.192.10.5",
             },
             "jsonPayload": {
                 "statusDetails": "denied_by_security_policy",
                 "enforcedSecurityPolicy": {
-                    "name": "god-view-edge-policy",
+                    "name": "edge-security-policy",
                     "priority": 1000,
                     "outcome": "DENY",
                     "preconfiguredExprIds": ["owasp-crs-v030301-id942432-sqli"],
@@ -127,8 +127,8 @@ async def test_t1_lb_requests_denied_by_security_policy_and_negative() -> None:
 
     ctx = EvaluatorContext(invoker=invoker)
     sentinel = build_lb_requests_sentinel(
-        "god-view-edge-policy",
-        host="api.cymbal.ak-demos.com",
+        "edge-security-policy",
+        host="api.example.com",
         path_prefix="/v1",
     )
     evaluator = get_evaluator("lb_requests")
@@ -146,7 +146,7 @@ async def test_t1_lb_requests_denied_by_security_policy_and_negative() -> None:
             "timestamp": "2026-10-17T12:10:00Z",
             "httpRequest": {
                 "requestMethod": "GET",
-                "requestUrl": "https://api.cymbal.ak-demos.com/v1/vehicles",
+                "requestUrl": "https://api.example.com/v1/items",
                 "status": 200,
                 "remoteIp": "35.192.10.5",
             },
@@ -167,7 +167,7 @@ async def test_t2_probe_asset_404_and_negative() -> None:
 
     def probe_handler(args: dict[str, Any]) -> dict[str, Any]:
         url = args.get("url", "")
-        if "/assets/vehicles" in url:
+        if "/assets/images" in url:
             return {"status_code": 404, "latency_ms": 45.0, "error": None}
         if "cdn-assets" in url:
             return {"status_code": 403, "latency_ms": 30.0, "error": None}
@@ -177,7 +177,7 @@ async def test_t2_probe_asset_404_and_negative() -> None:
     ctx = EvaluatorContext(invoker=invoker)
 
     # T2 asset probe
-    snt_asset = build_probe_sentinel("https://cymbal.ak-demos.com/assets/vehicles/car-01.svg")
+    snt_asset = build_probe_sentinel("https://app.example.com/assets/images/logo-01.svg")
     evaluator = get_evaluator("probe")
     res_asset = await evaluator.evaluate(snt_asset, ctx)
     assert res_asset.breached is True
@@ -185,7 +185,7 @@ async def test_t2_probe_asset_404_and_negative() -> None:
     assert res_asset.observed == 1.0
 
     # Negative test: normal 200 probe
-    snt_healthy = build_probe_sentinel("https://cymbal.ak-demos.com/healthz")
+    snt_healthy = build_probe_sentinel("https://app.example.com/healthz")
     res_clean = await evaluator.evaluate(snt_healthy, ctx)
     assert res_clean.breached is False
     assert res_clean.observed == 0.0
@@ -206,7 +206,7 @@ async def test_posture_drift_and_negative() -> None:
     ctx = EvaluatorContext(invoker=invoker)
 
     snt = build_posture_sentinel(
-        "loan-orchestrator-api",
+        "core-orchestrator-api",
         baseline={"ingress": "internal-and-cloud-load-balancing", "invoker_iam_disabled": False},
     )
     evaluator = get_evaluator("posture")
