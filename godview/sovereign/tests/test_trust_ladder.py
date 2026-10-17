@@ -78,7 +78,7 @@ def test_l4_cockpit_owner_whitelist_and_money_comms_caps() -> None:
     gate = TrustGate(firestore=fs, pubsub=ps)
 
     agent_id = "business_line__origination_flow"
-    action = "biz.replay_disbursement"
+    action = "biz.replay_transaction"
 
     gate.promote_to_l1_after_self_check(agent_id, action)
     for _ in range(3):

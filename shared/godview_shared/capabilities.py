@@ -597,13 +597,13 @@ def _build_registry(custom_specs: list[CapabilitySpec] | None = None) -> dict[st
             ),
             # Business workflow remediation capabilities (discovered from x-godview-admin-action)
             CapabilitySpec(
-                capability_id="biz.replay_disbursement",
+                capability_id="biz.replay_transaction",
                 family="http",
                 kind="godview_adapter",
                 mutating=True,
                 min_level=4,
                 money_movement=True,
-                description="Replay stuck disbursement via discovered tenant admin API",
+                description="Replay stuck transaction via discovered tenant admin API",
             ),
             CapabilitySpec(
                 capability_id="biz.reevaluate_application",
