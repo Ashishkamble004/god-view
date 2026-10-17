@@ -354,6 +354,19 @@ def configure_exporters(
     return provider
 
 
+def set_business_attributes(
+    span: trace.Span,
+    **attrs: Any,
+) -> dict[str, Any]:
+    """Attach generic business attributes to an OpenTelemetry span and return them."""
+    applied: dict[str, Any] = {}
+    for key, val in attrs.items():
+        if val is not None:
+            span.set_attribute(key, val)
+            applied[key] = val
+    return applied
+
+
 def set_business_span_attributes(
     span: trace.Span,
     *,
@@ -372,8 +385,9 @@ def set_business_span_attributes(
     entity_id: str | None = None,
     synthetic: bool | None = None,
     extra: Mapping[str, Any] | None = None,
+    **kwargs: Any,
 ) -> dict[str, Any]:
-    """Attach canonical TDD §2.2 business attributes to an OpenTelemetry span and return them."""
+    """Deprecated shim for set_business_attributes mapping legacy tenant fields into generic attributes."""
     mapping: dict[str, Any] = {
         "journey.id": journey_id,
         "customer.id": customer_id,
@@ -390,17 +404,10 @@ def set_business_span_attributes(
         "entity_id": entity_id,
         "synthetic": synthetic,
     }
-    applied: dict[str, Any] = {}
-    for key, val in mapping.items():
-        if val is not None:
-            span.set_attribute(key, val)
-            applied[key] = val
     if extra:
-        for key, val in extra.items():
-            if val is not None:
-                span.set_attribute(key, val)
-                applied[key] = val
-    return applied
+        mapping.update(extra)
+    mapping.update(kwargs)
+    return set_business_attributes(span, **mapping)
 
 
 def inject_baggage_headers(

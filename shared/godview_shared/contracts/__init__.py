@@ -71,13 +71,7 @@ LEDGER_TABLES: tuple[str, ...] = (
 )
 
 LedgerEventSource = Literal["otel", "cdc", "probe"]
-StateTransitionEntity = Literal[
-    "loan_application",
-    "disbursement",
-    "insurance_policy",
-    "credit_line",
-    "kyc_document",
-]
+StateTransitionEntity = str
 JourneyConformance = Literal[
     "CONFORMANT",
     "SKIPPED",
@@ -94,23 +88,32 @@ KpiName = Literal[
     "emi_stddev",
     "disbursement_latency_ms",
     "policy_issue_rate",
-]
+] | str
 
 
 class LedgerEventRow(BaseModel):
     event_id: str
-    event_time: datetime
+    event_time: datetime | str
     env_id: str
-    journey_id: str | None = None
-    trace_id: str | None = None
-    span_id: str | None = None
     service: str
     operation: str
     event_type: str
+    entity_type: str | None = None
+    entity_id: str | None = None
+    state_from: str | None = None
+    state_to: str | None = None
+    attributes: dict[str, Any] = Field(default_factory=dict)
+    numeric_attributes: dict[str, float] = Field(default_factory=dict)
+    currency: str | None = None
+
+    journey_id: str | None = None
+    trace_id: str | None = None
+    span_id: str | None = None
+
+    # Deprecated / legacy shim fields retained for transition cycle:
     customer_id: str | None = None
     loan_id: str | None = None
     entity: str | None = None
-    entity_id: str | None = None
     decision: str | None = None
     foir_pct: Decimal | float | None = None
     cibil_score: int | None = None
@@ -120,23 +123,52 @@ class LedgerEventRow(BaseModel):
     duration_ms: int | None = None
     is_synthetic: bool = False
     source: LedgerEventSource = "otel"
-    attributes: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _shim_generic_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "entity" in data and not data.get("entity_type"):
+                data["entity_type"] = data["entity"]
+            elif "entity_type" in data and not data.get("entity"):
+                data["entity"] = data["entity_type"]
+            if "status_from" in data and not data.get("state_from"):
+                data["state_from"] = data["status_from"]
+            if "status_to" in data and not data.get("state_to"):
+                data["state_to"] = data["status_to"]
+        return data
 
 
 class StateTransitionRow(BaseModel):
     transition_id: str
-    transition_time: datetime
+    transition_time: datetime | str
     env_id: str
-    entity: StateTransitionEntity
+    entity: str
     entity_id: str
     journey_id: str
     status_from: str | None = None
-    status_to: str
+    status_to: str | None = None
+    state_from: str | None = None
+    state_to: str | None = None
     actor_service: str
-    source: Literal["otel", "cdc"] = "otel"
+    source: Literal["otel", "cdc"] | str = "otel"
     dwell_ms: int | None = None
     is_synthetic: bool = False
     attributes: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _shim_state_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "status_from" in data and not data.get("state_from"):
+                data["state_from"] = data["status_from"]
+            elif "state_from" in data and not data.get("status_from"):
+                data["status_from"] = data["state_from"]
+            if "status_to" in data and not data.get("state_to"):
+                data["state_to"] = data["status_to"]
+            elif "state_to" in data and not data.get("status_to"):
+                data["status_to"] = data["state_to"]
+        return data
 
 
 class JourneyStep(BaseModel):
@@ -210,10 +242,22 @@ FIRESTORE_VECTOR_INDEXES: tuple[tuple[str, str], ...] = (
 DiscoveredServiceKind = Literal[
     "cloud_run",
     "gke_workload",
+    "gce_instance",
     "gce_vm",
     "cloud_sql",
+    "lb_frontend",
+    "backend_service",
+    "security_policy",
     "api_gateway",
+    "pubsub_topic",
+    "pubsub_subscription",
+    "gcs_bucket",
     "bucket",
+    "bigquery_dataset",
+    "firestore_db",
+    "secret",
+    "external",
+    "agent",
     "reasoning_engine",
     "other",
 ]
@@ -230,9 +274,15 @@ CourtAgentState = Literal[
     "archived",
 ]
 SentinelClass = Literal[
-    "invariant_sql",
-    "kpi_changepoint",
+    "lb_requests",
+    "posture",
+    "probe",
+    "pubsub_health",
+    "golden_signals",
     "journey_conformance",
+    "kpi_changepoint",
+    "invariant",
+    "invariant_sql",
     "probe_plan",
     "golden_signal_gate",
     "drift_diff",
@@ -244,6 +294,62 @@ InvariantStatus = Literal["proposed", "shadow", "enforced", "retired"]
 InvariantSeverity = Literal["sev1", "sev2", "sev3"]
 InvariantProvenance = Literal["code", "policy", "observed"]
 InvariantDialect = Literal["bigquery", "postgres", "python"]
+
+
+class BusinessContext(BaseModel):
+    role_summary: str = ""
+    domain: str = ""
+    capabilities: list[str] = Field(default_factory=list)
+    upstream: list[str] = Field(default_factory=list)
+    downstream: list[str] = Field(default_factory=list)
+    journeys: list[dict[str, Any]] = Field(default_factory=list)
+    kpis: list[dict[str, Any]] = Field(default_factory=list)
+    invariants: list[dict[str, Any]] = Field(default_factory=list)
+    risk_notes: list[str] = Field(default_factory=list)
+    confidence: float = 0.0
+    evidence: list[dict[str, Any]] = Field(default_factory=list)
+    inferred_by: str = ""
+    inferred_at: datetime | str | None = None
+
+
+class Posture(BaseModel):
+    ingress: str | None = None
+    iap: bool | None = None
+    invoker_iam: bool | None = None
+    waf: str | None = None
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class VerificationCheck(BaseModel):
+    check: str
+    passed: bool
+    evidence: Any = None
+
+
+class ExecutionResult(BaseModel):
+    ok: bool
+    before: Any = None
+    after: Any = None
+    verification: list[VerificationCheck] = Field(default_factory=list)
+    reverted: bool = False
+    revert_error: str | None = None
+    error: str | None = None
+
+
+class ProposedAction(BaseModel):
+    capability_id: str
+    args: dict[str, Any] = Field(default_factory=dict)
+    rationale: str = ""
+    confidence: float = 0.0
+
+
+class Diagnosis(BaseModel):
+    hypothesis: str
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    evidence: list[dict[str, Any]] | dict[str, Any] | list[str] = Field(default_factory=list)
+    proposed_actions: list[ProposedAction | dict[str, Any]] = Field(default_factory=list)
+    root_cause_category: str | None = None
+    citations: list[str] = Field(default_factory=list)
 
 
 def _validate_embedding(vec: list[float] | None) -> list[float] | None:
@@ -272,6 +378,8 @@ class DiscoveredServiceDoc(BaseModel):
     last_seen: datetime | str
     status: Literal["active", "gone"] = "active"
     purpose_embedding: list[float] | None = None
+    business_context: BusinessContext | None = None
+    posture: Posture | None = None
 
     @field_validator("purpose_embedding")
     @classmethod
@@ -279,12 +387,30 @@ class DiscoveredServiceDoc(BaseModel):
         return _validate_embedding(v)
 
 
+DiscoveredEdgeEvidence = Literal[
+    "trace",
+    "code",
+    "config",
+    "k8s",
+    "lb_route",
+    "env_ref",
+    "pubsub_push",
+    "k8s_service",
+    "db_conn",
+    "openapi",
+]
+
+
 class DiscoveredEdgeDoc(BaseModel):
     doc_id: str | None = None
     src: str
     dst: str
-    protocol: str
-    evidence: Literal["trace", "code", "config", "k8s"]
+    protocol: str = "http"
+    evidence: DiscoveredEdgeEvidence | str = "trace"
+    evidence_kind: str | None = None
+    rps: float | None = None
+    error_ratio: float | None = None
+    confidence: float = 0.0
     call_rate_baseline: float = 0.0
     first_seen: datetime | str
     last_seen: datetime | str
@@ -640,7 +766,10 @@ class ConvergenceRecord(BaseModel):
 
 
 class EpisodicIncidentDoc(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     doc_id: str | None = None
+    dedupe_key: str | None = None
     opened_at: datetime | str
     closed_at: datetime | str | None = None
     severity: InvariantSeverity = "sev2"
@@ -654,6 +783,7 @@ class EpisodicIncidentDoc(BaseModel):
     outcome: Literal["resolved", "mitigated", "false_positive", "open"] = "open"
     rupee_impact: Decimal | float | int = 0
     affected_journeys: list[str] = Field(default_factory=list)
+    diagnoses: list[Diagnosis] = Field(default_factory=list)
     convergence: ConvergenceRecord | None = None
     skills_used: list[str] = Field(default_factory=list)
     transcript: list[dict[str, Any]] = Field(default_factory=list)
