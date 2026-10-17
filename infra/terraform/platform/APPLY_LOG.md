@@ -118,13 +118,13 @@
   - **Module `01-project-iam`**:
     - Scoped `godview-sense-sa` project roles strictly to plan §3.8: removed broad `roles/viewer`; added `compute.viewer`, `run.viewer`, `pubsub.viewer`, `iam.securityReviewer`, `apigateway.viewer`, `container.viewer`, `cloudsql.viewer`, `bigquery.metadataViewer`, `secretmanager.viewer` alongside `logging.viewer`, `monitoring.viewer`, `datastore.user`, `bigquery.jobUser`, `cloudasset.viewer`, `aiplatform.user`, `cloudtrace.user`.
     - Scoped `godview-act-sa` project roles strictly to plan §3.8: `roles/compute.securityAdmin`, `roles/run.admin`, `roles/pubsub.editor`, `roles/container.developer` (+ `roles/iam.serviceAccountUser` on `godview-runtime-sa`). Removed unapproved broad roles (`instanceAdmin.v1`, `cloudsql.editor`, `cloudscheduler.admin`, `run.developer`).
-    - Added custom role `godview_hibernate_operator` for `godview-act-sa` (per coordinator decision #47) with minimal permissions for `god-view-hibernate-job` (`compute.instances.{get,start,stop}`, `cloudsql.instances.{get,update}`, `cloudscheduler.jobs.{get,pause,resume,run}`).
+    - Added custom role `godview_hibernate_operator` for `godview-act-sa` (per coordinator decision #47) with minimal permissions for `god-view-hibernate-job` and agent scaling (`compute.instances.{get,start,stop}`, `compute.zoneOperations.get`, `cloudsql.instances.{get,update}`, `cloudscheduler.jobs.{get,pause,resume,run}`, `aiplatform.reasoningEngines.{get,list,update}`).
     - Granted `roles/iam.serviceAccountUser` on `godview-sense-sa` to Reasoning Engine service agent `serviceAccount:service-${var.project_number}@gcp-sa-aiplatform-re.iam.gserviceaccount.com` (engines run as `godview-sense-sa`).
   - **Module `03-data`**:
     - Created Secret Manager secret `godview-pg-readonly-password` and secret version.
     - Granted `roles/secretmanager.secretAccessor` on `godview-pg-readonly-password` to `godview-sense-sa`.
     - Rotated Cloud SQL user password via `random_password.pg_readonly` rotation keeper `v5-secret-manager` and updated `google_sql_user.godview_readonly` with explicit `depends_on` secret version and accessor to eliminate rotation lockout race.
-    - Exported `godview_pg_readonly_password` in `secret_ids` and exported `pg_readonly_secret_version_id`. Removed dead `sql_readonly_password` output.
+    - Exported `godview_pg_readonly_password` in `secret_ids` and exported `pg_readonly_secret_version_id` with `depends_on` on the secretAccessor IAM member. Removed dead `sql_readonly_password` output.
     - BigQuery schema sync: Synced `schemas/events.json` and `schemas/journeys.json` with `godview/ledger/schemas/` per `@neutrality` request (`entity_type`, `state_from`, `state_to`, `numeric_attributes`, `currency`, `total_value`). Recreating empty tables in targeted apply.
   - **Module `05-godview`**:
     - **Uptime check**: Updated `google_monitoring_uptime_check_config.sovereign_health` to probe the direct Sovereign Cloud Run `*.run.app` host with OIDC service agent authentication (`http_check.service_agent_authentication { type = "OIDC_TOKEN" }`), path `/public/healthz`, and `lifecycle { create_before_destroy = true }`.

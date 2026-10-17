@@ -181,12 +181,16 @@ resource "google_project_iam_custom_role" "act_hibernate" {
     "compute.instances.get",
     "compute.instances.start",
     "compute.instances.stop",
+    "compute.zoneOperations.get",
     "cloudsql.instances.get",
     "cloudsql.instances.update",
     "cloudscheduler.jobs.get",
     "cloudscheduler.jobs.pause",
     "cloudscheduler.jobs.resume",
     "cloudscheduler.jobs.run",
+    "aiplatform.reasoningEngines.get",
+    "aiplatform.reasoningEngines.list",
+    "aiplatform.reasoningEngines.update",
   ]
 }
 

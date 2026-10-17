@@ -43,4 +43,7 @@ output "secret_ids" {
 
 output "pg_readonly_secret_version_id" {
   value = google_secret_manager_secret_version.godview_pg_readonly_password.id
+  depends_on = [
+    google_secret_manager_secret_iam_member.pg_readonly_pass_sense
+  ]
 }

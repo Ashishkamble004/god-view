@@ -100,21 +100,22 @@ gcloud auth print-access-token >/dev/null && echo "ADC + gcloud auth OK"
 
 ### Step 1: Reconcile Platform Infrastructure (Rev 6 Terraform)
 *(Run after `@verifier-edge` confirms infra review PASS.)*
+
+To completely eliminate the secret rotation race and avoid reconciling drifted tenant Cloud Run services, apply in two targeted passes:
+
 ```bash
 # 1. Import pre-granted monitoring invoker IAM member into state
 terraform -chdir=infra/terraform/platform import \
   'module.godview.google_cloud_run_v2_service_iam_member.sovereign_invokers["serviceAccount:service-769002985772@gcp-sa-monitoring-notification.iam.gserviceaccount.com"]' \
   'projects/general-ak/locations/us-central1/services/god-view-sovereign roles/run.invoker serviceAccount:service-769002985772@gcp-sa-monitoring-notification.iam.gserviceaccount.com'
 
-# 2. Plan and apply platform updates
-# NOTE: To avoid reconciling drifted tenant Cloud Run services, use targeted apply:
+# Pass 1a: Apply platform updates and Sovereign secret mounting (everything EXCEPT Cloud SQL user)
 terraform -chdir=infra/terraform/platform plan -input=false \
   -target=module.project_iam \
   -target=module.data.random_password.pg_readonly \
   -target=module.data.google_secret_manager_secret.godview_pg_readonly_password \
   -target=module.data.google_secret_manager_secret_version.godview_pg_readonly_password \
   -target=module.data.google_secret_manager_secret_iam_member.pg_readonly_pass_sense \
-  -target=module.data.google_sql_user.godview_readonly \
   -target=module.data.google_bigquery_table.events \
   -target=module.data.google_bigquery_table.journeys \
   -target=module.godview.google_cloud_run_v2_service.sovereign \
@@ -125,23 +126,42 @@ terraform -chdir=infra/terraform/platform plan -input=false \
   -target=module.godview.google_pubsub_topic.nervous_system_dlq \
   -target=module.godview.google_pubsub_subscription.nervous_system_dlq \
   -target=module.godview.google_pubsub_subscription_iam_member.dlq_sense_subscriber \
-  -out=/usr/local/google/home/kambleashish/tmp/platform-v5.tfplan
+  -out=/usr/local/google/home/kambleashish/tmp/platform-v5-pass1a.tfplan
 
-terraform -chdir=infra/terraform/platform apply -input=false /usr/local/google/home/kambleashish/tmp/platform-v5.tfplan
+terraform -chdir=infra/terraform/platform apply -input=false /usr/local/google/home/kambleashish/tmp/platform-v5-pass1a.tfplan
+
+# Verify Sovereign revision is Ready with Secret Manager mounted
+gcloud run services describe god-view-sovereign --project=general-ak --region=us-central1 --format='value(status.conditions[0].status)'
+
+# Pass 1b: Rotate Cloud SQL user password to match the new Secret Manager secret
+terraform -chdir=infra/terraform/platform apply -input=false \
+  -target=module.data.google_sql_user.godview_readonly
+
 terraform -chdir=infra/terraform/platform output -json > infra/terraform/platform/outputs.json
+```
+
+### Step 1c: Enable BigQuery Deletion Protection
+*(Run immediately after table recreation in Step 1a to safeguard ledger data.)*
+Set `deletion_protection = true` on `google_bigquery_table` resources in `infra/terraform/platform/modules/03-data/main.tf` (`events`, `state_transitions`, `journeys`, `kpi_rollups`), then apply:
+```bash
+terraform -chdir=infra/terraform/platform apply -input=false \
+  -target=module.data.google_bigquery_table.events \
+  -target=module.data.google_bigquery_table.state_transitions \
+  -target=module.data.google_bigquery_table.journeys \
+  -target=module.data.google_bigquery_table.kpi_rollups
 ```
 
 > [!IMPORTANT]
 > **Key Architecture Decisions for Rev 6 Apply:**
-> 1. **Password Rotation Dependency & Rollback Caveat**:
->    `google_sql_user.godview_readonly` and `google_cloud_run_v2_service.sovereign` explicitly depend on `google_secret_manager_secret_version.godview_pg_readonly_password` and the IAM `secretAccessor` binding. The secret version and IAM are created BEFORE the Cloud SQL user password rotates and BEFORE the Sovereign revision is created, eliminating the rotation race.
+> 1. **Two-Pass Secret Rotation & Rollback Caveat**:
+>    Applying in 2 passes (Pass 1a: secret version + IAM + Sovereign revision mount; Pass 1b: Cloud SQL user password rotation) ensures the Cloud Run revision mounts the secret cleanly before the DB password changes.
 >    *Rollback Caveat*: Rolling back to a legacy revision (e.g. `god-view-sovereign-00006-mfk`) will fail DB authentication because legacy revisions expect the old plaintext password, whereas the Cloud SQL user is rotated. Any rollback must use a revision configured with `godview-pg-readonly-password:latest`.
 > 2. **Agent Engine Identity**:
 >    Reasoning engines run as `godview-sense-sa` (`ReasoningEngineSpec.service_account = godview-sense-sa@general-ak.iam.gserviceaccount.com`). The Reasoning Engine service agent (`serviceAccount:service-769002985772@gcp-sa-aiplatform-re.iam.gserviceaccount.com`) is granted `roles/iam.serviceAccountUser` on `godview-sense-sa`. The RE service agent is NOT added to `sovereign_invokers` because calls from engines authenticate as `godview-sense-sa` (already an authorized invoker).
 > 3. **Act SA Scoped Hibernate Role**:
->    `godview-act-sa` is granted a custom project role `godview_hibernate_operator` containing only `compute.instances.{get,start,stop}`, `cloudsql.instances.{get,update}`, and `cloudscheduler.jobs.{get,pause,resume,run}` for the `god-view-hibernate-job` and operational remediation. Broad roles (`instanceAdmin.v1`, `cloudsql.editor`, `cloudscheduler.admin`, `run.developer`) are destroyed per plan §3.8.
+>    `godview-act-sa` is granted a custom project role `godview_hibernate_operator` containing only `compute.instances.{get,start,stop}`, `compute.zoneOperations.get`, `cloudsql.instances.{get,update}`, `cloudscheduler.jobs.{get,pause,resume,run}`, and `aiplatform.reasoningEngines.{get,list,update}` for the `god-view-hibernate-job` and operational remediation. Broad roles (`instanceAdmin.v1`, `cloudsql.editor`, `cloudscheduler.admin`, `run.developer`) are destroyed per plan §3.8.
 > 4. **BigQuery Ledger Tables Replacement**:
->    `google_bigquery_table.events` and `google_bigquery_table.journeys` are recreated in this apply with the generic neutral schema (`entity_type`, `state_from`, `state_to`, `numeric_attributes`, `currency`, `total_value`). The tables currently hold 0 rows. Future schema changes to the ledger must be additive.
+>    `google_bigquery_table.events` and `google_bigquery_table.journeys` are recreated in this apply with the generic neutral schema (`entity_type`, `state_from`, `state_to`, `numeric_attributes`, `currency`, `total_value`). The tables currently hold 0 rows. Step 1c locks `deletion_protection = true`.
 > 5. **Uptime Check Replacement**:
 >    `google_monitoring_uptime_check_config.sovereign_health` uses `lifecycle { create_before_destroy = true }` and `google_monitoring_alert_policy.sovereign_heartbeat` is targeted in the same apply to prevent orphan alert errors.
 
