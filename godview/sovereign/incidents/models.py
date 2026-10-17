@@ -20,6 +20,8 @@ class IncidentDoc(EpisodicIncidentDoc):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
     dedupe_key: str = ""
+    target_resource: str | None = None
+    resource_id: str | None = None
     last_seen_at: datetime | str | None = None
     consecutive_breaches: int = 1
     clear_ticks: int = 0

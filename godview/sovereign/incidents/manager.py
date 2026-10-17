@@ -101,6 +101,11 @@ class IncidentManager:
                 if d.get("outcome") == "open":
                     try:
                         inc = IncidentDoc.model_validate(d)
+                        if not inc.target_resource and inc.dedupe_key:
+                            parts = inc.dedupe_key.split(":")
+                            if len(parts) >= 2:
+                                inc.target_resource = parts[1]
+                                inc.resource_id = parts[1]
                         if inc.dedupe_key:
                             self._active_incidents[inc.dedupe_key] = inc
                     except Exception:
@@ -500,6 +505,8 @@ class IncidentManager:
         incident = IncidentDoc(
             doc_id=inc_id,
             dedupe_key=dedupe_key,
+            target_resource=res,
+            resource_id=res,
             opened_at=now_iso,
             last_seen_at=now_iso,
             severity=severity,
