@@ -2,12 +2,15 @@ import React, { useEffect, useRef, useState, useMemo } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import {
-  AlertTriangle,
   ArrowRight,
   Brain,
+  Grid,
+  Minus,
+  Plus,
   RotateCcw,
   Search,
   Shield,
+  ShieldAlert,
   Wifi,
   X,
 } from 'lucide-react';
@@ -19,9 +22,16 @@ import type {
 } from '../api/types';
 import { cockpitApi } from '../api/client';
 import { Badge, Button, Card } from './ui';
+import {
+  GLOBE_COLORS,
+  GLOBE_STYLE,
+  NODE_STATUS_COLORS,
+  TIER_LATITUDE,
+} from '../theme/globe';
 
 export interface GlobeViewProps {
   topology: TopologyResponse | null;
+  selectedNodeId?: string | null;
   onSelectNode?: (nodeId: string) => void;
   onSelectIncident?: (incidentId: string) => void;
   onSelectJourney?: (journeyName: string) => void;
@@ -30,13 +40,13 @@ export interface GlobeViewProps {
 
 // Latitudinal band assignment per architectural tier (degrees)
 const TIER_LATITUDES: Record<TopologyTier, number> = {
-  observer: 78,
-  edge: 55,
-  messaging: 35,
-  compute: 8,
-  data: -42,
-  platform: -68,
-  external: 20, // Orbiting satellite at higher radius
+  observer: TIER_LATITUDE.observer ?? 78,
+  edge: TIER_LATITUDE.edge ?? 55,
+  messaging: TIER_LATITUDE.messaging ?? 35,
+  compute: TIER_LATITUDE.compute ?? 8,
+  data: TIER_LATITUDE.data ?? -42,
+  platform: TIER_LATITUDE.platform ?? -68,
+  external: TIER_LATITUDE.external ?? 20, // Orbiting satellite at higher radius
 };
 
 const TIER_COLORS: Record<TopologyTier, string> = {
@@ -50,23 +60,32 @@ const TIER_COLORS: Record<TopologyTier, string> = {
 };
 
 const STATUS_COLORS: Record<string, { hex: string; threeHex: number }> = {
-  green: { hex: '#34A853', threeHex: 0x34a853 },
-  amber: { hex: '#FBBC04', threeHex: 0xfbbc04 },
-  red: { hex: '#EA4335', threeHex: 0xea4335 },
-  unknown: { hex: '#94A3B8', threeHex: 0x94a3b8 },
+  green: { hex: '#5bb974', threeHex: NODE_STATUS_COLORS.green },
+  amber: { hex: '#fcc934', threeHex: NODE_STATUS_COLORS.amber },
+  red: { hex: '#ee675c', threeHex: NODE_STATUS_COLORS.red },
+  unknown: { hex: '#9aa0a6', threeHex: NODE_STATUS_COLORS.unknown },
 };
 
 export const GlobeView: React.FC<GlobeViewProps> = ({
   topology,
+  selectedNodeId: propSelectedNodeId = null,
   onSelectNode,
   onSelectIncident,
   onSelectJourney,
   onSelectAgent,
 }) => {
+  void onSelectAgent;
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const controlsRef = useRef<OrbitControls | null>(null);
 
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(propSelectedNodeId);
+
+  useEffect(() => {
+    if (propSelectedNodeId !== undefined) {
+      setSelectedNodeId(propSelectedNodeId);
+    }
+  }, [propSelectedNodeId]);
   const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
   const [businessContext, setBusinessContext] = useState<FullBusinessContext | null>(null);
   const [loadingContext, setLoadingContext] = useState(false);
@@ -76,6 +95,7 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [force2D, setForce2D] = useState(false);
   const [prefersReducedMotion, setPrefersReducedMotion] = useState(false);
+  const [incidentDismissed, setIncidentDismissed] = useState(false);
 
   // Check prefers-reduced-motion
   useEffect(() => {
@@ -149,18 +169,16 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
         const latDeg = TIER_LATITUDES[tier] ?? 10;
         const phi = (latDeg * Math.PI) / 180;
 
-        // Longitude: clustered around domain center with jitter
-        const thetaSpread = domainStep * 0.75;
-        const thetaOffset =
-          groupNodes.length > 1
-            ? (nIdx / (groupNodes.length - 1) - 0.5) * thetaSpread
-            : 0;
-        const theta = baseTheta + thetaOffset;
+        // Longitude with slight jitter within domain cluster
+        const offset = (nIdx - (groupNodes.length - 1) / 2) * 0.18;
+        const theta = baseTheta + offset;
 
-        const baseRadius = tier === 'external' ? 12.8 : 9.0;
-        const x = baseRadius * Math.cos(phi) * Math.sin(theta);
-        const y = baseRadius * Math.sin(phi);
-        const z = baseRadius * Math.cos(phi) * Math.cos(theta);
+        // External nodes orbit at higher radius as satellites
+        const r = tier === 'external' ? 9.0 * GLOBE_STYLE.satelliteOrbitRadius : 9.0;
+
+        const x = r * Math.cos(phi) * Math.sin(theta);
+        const y = r * Math.sin(phi);
+        const z = r * Math.cos(phi) * Math.cos(theta);
 
         positions.set(node.id, new THREE.Vector3(x, y, z));
       });
@@ -169,56 +187,63 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
     return positions;
   }, [topology]);
 
-  // Filtered nodes based on active tier filters and search query
+  // Filtered nodes
   const filteredNodes = useMemo(() => {
     if (!topology) return [];
     return topology.nodes.filter((node) => {
-      const tierMatch = activeTierFilters.has(node.tier as TopologyTier);
-      const searchMatch =
-        !searchQuery ||
-        node.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        node.id.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        node.business.domain.toLowerCase().includes(searchQuery.toLowerCase());
-      return tierMatch && searchMatch;
+      const matchesTier = activeTierFilters.has(node.tier as TopologyTier);
+      const q = searchQuery.toLowerCase().trim();
+      const matchesQuery =
+        !q ||
+        node.name.toLowerCase().includes(q) ||
+        node.id.toLowerCase().includes(q) ||
+        node.business.domain.toLowerCase().includes(q);
+      return matchesTier && matchesQuery;
     });
   }, [topology, activeTierFilters, searchQuery]);
 
-  // Three.js interactive 3D Globe Lifecycle
+  // Nodes with active incidents
+  const incidentNodes = useMemo(() => {
+    if (!topology) return [];
+    return topology.nodes.filter((n) => n.incidents_open > 0 || n.status === 'red');
+  }, [topology]);
+
+  // Three.js Lifecycle
   useEffect(() => {
-    if (use2DMode) return;
+    if (use2DMode || !topology || !canvasRef.current) return;
+
     const canvas = canvasRef.current;
     const container = containerRef.current;
-    if (!canvas || !container || !topology) return;
-
-    // Check WebGL availability safely
-    try {
-      const testGl = canvas.getContext('webgl2') || canvas.getContext('webgl');
-      if (!testGl) {
-        console.warn('WebGL not supported in current environment; switching to 2D force graph.');
-        setForce2D(true);
-        return;
-      }
-    } catch {
-      setForce2D(true);
-      return;
-    }
+    if (!container) return;
 
     const width = container.clientWidth || 1000;
     const height = container.clientHeight || 700;
 
     // 1. Scene, Camera, Renderer
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0xf8fafc); // Crisp luminous white/slate canvas
+    scene.background = new THREE.Color(GLOBE_COLORS.spaceEdge);
 
-    const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 1000);
-    camera.position.set(0, 10, 26);
+    const camera = new THREE.PerspectiveCamera(GLOBE_STYLE.cameraFovDeg, width / height, 0.1, 1000);
+    camera.position.set(0, 16, 28);
 
-    const renderer = new THREE.WebGLRenderer({
-      canvas,
-      antialias: true,
-      alpha: true,
-      powerPreference: 'high-performance',
-    });
+    let renderer: THREE.WebGLRenderer;
+    try {
+      renderer = new THREE.WebGLRenderer({
+        canvas,
+        antialias: true,
+        alpha: false,
+        powerPreference: 'high-performance',
+      });
+    } catch {
+      setForce2D(true);
+      return;
+    }
+
+    if (!renderer.getContext()) {
+      setForce2D(true);
+      return;
+    }
+
     renderer.setSize(width, height);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
 
@@ -229,38 +254,72 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
     controls.minDistance = 14;
     controls.maxDistance = 45;
     controls.enablePan = false;
+    controlsRef.current = controls;
 
-    // 2. Lights
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.85);
+    // 2. Lights - Key light from upper-left gives rich navy-lit ocean
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
     scene.add(ambientLight);
 
-    const dirLight1 = new THREE.DirectionalLight(0xffffff, 0.65);
-    dirLight1.position.set(20, 30, 20);
-    scene.add(dirLight1);
+    const keyLight = new THREE.DirectionalLight(GLOBE_COLORS.oceanLit, 1.4);
+    keyLight.position.set(-20, 30, 20);
+    scene.add(keyLight);
 
-    const dirLight2 = new THREE.DirectionalLight(0x4285f4, 0.25);
-    dirLight2.position.set(-20, -10, -20);
-    scene.add(dirLight2);
+    const fillLight = new THREE.DirectionalLight(0xffffff, 0.4);
+    fillLight.position.set(20, -10, -20);
+    scene.add(fillLight);
 
-    // 3. Central Luminous Sphere
+    // 3. Central Sphere & Atmosphere Shell
     const sphereRadius = 9.0;
     const sphereGeo = new THREE.SphereGeometry(sphereRadius, 64, 64);
-    const sphereMat = new THREE.MeshStandardMaterial({
-      color: 0xffffff,
-      roughness: 0.9,
-      metalness: 0.05,
-      emissive: 0xf1f5f9,
-      emissiveIntensity: 0.2,
+    const sphereMat = new THREE.MeshLambertMaterial({
+      color: GLOBE_COLORS.ocean,
     });
     const globeMesh = new THREE.Mesh(sphereGeo, sphereMat);
     scene.add(globeMesh);
 
+    // Atmosphere Shell
+    const atmosphereGeo = new THREE.SphereGeometry(sphereRadius * GLOBE_STYLE.atmosphereScale, 48, 48);
+    const atmosphereMat = new THREE.MeshBasicMaterial({
+      color: GLOBE_COLORS.atmosphere,
+      transparent: true,
+      opacity: GLOBE_STYLE.atmosphereOpacity,
+      side: THREE.BackSide,
+      blending: THREE.AdditiveBlending,
+    });
+    const atmosphereMesh = new THREE.Mesh(atmosphereGeo, atmosphereMat);
+    scene.add(atmosphereMesh);
+
+    // Starfield Background
+    const starsGeo = new THREE.BufferGeometry();
+    const starCoords: number[] = [];
+    for (let i = 0; i < GLOBE_STYLE.starCount; i++) {
+      const u = Math.random();
+      const v = Math.random();
+      const theta = u * 2.0 * Math.PI;
+      const phi = Math.acos(2.0 * v - 1.0);
+      const r = 40 + Math.random() * 50;
+      starCoords.push(
+        r * Math.sin(phi) * Math.cos(theta),
+        r * Math.sin(phi) * Math.sin(theta),
+        r * Math.cos(phi)
+      );
+    }
+    starsGeo.setAttribute('position', new THREE.Float32BufferAttribute(starCoords, 3));
+    const starsMat = new THREE.PointsMaterial({
+      color: GLOBE_COLORS.star,
+      size: 0.6,
+      transparent: true,
+      opacity: 0.45,
+    });
+    const starField = new THREE.Points(starsGeo, starsMat);
+    scene.add(starField);
+
     // 4. Subtle Meridians and Parallels (Lat/Long Grid)
     const gridGroup = new THREE.Group();
     const lineMat = new THREE.LineBasicMaterial({
-      color: 0xcbd5e1, // Subtle slate divider
+      color: GLOBE_COLORS.graticule,
       transparent: true,
-      opacity: 0.45,
+      opacity: GLOBE_STYLE.graticuleOpacity,
     });
 
     // Parallels (latitude circles)
@@ -311,13 +370,13 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
       nodeSubGroup.userData = { nodeId: node.id };
 
       const statusConf = STATUS_COLORS[node.status] || STATUS_COLORS.unknown;
-      const nodeGeo = new THREE.SphereGeometry(0.38, 24, 24);
-      const nodeMat = new THREE.MeshStandardMaterial({
+      const isImportant = node.kind === 'lb_frontend' || node.kind === 'cloud_sql' || node.kind === 'api_gateway';
+      const radiusScale = isImportant ? GLOBE_STYLE.nodeRadius.important : GLOBE_STYLE.nodeRadius.base;
+      const beaconRadius = radiusScale * sphereRadius * 1.8;
+
+      const nodeGeo = new THREE.SphereGeometry(beaconRadius, 24, 24);
+      const nodeMat = new THREE.MeshLambertMaterial({
         color: statusConf.threeHex,
-        emissive: statusConf.threeHex,
-        emissiveIntensity: 0.5,
-        roughness: 0.3,
-        metalness: 0.2,
       });
 
       const beaconMesh = new THREE.Mesh(nodeGeo, nodeMat);
@@ -336,7 +395,7 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
       if (node.incidents_open > 0 || node.status === 'red') {
         const ringGeo = new THREE.RingGeometry(0.5, 0.72, 32);
         const ringMat = new THREE.MeshBasicMaterial({
-          color: 0xea4335, // Incident Red
+          color: NODE_STATUS_COLORS.red,
           transparent: true,
           opacity: 0.8,
           side: THREE.DoubleSide,
@@ -352,139 +411,124 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
     });
     scene.add(nodeGroup);
 
-    // 6. Great-Circle Animated Tube Arcs for Edges
+    // 6. Arcs as Great-Circle Curves with Animated Traffic Flow
     const arcGroup = new THREE.Group();
     const particleFlows: Array<{
-      curve: THREE.CatmullRomCurve3;
+      curve: THREE.QuadraticBezierCurve3;
       particle: THREE.Mesh;
       speed: number;
       progress: number;
     }> = [];
 
-    topology.edges.forEach((edge, eIdx) => {
-      const p1 = nodePositions.get(edge.src);
-      const p2 = nodePositions.get(edge.dst);
-      if (!p1 || !p2) return;
+    topology.edges.forEach((edge) => {
+      const srcPos = nodePositions.get(edge.src);
+      const dstPos = nodePositions.get(edge.dst);
+      if (!srcPos || !dstPos) return;
 
-      const dist = p1.distanceTo(p2);
-      if (dist < 0.1) return;
+      const mid = new THREE.Vector3().addVectors(srcPos, dstPos).multiplyScalar(0.5);
+      const distance = srcPos.distanceTo(dstPos);
+      const lift = Math.max(0.6, distance * 0.22);
+      mid.normalize().multiplyScalar(sphereRadius + lift);
 
-      // Elevated midpoint along great circle
-      const mid = p1.clone().add(p2).multiplyScalar(0.5);
-      const elevHeight = Math.max(1.1, dist * 0.24);
-      const midElev = mid.clone().normalize().multiplyScalar(sphereRadius + elevHeight);
+      const curve = new THREE.QuadraticBezierCurve3(srcPos, mid, dstPos);
+      const tubeGeo = new THREE.TubeGeometry(curve, 28, 0.035, 6, false);
 
-      // Intermediate smoothed Bezier control points
-      const p1Elev = p1.clone().lerp(midElev, 0.5).normalize().multiplyScalar(sphereRadius + elevHeight * 0.7);
-      const p2Elev = p2.clone().lerp(midElev, 0.5).normalize().multiplyScalar(sphereRadius + elevHeight * 0.7);
+      const isError = (edge.error_ratio ?? 0) >= 0.02;
+      const arcColor = isError ? GLOBE_COLORS.arcError : GLOBE_COLORS.arc;
 
-      const curve = new THREE.CatmullRomCurve3([p1, p1Elev, midElev, p2Elev, p2]);
-      const tubeGeo = new THREE.TubeGeometry(curve, 32, 0.038, 8, false);
-
-      const isAlert = edge.error_ratio !== null && edge.error_ratio > 0.01;
-      const arcColor = isAlert ? 0xea4335 : 0x1a73e8; // Red or Google Blue
-
-      const tubeMat = new THREE.MeshBasicMaterial({
+      const arcMat = new THREE.MeshBasicMaterial({
         color: arcColor,
         transparent: true,
-        opacity: isAlert ? 0.75 : 0.42,
+        opacity: GLOBE_STYLE.arcOpacity,
       });
-
-      const tubeMesh = new THREE.Mesh(tubeGeo, tubeMat);
+      const tubeMesh = new THREE.Mesh(tubeGeo, arcMat);
       arcGroup.add(tubeMesh);
 
-      // Moving animated packet pulse along the arc
-      const particleGeo = new THREE.SphereGeometry(0.09, 12, 12);
-      const particleMat = new THREE.MeshBasicMaterial({ color: isAlert ? 0xea4335 : 0x4285f4 });
-      const particleMesh = new THREE.Mesh(particleGeo, particleMat);
-      arcGroup.add(particleMesh);
+      // Traffic flow particle
+      const pGeo = new THREE.SphereGeometry(0.09, 12, 12);
+      const pMat = new THREE.MeshBasicMaterial({
+        color: GLOBE_COLORS.arcParticle,
+        transparent: true,
+        opacity: 0.9,
+      });
+      const particle = new THREE.Mesh(pGeo, pMat);
+      arcGroup.add(particle);
+
+      const rps = edge.rps ?? 10;
+      const speed = Math.max(0.003, Math.min(0.015, Math.log10(rps + 1) * 0.006));
 
       particleFlows.push({
         curve,
-        particle: particleMesh,
-        speed: 0.003 + (eIdx % 5) * 0.001,
-        progress: (eIdx * 0.17) % 1.0,
+        particle,
+        speed,
+        progress: Math.random(),
       });
     });
     scene.add(arcGroup);
 
-    // 7. Raycasting for picking
+    // 7. Raycasting for Hover & Click Picking
     const raycaster = new THREE.Raycaster();
     const mouse = new THREE.Vector2();
 
-    const handlePointerMove = (evt: MouseEvent) => {
+    const handlePointerMove = (event: MouseEvent) => {
       const rect = canvas.getBoundingClientRect();
-      mouse.x = ((evt.clientX - rect.left) / rect.width) * 2 - 1;
-      mouse.y = -((evt.clientY - rect.top) / rect.height) * 2 + 1;
+      mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+      mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
 
       raycaster.setFromCamera(mouse, camera);
       const intersects = raycaster.intersectObjects(nodeGroup.children, true);
 
       if (intersects.length > 0) {
-        let current: THREE.Object3D | null = intersects[0].object;
-        while (current && !current.userData.nodeId && current.parent) {
-          current = current.parent;
+        let obj: THREE.Object3D | null = intersects[0].object;
+        while (obj && !obj.userData.nodeId && obj.parent) {
+          obj = obj.parent;
         }
-        if (current && current.userData.nodeId) {
-          setHoveredNodeId(current.userData.nodeId);
+        if (obj && obj.userData.nodeId) {
+          setHoveredNodeId(obj.userData.nodeId);
           canvas.style.cursor = 'pointer';
           return;
         }
       }
       setHoveredNodeId(null);
-      canvas.style.cursor = 'grab';
+      canvas.style.cursor = 'default';
     };
 
-    const handleClick = (evt: MouseEvent) => {
+    const handleClick = (event: MouseEvent) => {
       const rect = canvas.getBoundingClientRect();
-      mouse.x = ((evt.clientX - rect.left) / rect.width) * 2 - 1;
-      mouse.y = -((evt.clientY - rect.top) / rect.height) * 2 + 1;
+      mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+      mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
 
       raycaster.setFromCamera(mouse, camera);
       const intersects = raycaster.intersectObjects(nodeGroup.children, true);
 
       if (intersects.length > 0) {
-        let current: THREE.Object3D | null = intersects[0].object;
-        while (current && !current.userData.nodeId && current.parent) {
-          current = current.parent;
+        let obj: THREE.Object3D | null = intersects[0].object;
+        while (obj && !obj.userData.nodeId && obj.parent) {
+          obj = obj.parent;
         }
-        if (current && current.userData.nodeId) {
-          const clickedId = current.userData.nodeId;
-          setSelectedNodeId(clickedId);
-          if (onSelectNode) onSelectNode(clickedId);
+        if (obj && obj.userData.nodeId) {
+          const nId = obj.userData.nodeId;
+          setSelectedNodeId(nId);
+          if (onSelectNode) onSelectNode(nId);
 
-          // Camera fly-to
-          const pos = nodePositions.get(clickedId);
-          if (pos) {
-            const targetCamPos = pos.clone().normalize().multiplyScalar(22);
-            targetCamPos.y += 2.0;
-
-            const startPos = camera.position.clone();
-            const startTarget = controls.target.clone();
-            const endTarget = pos.clone();
-            let flyProgress = 0;
-
-            const flyAnim = () => {
-              flyProgress += 0.05;
-              if (flyProgress < 1.0) {
-                camera.position.lerpVectors(startPos, targetCamPos, flyProgress);
-                controls.target.lerpVectors(startTarget, endTarget, flyProgress);
-                requestAnimationFrame(flyAnim);
-              } else {
-                camera.position.copy(targetCamPos);
-                controls.target.copy(endTarget);
-              }
-            };
-            flyAnim();
+          // Camera fly-to target node
+          const targetPos = nodePositions.get(nId);
+          if (targetPos) {
+            const lookTarget = targetPos.clone().multiplyScalar(2.2);
+            camera.position.lerp(lookTarget, 0.6);
+            controls.target.copy(targetPos);
+            controls.update();
           }
+          return;
         }
       }
+      setSelectedNodeId(null);
     };
 
     canvas.addEventListener('mousemove', handlePointerMove);
     canvas.addEventListener('click', handleClick);
 
-    // 8. Animation Render Loop
+    // 8. Animation Loop
     let animId: number;
     let clock = 0;
 
@@ -494,9 +538,10 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
 
       controls.update();
 
-      // Subtle slow planetary rotation if not dragging
-      if ((controls as any).state === -1 || (controls as any).state === undefined) {
-        scene.rotation.y += 0.0006;
+      // Idle globe rotation if not hovered or selecting
+      if (!selectedNodeId && !hoveredNodeId) {
+        globeMesh.rotation.y += 0.0012;
+        gridGroup.rotation.y += 0.0012;
       }
 
       // Animate incident pulse rings
@@ -538,7 +583,7 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
       canvas.removeEventListener('click', handleClick);
       renderer.dispose();
     };
-  }, [topology, nodePositions, use2DMode, onSelectNode]);
+  }, [topology, nodePositions, use2DMode, onSelectNode, selectedNodeId, hoveredNodeId]);
 
   // Toggle tier filter
   const toggleTier = (tier: TopologyTier) => {
@@ -559,8 +604,33 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
     return topology.nodes.find((n) => n.id === hoveredNodeId) || null;
   }, [topology, hoveredNodeId]);
 
+  // Camera reset
+  const handleResetCamera = () => {
+    setSelectedNodeId(null);
+    if (controlsRef.current) {
+      controlsRef.current.reset();
+    }
+  };
+
+  // Zoom controls
+  const handleZoomIn = () => {
+    if (controlsRef.current) {
+      const cam = controlsRef.current.object;
+      cam.position.multiplyScalar(0.85);
+      controlsRef.current.update();
+    }
+  };
+
+  const handleZoomOut = () => {
+    if (controlsRef.current) {
+      const cam = controlsRef.current.object;
+      cam.position.multiplyScalar(1.15);
+      controlsRef.current.update();
+    }
+  };
+
   return (
-    <div className="relative flex h-[calc(100vh-68px)] w-full overflow-hidden bg-slate-50 text-slate-900">
+    <div className="relative flex h-[calc(100vh-108px)] w-full overflow-hidden bg-slate-50 text-slate-900" data-testid="globe-view">
       {/* Slim Left Rail: Environment & Swarm Status */}
       <aside className="z-10 flex w-72 flex-col justify-between border-r border-slate-200 bg-white/95 p-4 shadow-sm backdrop-blur-md">
         <div className="space-y-4">
@@ -574,7 +644,7 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
                 </span>
               </div>
               <h2 className="mt-1 font-mono text-sm font-bold text-slate-900">
-                {topology?.env_id || 'gcp-general-ak'}
+                {topology?.env_id || 'gcp-production'}
               </h2>
             </div>
             <Badge variant="success" dot>
@@ -698,11 +768,11 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
       {/* Main Viewport: 3D Globe OR 2D Fallback */}
       <main
         ref={containerRef}
-        className="relative flex-1 bg-slate-50 flex items-center justify-center overflow-hidden"
+        className="relative flex-1 bg-gradient-to-br from-[#0d2647] via-[#081a33] to-[#040b17] flex items-center justify-center overflow-hidden"
       >
         {use2DMode ? (
           /* 2D Fallback Force Graph */
-          <div className="flex h-full w-full flex-col p-6 overflow-auto" data-testid="globe-2d-graph">
+          <div className="flex h-full w-full flex-col p-6 overflow-auto bg-slate-50" data-testid="globe-2d-graph">
             <div className="mb-4 flex items-center justify-between">
               <div>
                 <h3 className="text-sm font-bold text-slate-900">
@@ -779,10 +849,167 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
           <div className="relative h-full w-full" data-testid="globe-3d-canvas">
             <canvas ref={canvasRef} className="h-full w-full" />
 
+            {/* Stage Overlay: TierFilter Floating Pill (Top-Left) */}
+            <div className="absolute left-6 top-6 z-20 flex items-center gap-1 rounded-full border border-slate-700/50 bg-[#081a33]/80 p-1 backdrop-blur-md shadow-lg">
+              <span className="px-2.5 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                Tiers
+              </span>
+              {(['edge', 'compute', 'data', 'messaging', 'platform'] as TopologyTier[]).map((tier) => {
+                const active = activeTierFilters.has(tier);
+                return (
+                  <button
+                    key={tier}
+                    onClick={() => toggleTier(tier)}
+                    className={`flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium transition-all ${
+                      active
+                        ? 'bg-blue-600/90 text-white shadow-sm'
+                        : 'text-slate-300 hover:bg-slate-800/60'
+                    }`}
+                  >
+                    <span
+                      className="h-1.5 w-1.5 rounded-full"
+                      style={{ backgroundColor: TIER_COLORS[tier] }}
+                    />
+                    <span className="capitalize">{tier}</span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Stage Overlay: Floating IncidentBanner (Bottom-Right, Above PulseBar) */}
+            {incidentNodes.length > 0 && !incidentDismissed && (
+              <div className="absolute bottom-20 right-6 z-20 flex max-w-sm items-center gap-3 rounded-2xl border border-red-500/40 bg-[#081a33]/90 p-2.5 shadow-xl backdrop-blur-md animate-in slide-in-from-bottom-2">
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-red-500/20 text-red-400">
+                  <ShieldAlert className="h-4 w-4" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-xs font-semibold text-white">
+                    Incident open on {incidentNodes[0]?.name || 'estate node'}
+                  </p>
+                  <p className="text-[10px] text-slate-400">
+                    {incidentNodes.length} active alert{incidentNodes.length > 1 ? 's' : ''} requiring SRE review
+                  </p>
+                </div>
+                <button
+                  onClick={() => {
+                    if (onSelectIncident) {
+                      onSelectIncident(incidentNodes[0]?.id || 'inc-1');
+                    } else {
+                      window.location.hash = '#incidents';
+                    }
+                  }}
+                  className="rounded-full bg-red-600 px-3 py-1 text-xs font-medium text-white transition hover:bg-red-500 shadow-sm"
+                >
+                  War Room
+                </button>
+                <button
+                  onClick={() => setIncidentDismissed(true)}
+                  className="rounded-full p-1 text-slate-400 hover:text-white"
+                  title="Dismiss banner"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            )}
+
+            {/* Stage Overlay: PulseBar (Bottom-Center) */}
+            <div className="absolute bottom-4 left-1/2 z-20 flex -translate-x-1/2 items-center gap-6 rounded-full border border-slate-700/50 bg-[#081a33]/90 px-8 py-2.5 shadow-2xl backdrop-blur-md">
+              <button
+                onClick={() => {}}
+                className="group flex flex-col items-center text-center transition hover:opacity-90"
+              >
+                <span className="text-[11px] text-slate-400 group-hover:text-slate-300">
+                  Services
+                </span>
+                <span className="font-mono text-lg font-bold text-white">
+                  {topology?.nodes.length || 0}
+                </span>
+              </button>
+
+              <div className="h-7 w-px bg-slate-700/60" />
+
+              <button
+                onClick={() => { window.location.hash = '#incidents'; }}
+                className="group flex flex-col items-center text-center transition hover:opacity-90"
+              >
+                <span className="text-[11px] text-slate-400 group-hover:text-slate-300">
+                  Incidents
+                </span>
+                <span
+                  className={`font-mono text-lg font-bold ${
+                    incidentNodes.length > 0 ? 'text-red-400' : 'text-emerald-400'
+                  }`}
+                >
+                  {incidentNodes.length}
+                </span>
+              </button>
+
+              <div className="h-7 w-px bg-slate-700/60" />
+
+              <button
+                onClick={() => { window.location.hash = '#approvals'; }}
+                className="group flex flex-col items-center text-center transition hover:opacity-90"
+              >
+                <span className="text-[11px] text-slate-400 group-hover:text-slate-300">
+                  Approvals
+                </span>
+                <span className="font-mono text-lg font-bold text-amber-400">
+                  2
+                </span>
+              </button>
+
+              <div className="h-7 w-px bg-slate-700/60" />
+
+              <button
+                onClick={() => { window.location.hash = '#organism'; }}
+                className="group flex flex-col items-center text-center transition hover:opacity-90"
+              >
+                <span className="text-[11px] text-slate-400 group-hover:text-slate-300">
+                  Agents awake
+                </span>
+                <span className="font-mono text-lg font-bold text-cyan-400">
+                  4/5
+                </span>
+              </button>
+            </div>
+
+            {/* Stage Overlay: MapControls Vertical Pill (Bottom-Right) */}
+            <div className="absolute bottom-4 right-6 z-20 flex flex-col items-center rounded-2xl border border-slate-700/50 bg-[#081a33]/90 p-1.5 shadow-xl backdrop-blur-md">
+              <button
+                onClick={handleZoomIn}
+                title="Zoom In"
+                className="rounded-xl p-2 text-slate-300 transition hover:bg-slate-800 hover:text-white"
+              >
+                <Plus className="h-4 w-4" />
+              </button>
+              <button
+                onClick={handleZoomOut}
+                title="Zoom Out"
+                className="rounded-xl p-2 text-slate-300 transition hover:bg-slate-800 hover:text-white"
+              >
+                <Minus className="h-4 w-4" />
+              </button>
+              <div className="my-1 h-px w-5 bg-slate-700/60" />
+              <button
+                onClick={handleResetCamera}
+                title="Reset Camera Orientation"
+                className="rounded-xl p-2 text-slate-300 transition hover:bg-slate-800 hover:text-white"
+              >
+                <RotateCcw className="h-4 w-4" />
+              </button>
+              <button
+                onClick={() => setForce2D(true)}
+                title="Switch to 2D Matrix"
+                className="rounded-xl p-2 text-slate-300 transition hover:bg-slate-800 hover:text-white"
+              >
+                <Grid className="h-4 w-4" />
+              </button>
+            </div>
+
             {/* Hover Tooltip Overlay */}
             {hoveredNode && (
               <div
-                className="pointer-events-none absolute bottom-6 left-6 z-20 rounded-lg border border-slate-200 bg-white/95 px-3 py-2 text-xs shadow-lg backdrop-blur-md"
+                className="pointer-events-none absolute bottom-24 left-6 z-20 rounded-xl border border-slate-700/60 bg-[#081a33]/95 px-3 py-2 text-xs shadow-xl backdrop-blur-md text-white"
                 data-testid="globe-hover-tooltip"
               >
                 <div className="flex items-center gap-2">
@@ -790,35 +1017,24 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
                     className="h-2 w-2 rounded-full"
                     style={{ backgroundColor: STATUS_COLORS[hoveredNode.status]?.hex }}
                   />
-                  <span className="font-bold text-slate-900">{hoveredNode.name}</span>
-                  <Badge variant="outline" className="text-[10px]">
+                  <span className="font-bold text-white">{hoveredNode.name}</span>
+                  <Badge variant="outline" className="text-[10px] text-slate-300 border-slate-600">
                     {hoveredNode.tier}
                   </Badge>
                 </div>
-                <p className="mt-1 text-[11px] text-slate-500">
+                <p className="mt-1 text-[11px] text-slate-300">
                   {hoveredNode.business.domain} • Inferred Role: {hoveredNode.business.role_summary}
                 </p>
               </div>
             )}
-
-            {/* Camera Helper Controls */}
-            <div className="absolute right-6 top-6 z-20 flex flex-col gap-2">
-              <button
-                onClick={() => setSelectedNodeId(null)}
-                title="Reset Camera"
-                className="rounded-lg border border-slate-200 bg-white/90 p-2 text-slate-700 shadow-sm transition hover:bg-white hover:text-slate-900"
-              >
-                <RotateCcw className="h-4 w-4" />
-              </button>
-            </div>
           </div>
         )}
       </main>
 
-      {/* Right Drawer: Business Context Inspector */}
+      {/* Right Drawer: Business Context Inspector (DetailSheet) */}
       {selectedNode && (
         <aside
-          className="z-30 flex w-96 flex-col justify-between border-l border-slate-200 bg-white shadow-xl animate-in slide-in-from-right duration-200 overflow-y-auto"
+          className="z-30 flex w-96 flex-col justify-between border-l border-slate-200 bg-white shadow-2xl animate-in slide-in-from-right duration-200 overflow-y-auto"
           data-testid="business-context-drawer"
         >
           <div className="p-5 space-y-5">
@@ -949,86 +1165,103 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
                   </Badge>
                 </div>
                 <div className="flex items-center justify-between">
-                  <span className="text-slate-500">Cloud Armor WAF:</span>
-                  <span className="font-mono text-slate-800">
-                    {selectedNode.posture.waf || 'not attached'}
-                  </span>
+                  <span className="text-slate-500">Public Ingress:</span>
+                  <Badge variant={selectedNode.posture.ingress === 'internal' ? 'success' : 'warning'}>
+                    {selectedNode.posture.ingress}
+                  </Badge>
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-slate-500">Invoker IAM:</span>
-                  <span className="font-mono text-slate-800">
-                    {selectedNode.posture.invoker_iam ? 'Restricted' : 'Public'}
-                  </span>
+                  <Badge variant={selectedNode.posture.invoker_iam ? 'success' : 'danger'}>
+                    {selectedNode.posture.invoker_iam ? 'Enforced' : 'Public'}
+                  </Badge>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-500">Cloud Armor WAF:</span>
+                  <Badge variant={selectedNode.posture.waf ? 'success' : 'outline'}>
+                    {selectedNode.posture.waf ? 'Protected' : 'None'}
+                  </Badge>
                 </div>
               </div>
             </div>
 
-            {/* Evidence References */}
-            {businessContext?.evidence && businessContext.evidence.length > 0 && (
+            {/* Invariants Checked on this Node */}
+            {businessContext?.invariants && businessContext.invariants.length > 0 && (
               <div className="space-y-2">
                 <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-                  Verification Evidence
+                  Enforced Invariants
                 </span>
                 <div className="space-y-1">
-                  {businessContext.evidence.map((ev, idx) => (
+                  {businessContext.invariants.map((inv, idx) => (
                     <div
                       key={idx}
-                      className="rounded bg-slate-50 p-2 text-[11px] text-slate-600 font-mono border border-slate-100"
+                      className="rounded border border-slate-100 bg-slate-50 p-2 text-xs"
                     >
-                      <span className="font-bold text-slate-900 uppercase tracking-wider">
-                        [{ev.kind}]
-                      </span>{' '}
-                      {ev.ref}
-                      {ev.excerpt && (
-                        <p className="mt-0.5 text-slate-500 text-[10px] italic">
-                          &quot;{ev.excerpt}&quot;
-                        </p>
-                      )}
+                      <div className="flex items-center justify-between">
+                        <span className="font-mono font-medium text-slate-800">{inv.check}</span>
+                        <Badge variant="outline">{inv.status || 'verified'}</Badge>
+                      </div>
+                      <p className="mt-1 font-mono text-[10px] text-slate-500 truncate">
+                        {inv.statement}
+                      </p>
                     </div>
                   ))}
                 </div>
               </div>
             )}
 
-            {/* Active Incidents linked to node */}
-            {selectedNode.incidents_open > 0 && (
-              <div className="rounded-lg border border-red-200 bg-red-50/50 p-3 space-y-2">
-                <div className="flex items-center justify-between text-xs font-bold text-red-800">
-                  <span className="flex items-center gap-1.5">
-                    <AlertTriangle className="h-4 w-4 text-red-600" />
-                    Active Incidents ({selectedNode.incidents_open})
-                  </span>
+            {/* Verified Evidence Pack References */}
+            {businessContext?.evidence && businessContext.evidence.length > 0 && (
+              <div className="space-y-2">
+                <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                  Grounded Evidence
+                </span>
+                <div className="space-y-1">
+                  {businessContext.evidence.map((ev, idx) => (
+                    <div
+                      key={idx}
+                      className="rounded border border-slate-100 bg-slate-50 p-2 text-xs"
+                    >
+                      <div className="flex items-center gap-1.5 font-mono text-[10px] text-blue-700">
+                        <Badge variant="outline" className="uppercase text-[9px]">
+                          {ev.kind}
+                        </Badge>
+                        <span className="truncate">{ev.ref}</span>
+                      </div>
+                      <p className="mt-1 font-mono text-[11px] text-slate-600 bg-white p-1 rounded border border-slate-100">
+                        {ev.excerpt}
+                      </p>
+                    </div>
+                  ))}
                 </div>
-                <p className="text-xs text-red-700">
-                  Node telemetry is currently reporting policy or SLA breaches.
-                </p>
-                {onSelectIncident && (
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    onClick={() => onSelectIncident('active-incident')}
-                    className="w-full text-xs border-red-200 text-red-700 hover:bg-red-100"
-                  >
-                    Open Incident War-Room
-                  </Button>
-                )}
               </div>
             )}
           </div>
 
-          {/* Drawer Footer with Agent Link */}
-          {selectedNode.agent_id && onSelectAgent && (
-            <div className="border-t border-slate-100 p-4 bg-slate-50">
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => onSelectAgent(selectedNode.agent_id!)}
-                className="w-full text-xs"
-              >
-                Inspect Supervising Agent ({selectedNode.agent_id})
-              </Button>
-            </div>
-          )}
+          {/* Drawer Actions */}
+          <div className="border-t border-slate-200 bg-slate-50 p-4 flex gap-2">
+            <Button
+              variant="primary"
+              size="sm"
+              className="flex-1"
+              onClick={() => {
+                if (onSelectIncident && businessContext?.recent_incidents?.[0]) {
+                  onSelectIncident(businessContext.recent_incidents[0].id);
+                } else {
+                  window.location.hash = '#incidents';
+                }
+              }}
+            >
+              Incident War Room
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setSelectedNodeId(null)}
+            >
+              Close
+            </Button>
+          </div>
         </aside>
       )}
     </div>

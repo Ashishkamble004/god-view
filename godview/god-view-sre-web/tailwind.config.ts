@@ -1,34 +1,56 @@
 import type { Config } from 'tailwindcss';
+import gvPreset from './src/theme/tailwind-preset';
 
 const config: Config = {
   content: ['./index.html', './src/**/*.{ts,tsx}'],
+  presets: [gvPreset],
   theme: {
     extend: {
-      fontFamily: {
-        sans: ['Inter', 'system-ui', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Roboto', 'sans-serif'],
-        mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', 'monospace'],
-      },
       colors: {
-        canvas: {
-          DEFAULT: '#FFFFFF',
-          subtle: '#F8FAFC',
-          muted: '#F1F5F9',
+        slate: {
+          50: '#f8fafc',
+          100: '#f1f5f9',
+          200: '#e2e8f0',
+          300: '#cbd5e1',
+          400: '#94a3b8',
+          500: '#64748b',
+          600: '#475569',
+          700: '#334155',
+          800: '#1e293b',
+          900: '#0f172a',
         },
-        ink: {
-          heading: '#0F172A',
-          body: '#334155',
-          muted: '#64748B',
+        blue: {
+          50: '#eff6ff',
+          100: '#dbeafe',
+          500: '#3b82f6',
+          600: '#2563eb',
+          700: '#1d4ed8',
         },
-        accent: {
-          blue: '#1A73E8',
-          blueLight: '#4285F4',
-          green: '#188038',
-          greenLight: '#34A853',
-          amber: '#F9AB00',
-          amberLight: '#FBBC04',
-          red: '#D93025',
-          redLight: '#EA4335',
+        green: {
+          50: '#f0fdf4',
+          100: '#dcfce7',
+          600: '#16a34a',
+          800: '#166534',
         },
+        emerald: {
+          500: '#10b981',
+          700: '#047857',
+        },
+        red: {
+          50: '#fef2f2',
+          100: '#fee2e2',
+          200: '#fecaca',
+          600: '#dc2626',
+          700: '#b91c1c',
+          800: '#991b1b',
+        },
+        amber: {
+          50: '#fffbeb',
+          100: '#fef3c7',
+          600: '#d97706',
+          800: '#92400e',
+        },
+        white: '#ffffff',
       },
     },
   },

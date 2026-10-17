@@ -6,7 +6,7 @@ import {
   EmptyState,
   SectionHeader,
   formatEnumLabel,
-  formatInr,
+  formatCurrency,
   formatNumber,
 } from './ui';
 
@@ -64,18 +64,18 @@ export const JourneysTab: React.FC<JourneysTabProps> = ({
         <Card className="flex h-full flex-col justify-between p-4">
           <div className="flex items-center justify-between">
             <span className="text-xs text-slate-500">
-              Total Principal ₹ at Risk
+              Total Value at Risk
             </span>
             <Badge variant="warning" dot>
               Active exposure
             </Badge>
           </div>
           <p className="mt-2 text-2xl font-semibold text-slate-900 num-tabular">
-            {formatInr(journey.rupee_impact_model.total_rupee_at_risk)}
+            {formatCurrency(journey.impact_model.total_value_at_risk)}
           </p>
           <p className="mt-1 text-xs text-slate-600 num-tabular">
-            Avg ticket {formatInr(journey.rupee_impact_model.avg_ticket_inr)} ·{' '}
-            {journey.rupee_impact_model.violated_journeys_count} affected cohorts
+            Avg ticket {formatCurrency(journey.impact_model.avg_ticket_value)} ·{' '}
+            {journey.impact_model.violated_journeys_count} affected cohorts
           </p>
         </Card>
 
@@ -110,7 +110,7 @@ export const JourneysTab: React.FC<JourneysTabProps> = ({
             Violations
           </p>
           <p className="mt-1 text-xs text-slate-600 num-tabular">
-            {journey.rupee_impact_model.stuck_journeys_count} stuck journeys in
+            {journey.impact_model.stuck_journeys_count} stuck journeys in
             replay queue
           </p>
         </Card>
@@ -366,7 +366,7 @@ export const JourneysTab: React.FC<JourneysTabProps> = ({
                       {stage.conversion_pct.toFixed(1)}%
                     </td>
                     <td className="px-3 py-2.5 text-right font-semibold text-slate-900">
-                      {formatInr(stage.dropoff_rupee_value)}
+                      {formatCurrency(stage.dropoff_value)}
                     </td>
                   </tr>
                 ))}
@@ -400,8 +400,8 @@ export const JourneysTab: React.FC<JourneysTabProps> = ({
               <tbody className="divide-y divide-slate-200 num-tabular">
                 {journey.kpi_rollups.map((rollup) => {
                   const fmtVal = (v: number) =>
-                    rollup.unit === 'inr'
-                      ? formatInr(v)
+                    rollup.unit === 'currency'
+                      ? formatCurrency(v)
                       : rollup.unit === 'pct'
                       ? `${v.toFixed(1)}%`
                       : `${formatNumber(v)} ms`;
@@ -483,7 +483,7 @@ export const JourneysTab: React.FC<JourneysTabProps> = ({
                     {row.final_status}
                   </td>
                   <td className="px-3 py-2.5 text-right font-semibold text-slate-900">
-                    {formatInr(row.rupee_value)}
+                    {formatCurrency(row.value_at_risk)}
                   </td>
                   <td className="px-3 py-2.5 text-right text-slate-700">
                     {formatNumber(row.total_duration_ms)} ms

@@ -1,6 +1,6 @@
 # God-View Cockpit (`god-view-sre-web`)
 
-Operator control room UI for the Autonomous SRE & Software Evolution Organism (URL 3, deployed behind IAP at `godview.ak-demos.com`).
+Operator control room UI for the Autonomous SRE & Software Evolution Organism (URL 3, deployed behind IAP at `godview.<domain>`).
 
 ## Stack
 

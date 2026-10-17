@@ -50,6 +50,12 @@ function parseWindowHash(rawHash: string): ParsedHashRoute {
   if (!cleaned || cleaned === 'globe') {
     return { tab: 'globe', param: null };
   }
+  if (cleaned.startsWith('globe/')) {
+    return {
+      tab: 'globe',
+      param: decodeURIComponent(cleaned.slice('globe/'.length)),
+    };
+  }
   if (cleaned.startsWith('agent/')) {
     return {
       tab: 'agent',
@@ -711,6 +717,7 @@ export function App() {
                     dataset.journeys
                   )
                 }
+                selectedNodeId={route.param}
                 onSelectNode={(nodeId) => console.log('Selected node:', nodeId)}
                 onSelectIncident={(incId) =>
                   navigateToHash(

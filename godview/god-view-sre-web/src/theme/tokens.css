@@ -1,0 +1,461 @@
+/*
+ * God-View cockpit design tokens (Material 3 Expressive).
+ * Source of truth: godview/god-view-sre-web/DESIGN.md. Owner: design-lead.
+ *
+ * Usage:
+ *   import './theme/fonts.css';
+ *   import './theme/tokens.css';
+ *   Light is the default. Dark applies with <html data-theme="dark">, or
+ *   automatically from prefers-color-scheme when <html data-theme="system">.
+ *
+ * Rules:
+ *   - Never hardcode a hex in a component. Use var(--md-sys-color-*) or var(--gv-*).
+ *   - State colours (incident / warning / healthy / unknown) are only for state.
+ *   - The globe "space" stage is navy ink in BOTH themes.
+ *   - No off-palette hues: see the forbidden list in DESIGN.md section 1.
+ */
+
+:root,
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  /* ---------- Primary (seed Google Blue #1A73E8) ---------- */
+  --md-sys-color-primary: #1a73e8;
+  --md-sys-color-on-primary: #ffffff;
+  --md-sys-color-primary-container: #d3e3fd;
+  --md-sys-color-on-primary-container: #041e49;
+  --md-sys-color-primary-fixed: #d3e3fd;
+  --md-sys-color-primary-fixed-dim: #a8c7fa;
+  --md-sys-color-inverse-primary: #a8c7fa;
+  --md-sys-color-surface-tint: #1a73e8;
+  --gv-primary-hover: #1765cc;
+  --gv-primary-pressed: #185abc;
+
+  /* ---------- Secondary (sky, rail indicator + selection fills) ---------- */
+  --md-sys-color-secondary: #00639b;
+  --md-sys-color-on-secondary: #ffffff;
+  --md-sys-color-secondary-container: #c2e7ff;
+  --md-sys-color-on-secondary-container: #001d35;
+
+  /* ---------- Tertiary (teal, agents and AI) ---------- */
+  --md-sys-color-tertiary: #006972;
+  --md-sys-color-on-tertiary: #ffffff;
+  --md-sys-color-tertiary-container: #c2f7ff;
+  --md-sys-color-on-tertiary-container: #001f23;
+
+  /* ---------- Error = incident (Google red #D93025) ---------- */
+  --md-sys-color-error: #d93025;
+  --md-sys-color-on-error: #ffffff;
+  --md-sys-color-error-container: #fce8e6;
+  --md-sys-color-on-error-container: #a50e0e;
+
+  /* ---------- Custom semantic roles ---------- */
+  --gv-color-incident: var(--md-sys-color-error);
+  --gv-color-on-incident: var(--md-sys-color-on-error);
+  --gv-color-incident-container: var(--md-sys-color-error-container);
+  --gv-color-on-incident-container: var(--md-sys-color-on-error-container);
+
+  --gv-color-warning: #f9ab00; /* approvals, degraded, amber */
+  --gv-color-on-warning: #1f1f1f;
+  --gv-color-warning-container: #fef7e0;
+  --gv-color-on-warning-container: #7a4e00;
+  --gv-color-warning-text: #b06000; /* warning used AS text on white (AA) */
+
+  --gv-color-healthy: #188038;
+  --gv-color-on-healthy: #ffffff;
+  --gv-color-healthy-container: #e6f4ea;
+  --gv-color-on-healthy-container: #0d652d;
+
+  --gv-color-unknown: #9aa0a6;
+  --gv-color-on-unknown: #1f1f1f;
+  --gv-color-unknown-container: #f1f3f4;
+  --gv-color-on-unknown-container: #3c4043;
+
+  --gv-color-selection: var(--md-sys-color-primary);
+  --gv-color-link: var(--md-sys-color-primary);
+
+  /* ---------- Surfaces (luminous white, cool blue-grey tiers) ---------- */
+  --md-sys-color-background: #f8fafd;
+  --md-sys-color-on-background: #1f1f1f;
+  --md-sys-color-surface: #ffffff;
+  --md-sys-color-surface-dim: #d8dee7;
+  --md-sys-color-surface-bright: #ffffff;
+  --md-sys-color-surface-container-lowest: #ffffff;
+  --md-sys-color-surface-container-low: #f8fafd;
+  --md-sys-color-surface-container: #f0f4f9;
+  --md-sys-color-surface-container-high: #e9eef6;
+  --md-sys-color-surface-container-highest: #dde3ea;
+  --md-sys-color-surface-variant: #dde3ea;
+  --md-sys-color-on-surface: #1f1f1f;
+  --md-sys-color-on-surface-variant: #444746;
+  --md-sys-color-outline: #747775;
+  --md-sys-color-outline-variant: #c4c7c5;
+  --md-sys-color-inverse-surface: #2e3136;
+  --md-sys-color-inverse-on-surface: #f1f4f8;
+  --md-sys-color-scrim: #000000;
+  --md-sys-color-shadow: #0b1f3a;
+
+  /* App chrome roles (what each region paints) */
+  --gv-chrome-bg: var(--md-sys-color-surface-container-low); /* app bar, rail, gutter */
+  --gv-floating-bg: var(--md-sys-color-surface-container-lowest); /* cards / sheet over the globe */
+  --gv-tile-bg: var(--md-sys-color-surface-container); /* tiles inside sheets */
+
+  /* State-layer opacities (M3) */
+  --md-sys-state-hover: 0.08;
+  --md-sys-state-focus: 0.1;
+  --md-sys-state-pressed: 0.1;
+  --md-sys-state-dragged: 0.16;
+
+  /* Elevation (navy-tinted, used only for floating elements) */
+  --md-sys-elevation-0: none;
+  --md-sys-elevation-1: 0 1px 2px rgb(11 31 58 / 0.08), 0 1px 3px 1px rgb(11 31 58 / 0.05);
+  --md-sys-elevation-2: 0 1px 2px rgb(11 31 58 / 0.08), 0 2px 6px 2px rgb(11 31 58 / 0.06);
+  --md-sys-elevation-3: 0 4px 8px 3px rgb(11 31 58 / 0.08), 0 1px 3px rgb(11 31 58 / 0.1);
+  --md-sys-elevation-4: 0 6px 10px 4px rgb(11 31 58 / 0.09), 0 2px 3px rgb(11 31 58 / 0.1);
+  --md-sys-elevation-5: 0 8px 12px 6px rgb(11 31 58 / 0.1), 0 4px 4px rgb(11 31 58 / 0.1);
+  /* Over the dark globe, shadows read as a soft lift, so use a deeper ambient. */
+  --gv-elevation-over-space: 0 12px 32px rgb(2 8 20 / 0.45), 0 2px 6px rgb(2 8 20 / 0.3);
+}
+
+/* ======================= DARK ======================= */
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --md-sys-color-primary: #a8c7fa;
+  --md-sys-color-on-primary: #062e6f;
+  --md-sys-color-primary-container: #0842a0;
+  --md-sys-color-on-primary-container: #d3e3fd;
+  --md-sys-color-primary-fixed: #d3e3fd;
+  --md-sys-color-primary-fixed-dim: #a8c7fa;
+  --md-sys-color-inverse-primary: #1a73e8;
+  --md-sys-color-surface-tint: #a8c7fa;
+  --gv-primary-hover: #bdd5fb;
+  --gv-primary-pressed: #d3e3fd;
+
+  --md-sys-color-secondary: #7fcfff;
+  --md-sys-color-on-secondary: #003355;
+  --md-sys-color-secondary-container: #004a77;
+  --md-sys-color-on-secondary-container: #c2e7ff;
+
+  --md-sys-color-tertiary: #75d5e2;
+  --md-sys-color-on-tertiary: #00363c;
+  --md-sys-color-tertiary-container: #004f56;
+  --md-sys-color-on-tertiary-container: #c2f7ff;
+
+  --md-sys-color-error: #f28b82;
+  --md-sys-color-on-error: #601410;
+  --md-sys-color-error-container: #8c1d18;
+  --md-sys-color-on-error-container: #f9dedc;
+
+  --gv-color-warning: #fdd663;
+  --gv-color-on-warning: #3b2600;
+  --gv-color-warning-container: #4f3400;
+  --gv-color-on-warning-container: #ffdfa0;
+  --gv-color-warning-text: #fdd663;
+
+  --gv-color-healthy: #81c995;
+  --gv-color-on-healthy: #0a3818;
+  --gv-color-healthy-container: #0f5223;
+  --gv-color-on-healthy-container: #c4eed0;
+
+  --gv-color-unknown: #9aa0a6;
+  --gv-color-on-unknown: #1f1f1f;
+  --gv-color-unknown-container: #2b3541;
+  --gv-color-on-unknown-container: #dadce0;
+
+  /* Ink surfaces: cool azure-navy tint (hue ~215) */
+  --md-sys-color-background: #0f141b;
+  --md-sys-color-on-background: #e3e6ea;
+  --md-sys-color-surface: #0f141b;
+  --md-sys-color-surface-dim: #0f141b;
+  --md-sys-color-surface-bright: #343a44;
+  --md-sys-color-surface-container-lowest: #0a0e14;
+  --md-sys-color-surface-container-low: #141a22;
+  --md-sys-color-surface-container: #18202a;
+  --md-sys-color-surface-container-high: #212a35;
+  --md-sys-color-surface-container-highest: #2b3541;
+  --md-sys-color-surface-variant: #2b3541;
+  --md-sys-color-on-surface: #e3e6ea;
+  --md-sys-color-on-surface-variant: #c4c7cc;
+  --md-sys-color-outline: #8e9196;
+  --md-sys-color-outline-variant: #434850;
+  --md-sys-color-inverse-surface: #e3e6ea;
+  --md-sys-color-inverse-on-surface: #2e3136;
+  --md-sys-color-scrim: #000000;
+  --md-sys-color-shadow: #000000;
+
+  --gv-chrome-bg: var(--md-sys-color-surface-container-low);
+  --gv-floating-bg: var(--md-sys-color-surface-container-high);
+  --gv-tile-bg: var(--md-sys-color-surface-container-highest);
+
+  --md-sys-elevation-1: 0 1px 2px rgb(0 0 0 / 0.3), 0 1px 3px 1px rgb(0 0 0 / 0.15);
+  --md-sys-elevation-2: 0 1px 2px rgb(0 0 0 / 0.3), 0 2px 6px 2px rgb(0 0 0 / 0.15);
+  --md-sys-elevation-3: 0 4px 8px 3px rgb(0 0 0 / 0.15), 0 1px 3px rgb(0 0 0 / 0.3);
+  --md-sys-elevation-4: 0 6px 10px 4px rgb(0 0 0 / 0.15), 0 2px 3px rgb(0 0 0 / 0.3);
+  --md-sys-elevation-5: 0 8px 12px 6px rgb(0 0 0 / 0.15), 0 4px 4px rgb(0 0 0 / 0.3);
+}
+
+/* Follow the OS when the app is set to "system". */
+@media (prefers-color-scheme: dark) {
+  :root[data-theme='system'] {
+    color-scheme: dark;
+    --md-sys-color-primary: #a8c7fa;
+    --md-sys-color-on-primary: #062e6f;
+    --md-sys-color-primary-container: #0842a0;
+    --md-sys-color-on-primary-container: #d3e3fd;
+    --md-sys-color-inverse-primary: #1a73e8;
+    --md-sys-color-surface-tint: #a8c7fa;
+    --gv-primary-hover: #bdd5fb;
+    --gv-primary-pressed: #d3e3fd;
+    --md-sys-color-secondary: #7fcfff;
+    --md-sys-color-on-secondary: #003355;
+    --md-sys-color-secondary-container: #004a77;
+    --md-sys-color-on-secondary-container: #c2e7ff;
+    --md-sys-color-tertiary: #75d5e2;
+    --md-sys-color-on-tertiary: #00363c;
+    --md-sys-color-tertiary-container: #004f56;
+    --md-sys-color-on-tertiary-container: #c2f7ff;
+    --md-sys-color-error: #f28b82;
+    --md-sys-color-on-error: #601410;
+    --md-sys-color-error-container: #8c1d18;
+    --md-sys-color-on-error-container: #f9dedc;
+    --gv-color-warning: #fdd663;
+    --gv-color-on-warning: #3b2600;
+    --gv-color-warning-container: #4f3400;
+    --gv-color-on-warning-container: #ffdfa0;
+    --gv-color-warning-text: #fdd663;
+    --gv-color-healthy: #81c995;
+    --gv-color-on-healthy: #0a3818;
+    --gv-color-healthy-container: #0f5223;
+    --gv-color-on-healthy-container: #c4eed0;
+    --gv-color-unknown-container: #2b3541;
+    --gv-color-on-unknown-container: #dadce0;
+    --md-sys-color-background: #0f141b;
+    --md-sys-color-on-background: #e3e6ea;
+    --md-sys-color-surface: #0f141b;
+    --md-sys-color-surface-dim: #0f141b;
+    --md-sys-color-surface-bright: #343a44;
+    --md-sys-color-surface-container-lowest: #0a0e14;
+    --md-sys-color-surface-container-low: #141a22;
+    --md-sys-color-surface-container: #18202a;
+    --md-sys-color-surface-container-high: #212a35;
+    --md-sys-color-surface-container-highest: #2b3541;
+    --md-sys-color-surface-variant: #2b3541;
+    --md-sys-color-on-surface: #e3e6ea;
+    --md-sys-color-on-surface-variant: #c4c7cc;
+    --md-sys-color-outline: #8e9196;
+    --md-sys-color-outline-variant: #434850;
+    --md-sys-color-inverse-surface: #e3e6ea;
+    --md-sys-color-inverse-on-surface: #2e3136;
+    --md-sys-color-shadow: #000000;
+    --gv-floating-bg: var(--md-sys-color-surface-container-high);
+    --gv-tile-bg: var(--md-sys-color-surface-container-highest);
+  }
+}
+
+/* ============ Theme-independent tokens ============ */
+:root {
+  /* ---------- Globe "space" stage (same in light and dark) ---------- */
+  --gv-space-core: #0d2647; /* radial centre, behind the sphere */
+  --gv-space-mid: #081a33;
+  --gv-space-edge: #040b17; /* stage corners */
+  --gv-space-gradient: radial-gradient(
+    120% 100% at 55% 45%,
+    var(--gv-space-core) 0%,
+    var(--gv-space-mid) 45%,
+    var(--gv-space-edge) 100%
+  );
+  --gv-globe-ocean: #0a1f3d; /* sphere base colour */
+  --gv-globe-ocean-lit: #123563; /* sphere key-light side */
+  --gv-globe-graticule: rgb(168 199 250 / 0.1); /* lat/long lines */
+  --gv-globe-atmosphere: #4c8df6; /* fresnel rim, use at 0.35 alpha */
+  --gv-star: rgb(255 255 255 / 0.55);
+  --gv-arc: #8ab4f8; /* connection arcs, draw at 0.45 alpha */
+  --gv-arc-particle: #e8f0fe; /* flowing traffic heads */
+  --gv-arc-error: #f28b82; /* edges with error_ratio above threshold */
+  --gv-arc-journey: #a8c7fa; /* highlighted journey path, full alpha */
+  --gv-node-healthy: #5bb974; /* = healthy, lifted for navy */
+  --gv-node-warning: #fcc934; /* = warning / amber */
+  --gv-node-incident: #ee675c; /* = incident / red */
+  --gv-node-unknown: #9aa0a6;
+  --gv-node-agent: #75d5e2; /* awake agent satellites (teal) */
+  --gv-node-selected-ring: #8ab4f8;
+  --gv-on-space: #e8eef7; /* labels drawn directly on the stage */
+  --gv-on-space-variant: #a9b8cc;
+  --gv-space-dim-overlay: rgb(4 11 23 / 0.55); /* dims non-journey nodes */
+
+  /* ---------- Typography ---------- */
+  --gv-font-display: 'Google Sans Display', 'Google Sans', 'Google Sans Flex', 'Roboto', system-ui, sans-serif;
+  --gv-font-title: 'Google Sans', 'Google Sans Flex', 'Roboto', system-ui, sans-serif;
+  --gv-font-label: 'Google Sans Text', 'Google Sans', 'Roboto', system-ui, sans-serif;
+  --gv-font-body: 'Roboto', 'Roboto Flex', system-ui, sans-serif;
+  --gv-font-mono: 'Google Sans Mono', 'Roboto Mono', ui-monospace, monospace;
+  --gv-font-icon: 'Material Symbols Rounded';
+
+  /* size / line-height / weight / tracking */
+  --md-sys-typescale-display-large: 400 57px/64px var(--gv-font-display);
+  --md-sys-typescale-display-large-tracking: -0.25px;
+  --md-sys-typescale-display-medium: 400 45px/52px var(--gv-font-display);
+  --md-sys-typescale-display-small: 400 36px/44px var(--gv-font-display);
+  --md-sys-typescale-headline-large: 400 32px/40px var(--gv-font-title);
+  --md-sys-typescale-headline-medium: 400 28px/36px var(--gv-font-title);
+  --md-sys-typescale-headline-small: 400 24px/32px var(--gv-font-title);
+  --md-sys-typescale-title-large: 400 22px/28px var(--gv-font-title);
+  --md-sys-typescale-title-medium: 500 16px/24px var(--gv-font-title);
+  --md-sys-typescale-title-medium-tracking: 0.15px;
+  --md-sys-typescale-title-small: 500 14px/20px var(--gv-font-title);
+  --md-sys-typescale-title-small-tracking: 0.1px;
+  --md-sys-typescale-body-large: 400 16px/24px var(--gv-font-body);
+  --md-sys-typescale-body-large-tracking: 0.5px;
+  --md-sys-typescale-body-medium: 400 14px/20px var(--gv-font-body);
+  --md-sys-typescale-body-medium-tracking: 0.25px;
+  --md-sys-typescale-body-small: 400 12px/16px var(--gv-font-body);
+  --md-sys-typescale-body-small-tracking: 0.4px;
+  --md-sys-typescale-label-large: 500 14px/20px var(--gv-font-label);
+  --md-sys-typescale-label-large-tracking: 0.1px;
+  --md-sys-typescale-label-medium: 500 12px/16px var(--gv-font-label);
+  --md-sys-typescale-label-medium-tracking: 0.5px;
+  --md-sys-typescale-label-small: 500 11px/16px var(--gv-font-label);
+  --md-sys-typescale-label-small-tracking: 0.5px;
+  /* Metric numerals (always font-variant-numeric: tabular-nums) */
+  --gv-typescale-metric-xl: 400 44px/48px var(--gv-font-display); /* stat cards */
+  --gv-typescale-metric-lg: 400 32px/36px var(--gv-font-display); /* sheet tiles */
+  --gv-typescale-metric-md: 400 24px/28px var(--gv-font-display); /* compact tiles */
+  --gv-typescale-metric-unit: 500 14px/20px var(--gv-font-label); /* "ms", "%", "/12" */
+
+  /* ---------- Spacing (4 px grid) ---------- */
+  --gv-space-0: 0;
+  --gv-space-1: 4px;
+  --gv-space-2: 8px;
+  --gv-space-3: 12px;
+  --gv-space-4: 16px;
+  --gv-space-5: 20px;
+  --gv-space-6: 24px;
+  --gv-space-8: 32px;
+  --gv-space-10: 40px;
+  --gv-space-12: 48px;
+  --gv-space-16: 64px;
+
+  /* ---------- Shape ---------- */
+  --md-sys-shape-corner-none: 0;
+  --md-sys-shape-corner-extra-small: 8px; /* tooltips, menu items */
+  --md-sys-shape-corner-small: 12px; /* tiles inside sheets, text fields */
+  --md-sys-shape-corner-medium: 16px; /* FAB, list-item hover, small cards */
+  --md-sys-shape-corner-large: 20px; /* cards, banners, stat cards */
+  --md-sys-shape-corner-large-increased: 24px; /* dialogs on compact */
+  --md-sys-shape-corner-extra-large: 28px; /* stage, side sheet, dialogs, bottom sheet */
+  --md-sys-shape-corner-full: 9999px; /* buttons, chips, search, rail indicator */
+
+  /* ---------- Layout ---------- */
+  --gv-appbar-height: 64px;
+  --gv-rail-width: 80px;
+  --gv-stage-gutter: 8px; /* gap between stage and window edge (right, bottom) */
+  --gv-stage-inset: 24px; /* overlay padding inside the stage */
+  --gv-sheet-width: 400px; /* node / journey side sheet */
+  --gv-sheet-width-wide: 480px; /* incident war-room sheet */
+  --gv-sheet-inset: 16px; /* sheet distance from stage edges */
+  --gv-statcard-width: 168px;
+  --gv-statcard-height: 96px;
+  --gv-touch-target: 48px;
+
+  /* ---------- Motion (M3 Expressive) ---------- */
+  --md-sys-motion-easing-emphasized: cubic-bezier(0.2, 0, 0, 1);
+  --md-sys-motion-easing-emphasized-decelerate: cubic-bezier(0.05, 0.7, 0.1, 1);
+  --md-sys-motion-easing-emphasized-accelerate: cubic-bezier(0.3, 0, 0.8, 0.15);
+  --md-sys-motion-easing-standard: cubic-bezier(0.2, 0, 0, 1);
+  --md-sys-motion-easing-standard-decelerate: cubic-bezier(0, 0, 0, 1);
+  --md-sys-motion-easing-standard-accelerate: cubic-bezier(0.3, 0, 1, 1);
+  /* Expressive spatial springs approximated for CSS (overshoot ~4%) */
+  --gv-motion-spring-fast: cubic-bezier(0.42, 1.67, 0.21, 0.9); /* 350ms: chips, toggles */
+  --gv-motion-spring-default: cubic-bezier(0.38, 1.21, 0.22, 1); /* 500ms: sheet, cards */
+  --md-sys-motion-duration-short1: 50ms;
+  --md-sys-motion-duration-short2: 100ms;
+  --md-sys-motion-duration-short3: 150ms;
+  --md-sys-motion-duration-short4: 200ms;
+  --md-sys-motion-duration-medium1: 250ms;
+  --md-sys-motion-duration-medium2: 300ms;
+  --md-sys-motion-duration-medium3: 350ms;
+  --md-sys-motion-duration-medium4: 400ms;
+  --md-sys-motion-duration-long1: 450ms;
+  --md-sys-motion-duration-long2: 500ms;
+  --md-sys-motion-duration-long3: 550ms;
+  --md-sys-motion-duration-long4: 600ms;
+  --md-sys-motion-duration-extra-long2: 800ms;
+  --md-sys-motion-duration-extra-long4: 1000ms;
+  --gv-motion-flyto: 1200ms; /* camera fly-to on select */
+  --gv-motion-pulse: 1600ms; /* incident ring period */
+  --gv-motion-arc-loop: 2400ms; /* one particle traverse at baseline traffic */
+  --gv-motion-idle-rotation-deg-per-s: 1.5; /* 1 revolution / 240 s */
+  --gv-motion-idle-resume-ms: 8000; /* resume rotation after last interaction */
+
+  /* ---------- z-index ---------- */
+  --gv-z-stage: 0;
+  --gv-z-stage-overlay: 10;
+  --gv-z-sheet: 20;
+  --gv-z-appbar: 30;
+  --gv-z-banner: 40;
+  --gv-z-menu: 50;
+  --gv-z-snackbar: 60;
+  --gv-z-dialog: 70;
+}
+
+/* ============ Base application ============ */
+html {
+  background: var(--gv-chrome-bg);
+  color: var(--md-sys-color-on-surface);
+  font: var(--md-sys-typescale-body-medium);
+  letter-spacing: var(--md-sys-typescale-body-medium-tracking);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+::selection {
+  background: var(--md-sys-color-primary-container);
+  color: var(--md-sys-color-on-primary-container);
+}
+
+:focus-visible {
+  outline: 3px solid var(--md-sys-color-primary);
+  outline-offset: 2px;
+}
+
+.gv-numeric {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
+}
+
+.material-symbols-rounded {
+  font-family: var(--gv-font-icon);
+  font-weight: normal;
+  font-style: normal;
+  font-size: 24px;
+  line-height: 1;
+  letter-spacing: normal;
+  text-transform: none;
+  display: inline-block;
+  white-space: nowrap;
+  direction: ltr;
+  -webkit-font-feature-settings: 'liga';
+  font-feature-settings: 'liga';
+  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+}
+.material-symbols-rounded.is-filled {
+  font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+}
+
+/* Reduced motion: kill decorative motion globally; the globe reads
+   window.matchMedia('(prefers-reduced-motion: reduce)') for its own fallbacks. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --gv-motion-flyto: 0ms;
+    --gv-motion-idle-rotation-deg-per-s: 0;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
+}

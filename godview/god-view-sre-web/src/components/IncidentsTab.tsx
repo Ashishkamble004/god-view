@@ -11,7 +11,7 @@ import {
   SeverityBadge,
   TrustLevelBadge,
   formatEnumLabel,
-  formatInr,
+  formatCurrency,
   formatNumber,
   formatShortTime,
 } from './ui';
@@ -47,7 +47,7 @@ export const IncidentsTab: React.FC<IncidentsTabProps> = ({
   const evp = activeIncident.evidence_pack;
   const isGreenButBroken = evp.golden_signals.status === 'green';
 
-  const totalExposure = incidents.reduce((sum, i) => sum + i.rupee_impact, 0);
+  const totalExposure = incidents.reduce((sum, i) => sum + (i.value_impact || 0), 0);
   const avgMtti =
     incidents.length > 0
       ? Math.round(
@@ -130,7 +130,7 @@ export const IncidentsTab: React.FC<IncidentsTabProps> = ({
                 Quantified Business Exposure Protected
               </span>
               <p className="mt-2 text-2xl font-semibold text-slate-900 num-tabular">
-                {formatInr(totalExposure)}
+                {formatCurrency(totalExposure)}
               </p>
               <p className="mt-1 text-xs text-slate-600">
                 Principal at risk across detected invariant &amp; infra breaches
@@ -216,7 +216,7 @@ export const IncidentsTab: React.FC<IncidentsTabProps> = ({
                           {inc.lead_agent_id}
                         </td>
                         <td className="whitespace-nowrap px-3 py-2.5 text-right font-semibold text-slate-900">
-                          {formatInr(inc.rupee_impact)}
+                          {formatCurrency(inc.value_impact || 0)}
                         </td>
                         <td className="whitespace-nowrap px-3 py-2.5 font-mono text-slate-700">
                           {(inc.convergence.consensus * 100).toFixed(0)}% ·{' '}
@@ -299,7 +299,7 @@ export const IncidentsTab: React.FC<IncidentsTabProps> = ({
               Quantified Business Exposure
             </span>
             <p className="mt-0.5 text-2xl font-semibold text-slate-900">
-              {formatInr(activeIncident.rupee_impact)}
+              {formatCurrency(activeIncident.value_impact || 0)}
             </p>
             <p className="text-xs text-slate-500">
               {evp.affected.rows} affected records · Opened{' '}

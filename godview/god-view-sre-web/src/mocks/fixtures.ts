@@ -198,7 +198,7 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
           adapter_family: 'gcp',
           locator: `projects/${envId}/locations/us-central1/services/${svcCreditline}`,
           labels: { godview_managed: 'true', tf_module: '04-tenant-compute' },
-          inferred_role: 'Commercial credit line and working-capital limit sanction service',
+          inferred_role: 'Commercial credit line and working-capital limit authorization service',
           role_confidence: 0.93,
           classification: 'journey_linked',
           routes: ['POST /internal/credit-limit/evaluate'],
@@ -236,13 +236,13 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
           name: svcSettlement,
           kind: 'gce_vm',
           adapter_family: 'gcp',
-          locator: `projects/${envId}/zones/us-central1-a/instances/${svcSettlement}:8085`,
+          locator: `projects/${envId}/zones/us-central1-a/instances/${svcSettlement}:8090`,
           labels: { godview_managed: 'true', tf_module: '04-tenant-compute' },
           inferred_role: 'Credit bureau scoring, e-mandate registration, and RTGS/NEFT UTR settlement',
           role_confidence: 0.95,
           classification: 'journey_linked',
-          routes: ['POST /internal/settlement/score-and-disburse', 'POST /internal/settlement/disburse'],
-          metrics_endpoint: ':8085/metrics',
+          routes: ['POST /internal/settlement/score-and-settle', 'POST /internal/settlement/execute'],
+          metrics_endpoint: ':8090/metrics',
           repo_ref: repoSlug,
           tf_address: `module.tenant_compute.google_compute_instance.settlement_vm`,
           owner_agent_id: `application__${svcSettlement}`,
@@ -296,7 +296,7 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
           id: `${svcEvaluator}__to__${svcSettlement}`,
           src: svcEvaluator,
           dst: svcSettlement,
-          protocol: 'HTTP/1.1 port 8085',
+          protocol: 'HTTP/1.1 port 8090',
           evidence: 'code',
           call_rate_baseline: 36.8,
           first_seen: '2026-10-15T09:05:00Z',
@@ -328,13 +328,13 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
             'REJECTED',
             'PROTECTED',
             'SETTLEMENT_PENDING',
-            'DISBURSED',
+            'SETTLED',
           ],
           transitions: [
             { from: 'IDENTITY_PENDING', to: 'IDENTITY_VERIFIED' },
             { from: 'IDENTITY_VERIFIED', to: 'APPROVED' },
             { from: 'APPROVED', to: 'PROTECTED' },
-            { from: 'PROTECTED', to: 'DISBURSED' },
+            { from: 'PROTECTED', to: 'SETTLED' },
           ],
           rules_ref: ['rule-obligation-ratio-cap', 'rule-bureau-minimum'],
           provenance: `${repoSlug}@9f1c2ab:services/${svcEvaluator}/app/rules_engine.py`,
@@ -460,7 +460,7 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
             },
             {
               id: 'rule-installment-formula',
-              expression: 'abs(installment_inr - amortize(principal_inr, rate_pct, tenure_months)) <= 1.0',
+              expression: 'abs(installment_amount - amortize(principal_amount, rate_pct, tenure_months)) <= 1.0',
               description: 'Monthly installment matches standard reducing-balance amortization within ₹1 rounding tolerance',
               source_path: `services/${svcEvaluator}/app/pricing.py#L19-L37`,
               source_sha: '9f1c2ab',
@@ -470,7 +470,7 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
           state_machines: [
             {
               entity: 'credit_application',
-              states: ['IDENTITY_PENDING', 'IDENTITY_VERIFIED', 'APPROVED', 'REJECTED', 'PROTECTED', 'DISBURSED'],
+              states: ['IDENTITY_PENDING', 'IDENTITY_VERIFIED', 'APPROVED', 'REJECTED', 'PROTECTED', 'SETTLED'],
               transitions: [
                 {
                   from: 'IDENTITY_PENDING',
@@ -498,9 +498,9 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
                 },
                 {
                   from: 'PROTECTED',
-                  to: 'DISBURSED',
-                  trigger: 'disbursement.settled',
-                  route: 'POST /internal/settlement/disburse',
+                  to: 'SETTLED',
+                  trigger: 'settlement.completed',
+                  route: 'POST /internal/settlement/execute',
                 },
               ],
             },
@@ -527,7 +527,7 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
           ],
           dependencies: [
             {
-              target: `${svcSettlement}:8085`,
+              target: `${svcSettlement}:8090`,
               kind: 'service',
               protocol: 'HTTP/1.1 REST',
               evidence: 'W3C traceparent span + HTTP client config',
@@ -634,9 +634,9 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
             ],
           },
           {
-            id: `${bizAgentId}__biz.replay_disbursement`,
+            id: `${bizAgentId}__biz.replay_settlement`,
             agent_id: bizAgentId,
-            action_type: 'biz.replay_disbursement',
+            action_type: 'biz.replay_settlement',
             level: 4,
             counters: {
               recommendations_correct: 14,
@@ -665,7 +665,7 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
           entities: [
             {
               name: journeyKey,
-              fields: ['journey_id', 'customer_id', 'observed_sequence', 'conformance', 'rupee_value'],
+              fields: ['journey_id', 'customer_id', 'observed_sequence', 'conformance', 'value_at_risk'],
               correlation_keys: ['journey_id'],
               tables: ['journeys', 'state_transitions'],
               provenance: `services/${svcOrchestrator}/app/coordinator.py@9f1c2ab#L28-L95`,
@@ -685,12 +685,12 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
           routes: [
             {
               method: 'POST',
-              path: '/admin/v1/disbursements/{id}:replay',
+              path: '/admin/v1/settlements/{id}:replay',
               auth: 'IAM godview-act-sa OIDC',
               probe_safe: false,
               admin: true,
-              admin_capability: 'biz.replay_disbursement',
-              writes: ['disbursements.status'],
+              admin_capability: 'biz.replay_settlement',
+              writes: ['settlements.status'],
             },
           ],
           dependencies: [],
@@ -753,17 +753,17 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
           entities: [
             {
               name: 'settlement_ledger',
-              fields: ['disbursement_id', 'application_id', 'sanction_letter_no', 'cbs_utr_number', 'status'],
-              correlation_keys: ['disbursement_id', 'application_id'],
-              tables: ['disbursements', 'protection_policies'],
+              fields: ['settlement_id', 'application_id', 'auth_token_no', 'cbs_utr_number', 'status'],
+              correlation_keys: ['settlement_id', 'application_id'],
+              tables: ['settlements', 'protection_policies'],
               provenance: `services/${svcOrchestrator}/app/schema.sql#L88-L132`,
             },
           ],
           rules: [
             {
-              id: 'rule-disbursed-has-protection',
-              expression: 'status == "DISBURSED" implies exists(protection_policies.application_id)',
-              description: 'Every settled disbursement must have a persisted protection policy row',
+              id: 'rule-settled-has-protection',
+              expression: 'status == "SETTLED" implies exists(protection_policies.application_id)',
+              description: 'Every settlement execution must have a persisted protection policy row',
               source_path: `services/${svcOrchestrator}/app/schema.sql#L110-L125`,
               source_sha: '9f1c2ab',
               confidence: 0.98,
@@ -955,7 +955,7 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
 **Business meaning**: Every \`APPROVED\` eligibility decision requires a fixed-obligation-to-income ratio of at most **60%** and a credit bureau score of at least **680**.
 
 - **Provenance**: Extracted from \`services/${svcEvaluator}/app/rules_engine.py\` lines 41–58.
-- **₹ at risk**: Sum of \`requested_amount_inr\` across non-compliant approvals in the 300s evaluation window.
+- **₹ at risk**: Sum of \`requested_amount\` across non-compliant approvals in the 300s evaluation window.
 - **Remediation protocol**:
   1. Correlate with recent commits/deploys on \`${svcEvaluator}\`.
   2. Open rollback PR via \`git.create_rollback_pr\` (Trust Level L3).
@@ -978,8 +978,8 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
         ],
       },
       {
-        id: 'inv-disbursement-requires-protection-row',
-        name: 'disbursement-requires-protection-row',
+        id: 'inv-settlement-requires-protection-row',
+        name: 'settlement-requires-protection-row',
         scope: {
           service: svcProtection,
           entity: 'settlement_ledger',
@@ -991,7 +991,7 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
           dialect: 'postgres',
           window_s: 300,
           statement:
-            "SELECT COUNT(*) FROM applications a LEFT JOIN protection_policies p ON a.application_id = p.application_id WHERE a.status = 'DISBURSED' AND p.policy_id IS NULL",
+            "SELECT COUNT(*) FROM applications a LEFT JOIN protection_policies p ON a.application_id = p.application_id WHERE a.status = 'SETTLED' AND p.policy_id IS NULL",
         },
         severity: 'sev1',
         wake_condition: {
@@ -1009,12 +1009,12 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
           breaches: 0,
           false_positive_rate: 0.0,
         },
-        sentinel_id: 'snt-invariant_sql-disbursement-requires-protection-row',
-        git_path: `godview/invariants/${journeyKey}/disbursement-requires-protection-row/INVARIANT.md`,
+        sentinel_id: 'snt-invariant_sql-settlement-requires-protection-row',
+        git_path: `godview/invariants/${journeyKey}/settlement-requires-protection-row/INVARIANT.md`,
         git_sha: '9f1c2ab',
-        body_md: `### Invariant: DISBURSED ⇒ Protection Policy Row Exists
+        body_md: `### Invariant: SETTLED ⇒ Protection Policy Row Exists
 
-**Business meaning**: No application may reach \`DISBURSED\` status without a persisted protection policy row in \`${dbPrimary}\`. Catching HTTP 200 silent drops where the service returns success without committing a database record.`,
+**Business meaning**: No application may reach \`SETTLED\` status without a persisted protection policy row in \`${dbPrimary}\`. Catching HTTP 200 silent drops where the service returns success without committing a database record.`,
         history: [
           {
             at: '2026-10-15T10:00:00Z',
@@ -1038,7 +1038,7 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
         check: {
           dialect: 'python',
           window_s: 300,
-          statement: 'abs(observed_installment_inr - expected_amortized_inr(principal, rate_pct, tenure)) <= 1.0',
+          statement: 'abs(observed_installment_amount - expected_amortized_val(principal, rate_pct, tenure)) <= 1.0',
         },
         severity: 'sev2',
         wake_condition: {
@@ -1085,7 +1085,7 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
         check: {
           dialect: 'bigquery',
           window_s: 600,
-          statement: "SELECT COUNT(*) FROM godview_ledger.state_transitions WHERE dwell_ms > 45000 AND status_to = 'DISBURSED'",
+          statement: "SELECT COUNT(*) FROM godview_ledger.state_transitions WHERE dwell_ms > 45000 AND status_to = 'SETTLED'",
         },
         severity: 'sev3',
         wake_condition: {
@@ -1240,7 +1240,7 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
             id: 'STEP_SETTLEMENT',
             label: '5. Bureau & RTGS Settlement',
             service: svcSettlement,
-            operation: 'POST /internal/settlement/score-and-disburse',
+            operation: 'POST /internal/settlement/score-and-settle',
             completion_rate_pct: 97.9,
             avg_dwell_ms: 610,
             p95_dwell_ms: 1120,
@@ -1324,7 +1324,7 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
             entered: 300,
             completed: 295,
             conversion_pct: 98.3,
-            dropoff_rupee_value: 4250000,
+            dropoff_value: 4250000,
           },
           {
             step_id: 'STEP_EVALUATION',
@@ -1332,7 +1332,7 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
             entered: 295,
             completed: 262,
             conversion_pct: 88.8,
-            dropoff_rupee_value: 18400000,
+            dropoff_value: 18400000,
           },
           {
             step_id: 'STEP_PROTECTION',
@@ -1340,7 +1340,7 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
             entered: 262,
             completed: 256,
             conversion_pct: 97.7,
-            dropoff_rupee_value: 5100000,
+            dropoff_value: 5100000,
           },
           {
             step_id: 'STEP_SETTLEMENT',
@@ -1348,14 +1348,14 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
             entered: 256,
             completed: 251,
             conversion_pct: 98.0,
-            dropoff_rupee_value: 4450000,
+            dropoff_value: 4450000,
           },
         ],
-        rupee_impact_model: {
-          avg_ticket_inr: 867924,
+        impact_model: {
+          avg_ticket_value: 867924,
           stuck_journeys_count: 5,
           violated_journeys_count: 212,
-          total_rupee_at_risk: 18400000,
+          total_value_at_risk: 18400000,
         },
         recent_instances: [
           {
@@ -1364,8 +1364,8 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
             ended_at: '2026-10-16T14:04:33Z',
             observed_sequence: 'STEP_IDENTITY -> STEP_EVALUATION -> STEP_SETTLEMENT',
             conformance: 'SKIPPED',
-            final_status: 'DISBURSED_WITHOUT_POLICY',
-            rupee_value: 1240000,
+            final_status: 'SETTLED_WITHOUT_POLICY',
+            value_at_risk: 1240000,
             total_duration_ms: 2480,
             is_synthetic: true,
           },
@@ -1376,7 +1376,7 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
             observed_sequence: 'STEP_PROTECTION -> STEP_IDENTITY -> STEP_EVALUATION -> STEP_SETTLEMENT',
             conformance: 'REORDERED',
             final_status: 'CONFORMANCE_FLAGGED',
-            rupee_value: 980000,
+            value_at_risk: 980000,
             total_duration_ms: 2790,
             is_synthetic: true,
           },
@@ -1387,7 +1387,7 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
             observed_sequence: 'STEP_IDENTITY -> STEP_EVALUATION -> STEP_PROTECTION',
             conformance: 'STALLED',
             final_status: 'SETTLEMENT_PENDING',
-            rupee_value: 1650000,
+            value_at_risk: 1650000,
             total_duration_ms: 38400,
             is_synthetic: false,
           },
@@ -1397,8 +1397,8 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
             ended_at: '2026-10-16T14:06:02Z',
             observed_sequence: 'STEP_IDENTITY -> STEP_EVALUATION -> STEP_PROTECTION -> STEP_SETTLEMENT',
             conformance: 'CONFORMANT',
-            final_status: 'DISBURSED',
-            rupee_value: 890000,
+            final_status: 'SETTLED',
+            value_at_risk: 890000,
             total_duration_ms: 1940,
             is_synthetic: true,
           },
@@ -1425,9 +1425,9 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
             window_end: '2026-10-16T14:10:00Z',
             env_id: envId,
             journey_name: journeyKey,
-            kpi: 'rupees_per_hour',
-            label: 'Disbursed ₹ / Hour',
-            unit: 'inr',
+            kpi: 'value_per_hour',
+            label: 'Settled Value / Hour',
+            unit: 'currency',
             segment: 'all',
             value: 24800000,
             baseline_value: 43200000,
@@ -1488,7 +1488,7 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
           `14:05:51Z — Swarm converged in 2 rounds (41s, consensus 0.92): autonomous L3 rollback PR #43 created; L4 cohort re-evaluation awaiting approval apr-inc-20261016-0003-2`,
         ],
         outcome: 'mitigated',
-        rupee_impact: 18400000,
+        value_impact: 18400000,
         affected_journeys: [journeyKey],
         convergence: {
           consensus: 0.92,
@@ -1545,7 +1545,7 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
             journeys: [journeyKey],
             journey_ids: ['j-7f3a-9910', 'j-7f41-9911'],
             rows: 212,
-            rupee_at_risk: 18400000,
+            value_at_risk: 18400000,
           },
           correlated_changes: [
             {
@@ -1586,7 +1586,7 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
             summary: 'Sentinel breach evp-20261016-0007 dispatched to lead Application Agent; 90s convergence clock started',
             payload: {
               evidence_pack_id: 'evp-20261016-0007',
-              rupee_at_risk: 18400000,
+              value_at_risk: 18400000,
             },
           },
           {
@@ -1750,7 +1750,7 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
           '11:20:42Z — Data Agent executed L3 sql.terminate_backend(18492); P95 recovered to 380ms',
         ],
         outcome: 'resolved',
-        rupee_impact: 3200000,
+        value_impact: 3200000,
         affected_journeys: [journeyKey],
         convergence: {
           consensus: 0.95,
@@ -1784,7 +1784,7 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
             journeys: [journeyKey],
             journey_ids: ['j-6a10-8801'],
             rows: 18,
-            rupee_at_risk: 3200000,
+            value_at_risk: 3200000,
           },
           correlated_changes: [],
           golden_signals: {
@@ -1877,7 +1877,7 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
         trust_level_required: 4,
         narrative: `Re-evaluate 212 applications decided under the regressed 40% obligation ratio threshold in ${svcEvaluator} after rollback PR #43 restores the 60% policy rule.`,
         evidence_pack_id: 'evp-20261016-0007',
-        rupee_impact: 18400000,
+        value_impact: 18400000,
         reversal_recipe: {
           capability: 'biz.compensate_journey',
           args: 'Restore prior decision snapshot from decision_audits backup table by audit_id',
@@ -1900,7 +1900,7 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
         trust_level_required: 2,
         narrative: `Trigger authoritative GitHub Actions terraform-platform.yml workflow_dispatch to reconcile max_instance_count drift (live=10 vs tfstate=3) on ${svcProtection}.`,
         evidence_pack_id: 'evp-20261016-0004',
-        rupee_impact: 450000,
+        value_impact: 450000,
         reversal_recipe: {
           capability: 'tf.restore_attribute',
           args: 'Restore max_instance_count=3 via Cloud Run Admin API v2',
@@ -2155,7 +2155,7 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
         title: 'Settlement VM 6s Latency & 504 Timeout (Saga Replay Queue)',
         target_service: svcSettlement,
         infra_golden_signals: 'red',
-        expected_detection: 'Journeys marked STALLED; Business-Line Agent queues L4 biz.replay_disbursement on recovery',
+        expected_detection: 'Journeys marked STALLED; Business-Line Agent queues L4 biz.replay_settlement on recovery',
         mttd_target: 'MTTD ≤ 4 min',
         is_active: false,
         triggered_by: null,

@@ -1,0 +1,181 @@
+/**
+ * Tailwind preset mapping utility classes onto the CSS custom properties in
+ * tokens.css. Owner: design-lead. Usage in tailwind.config.ts:
+ *
+ *   import gvPreset from './src/theme/tailwind-preset';
+ *   export default { presets: [gvPreset], content: [...] };
+ *
+ * Then: bg-surface-container, text-on-surface-variant, rounded-xl (28px),
+ * shadow-elev-2, font-display, text-metric-xl, ease-emphasized, etc.
+ * Never use raw Tailwind palette colours (slate-*, blue-*, red-*) in the cockpit.
+ */
+import type { Config } from 'tailwindcss';
+
+const v = (name: string) => `var(--${name})`;
+const sys = (role: string) => v(`md-sys-color-${role}`);
+
+const preset: Partial<Config> = {
+  darkMode: ['selector', '[data-theme="dark"]'],
+  theme: {
+    colors: {
+      transparent: 'transparent',
+      current: 'currentColor',
+      primary: sys('primary'),
+      'on-primary': sys('on-primary'),
+      'primary-container': sys('primary-container'),
+      'on-primary-container': sys('on-primary-container'),
+      'primary-hover': v('gv-primary-hover'),
+      secondary: sys('secondary'),
+      'on-secondary': sys('on-secondary'),
+      'secondary-container': sys('secondary-container'),
+      'on-secondary-container': sys('on-secondary-container'),
+      tertiary: sys('tertiary'),
+      'on-tertiary': sys('on-tertiary'),
+      'tertiary-container': sys('tertiary-container'),
+      'on-tertiary-container': sys('on-tertiary-container'),
+      error: sys('error'),
+      'on-error': sys('on-error'),
+      'error-container': sys('error-container'),
+      'on-error-container': sys('on-error-container'),
+      incident: v('gv-color-incident'),
+      'incident-container': v('gv-color-incident-container'),
+      'on-incident-container': v('gv-color-on-incident-container'),
+      warning: v('gv-color-warning'),
+      'on-warning': v('gv-color-on-warning'),
+      'warning-container': v('gv-color-warning-container'),
+      'on-warning-container': v('gv-color-on-warning-container'),
+      'warning-text': v('gv-color-warning-text'),
+      healthy: v('gv-color-healthy'),
+      'on-healthy': v('gv-color-on-healthy'),
+      'healthy-container': v('gv-color-healthy-container'),
+      'on-healthy-container': v('gv-color-on-healthy-container'),
+      unknown: v('gv-color-unknown'),
+      'unknown-container': v('gv-color-unknown-container'),
+      'on-unknown-container': v('gv-color-on-unknown-container'),
+      background: sys('background'),
+      surface: sys('surface'),
+      'surface-dim': sys('surface-dim'),
+      'surface-bright': sys('surface-bright'),
+      'surface-container-lowest': sys('surface-container-lowest'),
+      'surface-container-low': sys('surface-container-low'),
+      'surface-container': sys('surface-container'),
+      'surface-container-high': sys('surface-container-high'),
+      'surface-container-highest': sys('surface-container-highest'),
+      'surface-variant': sys('surface-variant'),
+      'on-surface': sys('on-surface'),
+      'on-surface-variant': sys('on-surface-variant'),
+      outline: sys('outline'),
+      'outline-variant': sys('outline-variant'),
+      'inverse-surface': sys('inverse-surface'),
+      'inverse-on-surface': sys('inverse-on-surface'),
+      'inverse-primary': sys('inverse-primary'),
+      scrim: sys('scrim'),
+      chrome: v('gv-chrome-bg'),
+      floating: v('gv-floating-bg'),
+      tile: v('gv-tile-bg'),
+      space: {
+        core: v('gv-space-core'),
+        mid: v('gv-space-mid'),
+        edge: v('gv-space-edge'),
+      },
+      'on-space': v('gv-on-space'),
+      'on-space-variant': v('gv-on-space-variant'),
+    },
+    fontFamily: {
+      display: v('gv-font-display'),
+      title: v('gv-font-title'),
+      label: v('gv-font-label'),
+      sans: v('gv-font-body'),
+      body: v('gv-font-body'),
+      mono: v('gv-font-mono'),
+      icon: v('gv-font-icon'),
+    },
+    fontSize: {
+      'display-lg': ['57px', { lineHeight: '64px', letterSpacing: '-0.25px', fontWeight: '400' }],
+      'display-md': ['45px', { lineHeight: '52px', fontWeight: '400' }],
+      'display-sm': ['36px', { lineHeight: '44px', fontWeight: '400' }],
+      'headline-lg': ['32px', { lineHeight: '40px', fontWeight: '400' }],
+      'headline-md': ['28px', { lineHeight: '36px', fontWeight: '400' }],
+      'headline-sm': ['24px', { lineHeight: '32px', fontWeight: '400' }],
+      'title-lg': ['22px', { lineHeight: '28px', fontWeight: '400' }],
+      'title-md': ['16px', { lineHeight: '24px', letterSpacing: '0.15px', fontWeight: '500' }],
+      'title-sm': ['14px', { lineHeight: '20px', letterSpacing: '0.1px', fontWeight: '500' }],
+      'body-lg': ['16px', { lineHeight: '24px', letterSpacing: '0.5px', fontWeight: '400' }],
+      'body-md': ['14px', { lineHeight: '20px', letterSpacing: '0.25px', fontWeight: '400' }],
+      'body-sm': ['12px', { lineHeight: '16px', letterSpacing: '0.4px', fontWeight: '400' }],
+      'label-lg': ['14px', { lineHeight: '20px', letterSpacing: '0.1px', fontWeight: '500' }],
+      'label-md': ['12px', { lineHeight: '16px', letterSpacing: '0.5px', fontWeight: '500' }],
+      'label-sm': ['11px', { lineHeight: '16px', letterSpacing: '0.5px', fontWeight: '500' }],
+      'metric-xl': ['44px', { lineHeight: '48px', fontWeight: '400' }],
+      'metric-lg': ['32px', { lineHeight: '36px', fontWeight: '400' }],
+      'metric-md': ['24px', { lineHeight: '28px', fontWeight: '400' }],
+    },
+    borderRadius: {
+      none: '0',
+      xs: '8px',
+      sm: '12px',
+      md: '16px',
+      lg: '20px',
+      'lg-plus': '24px',
+      xl: '28px',
+      full: '9999px',
+    },
+    boxShadow: {
+      none: 'none',
+      'elev-1': v('md-sys-elevation-1'),
+      'elev-2': v('md-sys-elevation-2'),
+      'elev-3': v('md-sys-elevation-3'),
+      'elev-4': v('md-sys-elevation-4'),
+      'elev-5': v('md-sys-elevation-5'),
+      'over-space': v('gv-elevation-over-space'),
+    },
+    extend: {
+      spacing: {
+        appbar: '64px',
+        rail: '80px',
+        sheet: '400px',
+        'sheet-wide': '480px',
+        stat: '168px',
+      },
+      transitionTimingFunction: {
+        emphasized: 'cubic-bezier(0.2, 0, 0, 1)',
+        'emphasized-decelerate': 'cubic-bezier(0.05, 0.7, 0.1, 1)',
+        'emphasized-accelerate': 'cubic-bezier(0.3, 0, 0.8, 0.15)',
+        'spring-fast': 'cubic-bezier(0.42, 1.67, 0.21, 0.9)',
+        'spring-default': 'cubic-bezier(0.38, 1.21, 0.22, 1)',
+      },
+      transitionDuration: {
+        short2: '100ms',
+        short4: '200ms',
+        medium2: '300ms',
+        medium4: '400ms',
+        long2: '500ms',
+        long4: '600ms',
+      },
+      backgroundImage: {
+        space: v('gv-space-gradient'),
+      },
+      keyframes: {
+        'gv-pulse': {
+          '0%': { transform: 'scale(1)', opacity: '0.6' },
+          '100%': { transform: 'scale(2.4)', opacity: '0' },
+        },
+        'gv-sheet-in': {
+          '0%': { transform: 'translateX(24px)', opacity: '0' },
+          '100%': { transform: 'translateX(0)', opacity: '1' },
+        },
+        'gv-banner-in': {
+          '0%': { transform: 'translateY(-16px)', opacity: '0' },
+          '100%': { transform: 'translateY(0)', opacity: '1' },
+        },
+      },
+      animation: {
+        'gv-pulse': 'gv-pulse 1600ms cubic-bezier(0.05, 0.7, 0.1, 1) infinite',
+        'gv-sheet-in': 'gv-sheet-in 500ms cubic-bezier(0.05, 0.7, 0.1, 1) both',
+        'gv-banner-in': 'gv-banner-in 400ms cubic-bezier(0.05, 0.7, 0.1, 1) both',
+      },
+    },
+  },
+};
+
+export default preset;

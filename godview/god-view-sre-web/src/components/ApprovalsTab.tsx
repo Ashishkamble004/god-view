@@ -9,7 +9,7 @@ import {
   TrustLevelBadge,
   formatEnumLabel,
   formatExpiryCountdownIst,
-  formatInr,
+  formatCurrency,
   formatShortTime,
 } from './ui';
 
@@ -45,9 +45,9 @@ export const ApprovalsTab: React.FC<ApprovalsTabProps> = ({
       : approvals.filter((a) => a.decision === filter);
 
   const pendingCount = approvals.filter((a) => a.decision === 'pending').length;
-  const pendingRupees = approvals
+  const pendingValue = approvals
     .filter((a) => a.decision === 'pending')
-    .reduce((acc, a) => acc + a.rupee_impact, 0);
+    .reduce((acc, a) => acc + (a.value_impact || 0), 0);
 
   const countFor = (st: 'all' | ApprovalDecisionStatus): number =>
     st === 'all'
@@ -72,10 +72,10 @@ export const ApprovalsTab: React.FC<ApprovalsTabProps> = ({
 
         <Card className="flex h-full flex-col justify-between p-4">
           <span className="text-xs font-semibold text-slate-600">
-            Principal ₹ Gated by Pending Approvals
+            Total Value Gated by Pending Approvals
           </span>
           <p className="mt-2 text-2xl font-semibold text-slate-900 num-tabular">
-            {formatInr(pendingRupees)}
+            {formatCurrency(pendingValue)}
           </p>
           <p className="mt-1 text-xs text-slate-600">
             Blast radius = 1 resource/cohort per action; reversal recipe mandatory
@@ -170,10 +170,10 @@ export const ApprovalsTab: React.FC<ApprovalsTabProps> = ({
 
                   <div className="text-right num-tabular">
                     <span className="text-xs font-semibold text-slate-600">
-                      ₹ Impact at Stake
+                      Value at Risk
                     </span>
                     <p className="text-xl font-semibold text-slate-900">
-                      {formatInr(card.rupee_impact)}
+                      {formatCurrency(card.value_impact || 0)}
                     </p>
                     <span className="font-mono text-xs text-slate-500">
                       Evidence: {card.evidence_pack_id}

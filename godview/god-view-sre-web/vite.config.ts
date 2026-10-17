@@ -82,6 +82,132 @@ function cockpitMockDevPlugin() {
           return;
         }
 
+        if (method === 'GET' && (pathOnly === '/api/v1/topology' || pathOnly === '/v1/topology')) {
+          const nodes = state.perceive.discovered_services.map((s, idx) => {
+            let tier = 'compute';
+            if (['api_gateway', 'lb_frontend', 'security_policy'].includes(s.kind)) tier = 'edge';
+            else if (['cloud_sql', 'bucket', 'firestore_db', 'bigquery_dataset'].includes(s.kind)) tier = 'data';
+            else if (['pubsub_topic', 'pubsub_subscription'].includes(s.kind)) tier = 'messaging';
+            else if (['reasoning_engine', 'agent'].includes(s.kind)) tier = 'observer';
+
+            const openIncidents = state.incidents.filter(
+              (inc) =>
+                (inc.symptom_summary && inc.symptom_summary.toLowerCase().includes(s.name.toLowerCase())) ||
+                (inc.root_cause && inc.root_cause.toLowerCase().includes(s.name.toLowerCase()))
+            ).length;
+
+            return {
+              id: s.id,
+              name: s.name,
+              kind: s.kind,
+              tier,
+              status: openIncidents > 0 ? 'red' : 'green',
+              business: {
+                role_summary: s.inferred_role || `${s.name} handles core transactions and business events.`,
+                domain: s.domain || (idx % 2 === 0 ? 'Payment Core' : 'Credit Decisioning'),
+                confidence: s.role_confidence || 0.94,
+              },
+              golden: {
+                rps: 85 + (idx % 5) * 35,
+                p95_ms: 120 + (idx % 4) * 45,
+                error_ratio: openIncidents > 0 ? 0.045 : 0.001,
+              },
+              posture: {
+                iap: s.kind === 'lb_frontend' || s.kind === 'api_gateway',
+                ingress: s.kind === 'lb_frontend' ? 'external' : 'internal',
+                invoker_iam: true,
+                waf: s.kind === 'lb_frontend',
+              },
+              incidents_open: openIncidents,
+            };
+          });
+
+          const edges: any[] = [];
+          for (let i = 0; i < nodes.length - 1; i++) {
+            edges.push({
+              id: `edge-${nodes[i].id}-${nodes[i + 1].id}`,
+              src: nodes[i].id,
+              dst: nodes[i + 1].id,
+              kind: 'http',
+              evidence_kind: 'trace',
+              rps: 120,
+              error_ratio: 0.001,
+              confidence: 0.95,
+            });
+          }
+
+          sendJson(res, 200, {
+            env_id: state.perceive.env_id,
+            nodes,
+            edges,
+            journeys: state.journeys.map((j) => ({
+              id: j.journey_key,
+              name: j.name,
+              steps: (j.steps || []).map((st) => ({
+                node: st.service,
+                operation: st.operation,
+              })),
+              health: j.status === 'degraded' || j.status === 'stalled' ? 'amber' : 'green',
+              confidence: 0.94,
+            })),
+            generated_at: new Date().toISOString(),
+          });
+          return;
+        }
+
+        if (method === 'GET' && pathOnly.startsWith('/api/v1/business-context/')) {
+          const nodeId = decodeURIComponent(pathOnly.slice('/api/v1/business-context/'.length));
+          const node = state.perceive.discovered_services.find((s) => s.id === nodeId);
+          const relatedIncidents = state.incidents.filter(
+            (i) =>
+              (i.symptom_summary && i.symptom_summary.toLowerCase().includes((node?.name || '').toLowerCase())) ||
+              (i.root_cause && i.root_cause.toLowerCase().includes((node?.name || '').toLowerCase()))
+          );
+
+          sendJson(res, 200, {
+            role_summary: node?.inferred_role || `${nodeId} core service telemetry and lifecycle control plane.`,
+            domain: node?.domain || 'Enterprise Core Platform',
+            capabilities: ['api_serving', 'event_processing', 'state_transition_logging'],
+            upstream: [],
+            downstream: [],
+            journeys: state.journeys.map((j) => ({
+              name: j.name,
+              steps: (j.steps || []).map((s) => ({ service: s.service, operation: s.operation })),
+              confidence: 0.92,
+              evidence: { trace_id: 'tr-mock-9981' },
+            })),
+            kpis: [
+              { label: 'Throughput', value: '184 rps', unit: 'rps', trend: 'stable' },
+              { label: 'p95 Latency', value: '142ms', unit: 'ms', trend: 'improving' },
+              { label: 'Error Ratio', value: '0.08%', unit: 'pct', trend: 'stable' },
+            ],
+            invariants: state.invariants.map((inv) => ({
+              statement: inv.expression || inv.name,
+              check: inv.name,
+              severity: inv.severity || 'HIGH',
+              confidence: 0.96,
+              evidence: { sentinel_id: inv.sentinel_id },
+              status: inv.status === 'enforced' ? 'verified' : 'shadow',
+            })),
+            risk_notes: ['Cloud Armor WAF rules verified', 'Memory utilization baseline normal'],
+            confidence: node?.role_confidence || 0.94,
+            evidence: [
+              { kind: 'openapi', ref: `${node?.name || nodeId}/openapi.json`, excerpt: 'endpoints: /v1/process, /v1/validate' },
+              { kind: 'trace', ref: 'projects/env-prod/traces/tr-88419', excerpt: 'Parent span calls downstream auth service' },
+              { kind: 'env', ref: 'CONTAINER_ENV_VARS', excerpt: 'DB_HOST=10.0.1.4, PORT=8080' },
+            ],
+            inferred_by: 'gemini-4-argon@global',
+            inferred_at: new Date().toISOString(),
+            recent_incidents: relatedIncidents.map((i) => ({
+              id: i.incident_id,
+              title: i.symptom_summary,
+              severity: i.severity,
+              status: i.outcome,
+            })),
+          });
+          return;
+        }
+
         if (pathOnly === '/api/v1/perceive') {
           if (method === 'POST') {
             state.perceive.heartbeat_at = new Date().toISOString();

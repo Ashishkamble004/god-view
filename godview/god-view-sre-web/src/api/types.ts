@@ -399,7 +399,7 @@ export interface FunnelKpiStage {
   entered: number;
   completed: number;
   conversion_pct: number;
-  dropoff_rupee_value: number;
+  dropoff_value: number;
 }
 
 export type JourneyConformanceStatus =
@@ -416,7 +416,7 @@ export interface JourneyInstanceRow {
   observed_sequence: string;
   conformance: JourneyConformanceStatus;
   final_status: string;
-  rupee_value: number;
+  value_at_risk: number;
   total_duration_ms: number;
   is_synthetic: boolean;
 }
@@ -428,7 +428,7 @@ export interface KpiRollup {
   journey_name: string;
   kpi: string;
   label: string;
-  unit: 'pct' | 'inr' | 'ms';
+  unit: 'pct' | 'currency' | 'ms';
   segment: string;
   value: number;
   baseline_value: number;
@@ -448,11 +448,11 @@ export interface JourneyModel {
   directly_follows: Record<string, DirectlyFollowsEdge>;
   conformance_rules: ConformanceRuleSummary[];
   funnel_kpis: FunnelKpiStage[];
-  rupee_impact_model: {
-    avg_ticket_inr: number;
+  impact_model: {
+    avg_ticket_value: number;
     stuck_journeys_count: number;
     violated_journeys_count: number;
-    total_rupee_at_risk: number;
+    total_value_at_risk: number;
   };
   recent_instances: JourneyInstanceRow[];
   kpi_rollups: KpiRollup[];
@@ -487,7 +487,7 @@ export interface EvidencePack {
     journeys: string[];
     journey_ids: string[];
     rows: number;
-    rupee_at_risk: number;
+    value_at_risk: number;
   };
   correlated_changes: Array<{
     change_event_id: string;
@@ -584,7 +584,7 @@ export interface EpisodicIncident {
   causal_chain: string[];
   actions: AuditActionRecord[];
   outcome: 'resolved' | 'mitigated' | 'false_positive' | 'investigating';
-  rupee_impact: number;
+  value_impact: number;
   affected_journeys: string[];
   convergence: {
     consensus: number;
@@ -622,7 +622,7 @@ export interface ApprovalCard {
   trust_level_required: number;
   narrative: string;
   evidence_pack_id: string;
-  rupee_impact: number;
+  value_impact: number;
   reversal_recipe: {
     capability: string;
     args: string;

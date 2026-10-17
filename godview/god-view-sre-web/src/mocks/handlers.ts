@@ -174,7 +174,7 @@ export const handlers = [
       confidence: s.role_confidence || 0.94,
       evidence: [
         { kind: 'openapi', ref: `${s.name}/openapi.json`, excerpt: 'endpoints: /v1/process, /v1/validate' },
-        { kind: 'trace', ref: 'projects/general-ak/traces/tr-88419', excerpt: 'Parent span calls downstream auth service' },
+        { kind: 'trace', ref: 'projects/env-prod/traces/tr-88419', excerpt: 'Parent span calls downstream auth service' },
         { kind: 'env', ref: 'CONTAINER_ENV_VARS', excerpt: 'DB_HOST=10.0.1.4, PORT=8080' },
       ],
       inferred_by: 'gemini-4-argon@global',

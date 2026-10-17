@@ -566,7 +566,7 @@ export function buildTopologyFallback(
   }));
 
   return {
-    env_id: perceive.env_id || 'gcp-general-ak',
+    env_id: perceive.env_id || 'gcp-production',
     generated_at: new Date().toISOString(),
     nodes,
     edges,

@@ -191,11 +191,11 @@ export function formatEnumLabel(raw: string | null | undefined): string {
   return spaced.charAt(0).toUpperCase() + spaced.slice(1).toLowerCase();
 }
 
-export function formatInr(amount: number): string {
-  const formatted = new Intl.NumberFormat('en-IN', {
+export function formatCurrency(amount: number): string {
+  const formatted = new Intl.NumberFormat('en-US', {
     maximumFractionDigits: 0,
   }).format(Math.round(amount));
-  return `₹${formatted}`;
+  return `$${formatted}`;
 }
 
 export function formatUsd(amount: number): string {
