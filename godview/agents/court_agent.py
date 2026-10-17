@@ -91,6 +91,29 @@ class SwarmConsensusVerdict:
     harness_run_summary: dict[str, Any] = field(default_factory=dict)
 
 
+DEFAULT_BENCHMARK_SCENARIOS: dict[str, dict[str, Any]] = {
+    "incident_evolve_schema": {
+        "domain": "application",
+        "description": "Inbound request payload schema drift requiring updated validation.",
+        "root_cause_category": "schema_drift",
+        "remediation_capability": "git.create_pr",
+        "require_adaptation_on_h0": True,
+    },
+    "incident_distribution_shift": {
+        "domain": "data",
+        "description": "Statistical distribution shift across customer feature vectors.",
+        "root_cause_category": "distribution_shift",
+        "remediation_capability": "data.retrain_model",
+    },
+    "incident_container_oom": {
+        "domain": "platform",
+        "description": "Container OOM exit 137 and backlog stall.",
+        "root_cause_category": "container_oom",
+        "remediation_capability": "k8s.patch_deployment",
+    },
+}
+
+
 class CourtAgent:
     """Single Court Specialist Agent operating over a Harness² (c1..c8) capability tree."""
 
@@ -298,10 +321,14 @@ class CourtAgent:
         budget: BudgetSpec | None = None,
     ) -> RecursionResult:
         """Run the Harness² recursion loop for `task_id` and adopt the winning tree."""
+        merged_scenarios = dict(DEFAULT_BENCHMARK_SCENARIOS)
+        if scenarios:
+            merged_scenarios.update(scenarios)
+
         adapter = GodViewCourtAdapter(
             default_domain=self.domain,
             substrate=self.substrate,
-            scenarios=scenarios,
+            scenarios=merged_scenarios,
             trust_gate=self.trust_gate,
             model_id=self.resolve_active_model(),
         )

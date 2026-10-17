@@ -16,16 +16,19 @@ the evidence pack and BusinessContext. Tools provide Sovereign capability invoca
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import logging
 import re
-from collections.abc import Callable
+import uuid
+from collections.abc import AsyncGenerator, Callable
 from typing import Any
 
 from godview_shared.capabilities import get_capability
 from godview_shared.config import (
     DEFAULT_AGENT_FALLBACK_MODEL_ID,
+    DEFAULT_AGENT_MODEL_ID,
     DEFAULT_AGENT_MODEL_LOCATION,
     MODEL_TABLE,
 )
@@ -33,8 +36,15 @@ from godview_shared.contracts import (
     Diagnosis,
     ProposedAction,
 )
+from google.adk.a2a.utils.agent_to_a2a import to_a2a
 from google.adk.agents import LlmAgent
+from google.adk.models import BaseLlm, LlmRequest
+from google.adk.models import LlmResponse as AdkLlmResponse
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
 from google.adk.tools import FunctionTool
+from google.genai import types
+from pydantic import ConfigDict
 
 logger = logging.getLogger("godview.agents.adk.specialist")
 
@@ -104,6 +114,78 @@ def is_mutating_capability(capability_id: str) -> bool:
     return any(capability_id.startswith(p) for p in MUTATING_CAPABILITY_PREFIXES)
 
 
+class CtxLlm(BaseLlm):
+    """ADK BaseLlm adapter delegating to ctx.llm with Argon->Flash fallback & token metering."""
+
+    model: str = DEFAULT_AGENT_MODEL_ID
+    ctx: Any = None
+    agent_id: str = "specialist"
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    async def generate_content_async(
+        self, llm_request: LlmRequest, stream: bool = False
+    ) -> AsyncGenerator[AdkLlmResponse]:
+        if self.ctx is not None and hasattr(self.ctx, "llm") and self.ctx.llm is not None:
+            contents = llm_request.contents
+            tools = list(llm_request.tools_dict.values()) if getattr(llm_request, "tools_dict", None) else None
+
+            call_kwargs: dict[str, Any] = {
+                "role": "reasoning",
+                "contents": contents,
+            }
+            try:
+                sig = inspect.signature(self.ctx.llm.generate)
+                if "agent_id" in sig.parameters or any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+                ):
+                    call_kwargs["agent_id"] = self.agent_id
+                if "tools" in sig.parameters or any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+                ):
+                    call_kwargs["tools"] = tools
+            except Exception:
+                pass
+
+            res = self.ctx.llm.generate(**call_kwargs)
+            if inspect.isawaitable(res):
+                res = await res
+
+            if isinstance(res, AdkLlmResponse):
+                yield res
+                return
+            if isinstance(res, types.GenerateContentResponse):
+                if res.candidates and res.candidates[0].content:
+                    yield AdkLlmResponse(content=res.candidates[0].content)
+                    return
+
+            func_calls = getattr(res, "function_calls", []) or []
+            if func_calls:
+                parts = []
+                for fc in func_calls:
+                    name = getattr(fc, "name", str(fc))
+                    args = dict(getattr(fc, "args", {}) or {})
+                    parts.append(types.Part.from_function_call(name=name, args=args))
+                yield AdkLlmResponse(content=types.Content(parts=parts, role="model"))
+                return
+
+            if hasattr(res, "model_dump_json"):
+                text = res.model_dump_json()
+            elif isinstance(res, dict):
+                text = json.dumps(res)
+            elif hasattr(res, "text") and res.text:
+                text = res.text
+            else:
+                text = str(res)
+
+            part = types.Part.from_text(text=text)
+            yield AdkLlmResponse(content=types.Content(parts=[part], role="model"))
+        else:
+            part = types.Part.from_text(
+                text='{"hypothesis": "not diagnosed: model unavailable", "confidence": 0.0, "root_cause_category": "model_unavailable"}'
+            )
+            yield AdkLlmResponse(content=types.Content(parts=[part], role="model"))
+
+
 class SpecialistTools:
     """Runtime tools bound to SovereignContext and available to specialist LlmAgents."""
 
@@ -133,18 +215,22 @@ class SpecialistTools:
                 ),
             }
 
-        # Check if executor is registered on ctx
-        if self.ctx is not None and hasattr(self.ctx, "executors"):
+        # Dispatch via Sovereign capability registry executors
+        if self.ctx is not None and hasattr(self.ctx, "executors") and self.ctx.executors is not None:
             executor = self.ctx.executors.get(capability_id)
             if executor is not None:
-                return executor(**arg_dict)
+                res = executor(**arg_dict)
+                return res if isinstance(res, dict) else {"status": "ok", "result": res}
 
-        return {
-            "status": "ok",
-            "capability_id": capability_id,
-            "args": arg_dict,
-            "output": f"Executed read capability '{capability_id}'.",
-        }
+        if self.ctx is not None and hasattr(self.ctx, "remediation_dispatcher") and self.ctx.remediation_dispatcher is not None:
+            dispatcher = self.ctx.remediation_dispatcher
+            if hasattr(dispatcher, "invoke_read"):
+                return dispatcher.invoke_read(capability_id, arg_dict)
+
+        # Zero Echo: Never return fabricated status string when unhandled. Fail closed with NoExecutorError.
+        from godview.sovereign.remediation.types import NoExecutorError
+
+        raise NoExecutorError(capability_id)
 
     def get_business_context(self, service_id: str | None = None) -> dict[str, Any]:
         """Fetch discovered BusinessContext for a service."""
@@ -246,9 +332,17 @@ class SpecialistAgent:
 
         adk_tools = self.tools_helper.build_adk_tools()
         adk_node_name = _clean_adk_identifier(self.name)
+
+        if llm_runner is not None and hasattr(llm_runner, "generate_content_async"):
+            model_obj = llm_runner
+        elif self.ctx is not None and hasattr(self.ctx, "llm") and self.ctx.llm is not None:
+            model_obj = CtxLlm(ctx=self.ctx, agent_id=self.name, model=self.primary_model_id)
+        else:
+            model_obj = CtxLlm(ctx=None, agent_id=self.name, model=self.primary_model_id)
+
         self.adk_agent = LlmAgent(
             name=adk_node_name,
-            model=llm_runner if hasattr(llm_runner, "generate_content_async") else self.primary_model_id,
+            model=model_obj,
             instruction=self.instruction,
             tools=adk_tools,
             description=f"God-View {archetype} specialist agent for {subject_ref}",
@@ -259,8 +353,9 @@ class SpecialistAgent:
         self,
         incident_id: str,
         evidence_pack: dict[str, Any] | None = None,
+        challenges: list[str] | None = None,
     ) -> Diagnosis:
-        """Asynchronously analyze evidence and formulate a grounded Diagnosis."""
+        """Asynchronously analyze evidence and formulate a grounded Diagnosis using ADK Runner."""
         ep = evidence_pack or {}
         biz_ctx = self.tools_helper.get_business_context(self.subject_ref)
         prompt_data = {
@@ -275,74 +370,84 @@ class SpecialistAgent:
             f"Instruction:\n{self.instruction}\n\n"
             f"Analyze the following evidence pack for incident {incident_id} on {self.subject_ref}.\n"
             f"Evidence: {json.dumps(prompt_data, default=str)}\n"
-            "Formulate a precise hypothesis, confidence score (0.0 to 1.0), citations, "
-            "and any proposed remediation actions."
+        )
+        if challenges:
+            user_content += (
+                f"\nCRITIC CHALLENGES FROM PREVIOUS DEBATE ROUND:\n"
+                f"{json.dumps(challenges, default=str)}\n"
+                "Address each challenge directly, re-verify telemetry citations, and refine your hypothesis.\n"
+            )
+        user_content += (
+            "\nReturn a valid JSON Diagnosis contract with keys:\n"
+            "- hypothesis: precise root-cause hypothesis\n"
+            "- confidence: float from 0.0 to 1.0\n"
+            "- citations: list of evidence strings\n"
+            "- proposed_actions: list of remediation actions\n"
+            "- root_cause_category: category identifier\n"
         )
 
-        # 1. First priority: ctx.llm (async LlmClient with Argon -> Flash fallback)
-        if self.ctx is not None and hasattr(self.ctx, "llm") and self.ctx.llm is not None:
-            try:
-                call_kwargs: dict[str, Any] = {
-                    "role": "reasoning",
-                    "contents": [{"role": "user", "parts": [{"text": user_content}]}],
-                    "response_schema": Diagnosis,
-                }
+        try:
+            session_service = InMemorySessionService()
+            session_id = f"sess_{incident_id}_{uuid.uuid4().hex[:8]}"
+            await session_service.create_session(
+                app_name="godview_court",
+                user_id="sovereign",
+                session_id=session_id,
+            )
+            runner = Runner(
+                agent=self.adk_agent,
+                app_name="godview_court",
+                session_service=session_service,
+            )
+
+            last_text = ""
+            async for event in runner.run_async(
+                user_id="sovereign",
+                session_id=session_id,
+                new_message=types.Content(
+                    role="user",
+                    parts=[types.Part.from_text(text=user_content)],
+                ),
+            ):
+                content = getattr(event, "content", None)
+                if content and hasattr(content, "parts"):
+                    for part in content.parts:
+                        if hasattr(part, "text") and part.text:
+                            last_text = part.text
+
+            if last_text:
                 try:
-                    sig = inspect.signature(self.ctx.llm.generate)
-                    if "agent_id" in sig.parameters or any(
-                        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
-                    ):
-                        call_kwargs["agent_id"] = self.name
-                except Exception:
-                    pass
+                    cleaned = last_text.strip()
+                    if cleaned.startswith("```"):
+                        lines = cleaned.splitlines()
+                        if lines[0].startswith("```"):
+                            lines = lines[1:]
+                        if lines and lines[-1].startswith("```"):
+                            lines = lines[:-1]
+                        cleaned = "\n".join(lines).strip()
 
-                res = self.ctx.llm.generate(**call_kwargs)
-                if inspect.isawaitable(res):
-                    res = await res
+                    diag = Diagnosis.model_validate_json(cleaned)
+                    if self.tools_helper.proposed_actions and not diag.proposed_actions:
+                        diag.proposed_actions = list(self.tools_helper.proposed_actions)
+                    return diag
+                except Exception as parse_exc:
+                    logger.warning(
+                        "Failed to parse diagnosis JSON from specialist %s: %s",
+                        self.name,
+                        parse_exc,
+                    )
+                    # Zero Invented Confidence: 0.0 on parse error
+                    return Diagnosis(
+                        hypothesis="not diagnosed: parse error",
+                        confidence=0.0,
+                        evidence=[{"source": "raw_response", "sample": last_text[:200]}],
+                        proposed_actions=[],
+                        root_cause_category="parse_error",
+                        citations=[f"incident:{incident_id}"],
+                    )
+        except Exception as exc:
+            logger.warning("ADK Runner execution failed in specialist %s: %s", self.name, exc)
 
-                if isinstance(res, Diagnosis):
-                    return res
-                if hasattr(res, "parsed") and isinstance(res.parsed, Diagnosis):
-                    return res.parsed
-                if hasattr(res, "text") and res.text:
-                    try:
-                        return Diagnosis.model_validate_json(res.text)
-                    except Exception:
-                        pass
-                if isinstance(res, dict):
-                    return Diagnosis.model_validate(res)
-            except Exception as exc:
-                logger.warning("ctx.llm invocation failed in specialist %s: %s", self.name, exc)
-
-        # 2. Second priority: custom pluggable llm_runner if supplied
-        if self.llm_runner is not None and hasattr(self.llm_runner, "generate"):
-            try:
-                gen_res = self.llm_runner.generate(
-                    model=self.primary_model_id,
-                    contents=user_content,
-                    agent_id=self.name,
-                )
-                if inspect.isawaitable(gen_res):
-                    gen_res = await gen_res
-
-                if isinstance(gen_res, Diagnosis):
-                    return gen_res
-                if isinstance(gen_res, str):
-                    try:
-                        return Diagnosis.model_validate_json(gen_res)
-                    except Exception:
-                        return Diagnosis(
-                            hypothesis=gen_res,
-                            confidence=0.85,
-                            citations=[f"agent:{self.name}"],
-                        )
-                if isinstance(gen_res, dict):
-                    return Diagnosis.model_validate(gen_res)
-            except Exception as exc:
-                logger.warning("llm_runner failed in specialist %s: %s", self.name, exc)
-
-        # 3. Model unavailable: return confidence=0.0 and never fabricate a story
-        logger.info("Model unavailable for specialist %s on incident %s", self.name, incident_id)
         return Diagnosis(
             hypothesis="not diagnosed: model unavailable",
             confidence=0.0,
@@ -352,14 +457,22 @@ class SpecialistAgent:
             citations=[f"incident:{incident_id}"] if incident_id else [],
         )
 
-    # Synchronous shim for callers needing direct invocation
+    async def revise_diagnosis(
+        self,
+        incident_id: str,
+        evidence_pack: dict[str, Any] | None = None,
+        challenges: list[str] | None = None,
+    ) -> Diagnosis:
+        """Revise diagnosis in response to critic debate challenges."""
+        return await self.diagnose(incident_id, evidence_pack, challenges=challenges)
+
     def diagnose_evidence(
         self,
         incident_id: str,
         evidence_pack: dict[str, Any] | None = None,
+        challenges: list[str] | None = None,
     ) -> Diagnosis:
         """Synchronous wrapper for diagnose()."""
-        import asyncio
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -367,10 +480,13 @@ class SpecialistAgent:
 
         if loop is not None and loop.is_running():
             import concurrent.futures
+
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                future = pool.submit(lambda: asyncio.run(self.diagnose(incident_id, evidence_pack)))
+                future = pool.submit(
+                    lambda: asyncio.run(self.diagnose(incident_id, evidence_pack, challenges=challenges))
+                )
                 return future.result(timeout=60)
-        return asyncio.run(self.diagnose(incident_id, evidence_pack))
+        return asyncio.run(self.diagnose(incident_id, evidence_pack, challenges=challenges))
 
 
 def create_specialist_agent(
@@ -389,3 +505,12 @@ def create_specialist_agent(
         sovereign_url=sovereign_url,
         llm_runner=llm_runner,
     )
+
+
+def create_specialist_a2a_app(
+    specialist: SpecialistAgent,
+    host: str = "localhost",
+    port: int = 8000,
+) -> Any:
+    """Convert specialist agent to an ADK A2A Starlette application."""
+    return to_a2a(specialist.adk_agent, host=host, port=port)

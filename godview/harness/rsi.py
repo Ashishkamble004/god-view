@@ -73,15 +73,19 @@ def _collect_archived_evidence(ctx: Any, domain: str) -> list[dict[str, Any]]:
                 predicate=lambda d: d.get("status") in ("resolved", "mitigated", "false_positive"),
             )
             for inc in incidents:
-                ep = inc.get("evidence_pack") or {}
+                ep = dict(inc.get("evidence_pack") or {})
+                root_cause = inc.get("root_cause_category") or inc.get("category")
+                remediation = inc.get("remediation_capability") or inc.get("capability_id")
+                resolution_summary = inc.get("resolution_summary") or inc.get("summary")
                 scenarios.append(
                     {
                         "task_id": inc.get("incident_id") or inc.get("doc_id") or "archived-inc",
                         "domain": domain,
-                        "description": inc.get("summary") or f"Archived incident in {domain}",
+                        "description": resolution_summary or f"Archived incident in {domain}",
                         "outcome": inc.get("status"),
-                        "root_cause_category": inc.get("root_cause_category") or inc.get("category"),
-                        "remediation_capability": inc.get("remediation_capability") or inc.get("capability_id"),
+                        "root_cause_category": root_cause,
+                        "remediation_capability": remediation,
+                        "resolution_summary": resolution_summary,
                         **ep,
                     }
                 )
@@ -338,9 +342,17 @@ def register_rsi_hooks(ctx: Any) -> None:
         )
         status = str(data.get("status") or "resolved")
         inc_id = str(data.get("incident_id") or data.get("doc_id") or "inc-closed")
-        ep = data.get("evidence_pack") or {}
+        ep = dict(data.get("evidence_pack") or {})
         domain = str(data.get("domain") or "application")
         agent_id = f"{domain}__specialist"
+
+        if "root_cause_category" in data and "root_cause_category" not in ep:
+            ep["root_cause_category"] = data["root_cause_category"]
+        if "remediation_capability" in data and "remediation_capability" not in ep:
+            ep["remediation_capability"] = data["remediation_capability"]
+        if "resolution_summary" in data and "resolution_summary" not in ep:
+            ep["resolution_summary"] = data["resolution_summary"]
+
         try:
             loop = asyncio.get_running_loop()
             loop.create_task(

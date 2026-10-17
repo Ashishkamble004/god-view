@@ -164,6 +164,14 @@ class VertexGeminiProposer(Proposer):
             )
             ok = True
 
+        ctx_dir = work_dir / "context"
+        harness_dir = ctx_dir / "harness"
+        if harness_dir.is_dir() and raw_output and env_mode != "hermetic":
+            try:
+                self._apply_model_edits(harness_dir, raw_output)
+            except Exception as edit_exc:
+                logger.warning("Failed to apply model edits to candidate tree: %s", edit_exc)
+
         (work_dir / "proposer_output.log").write_text(raw_output, encoding="utf-8")
         notes = _extract_notes(raw_output)
         parents = _extract_parents(notes or raw_output)
@@ -194,6 +202,33 @@ class VertexGeminiProposer(Proposer):
         except RuntimeError:
             asyncio.run(coro)
 
+    @staticmethod
+    def _apply_model_edits(harness_dir: Path, raw_output: str) -> bool:
+        """Parse structured schema edits [{"path": ..., "content": ...}] and apply to candidate tree."""
+        if not harness_dir.is_dir() or not raw_output:
+            return False
+
+        applied = False
+        json_blocks = re.findall(r"\[\s*\{.*?\}\s*\]", raw_output, re.DOTALL)
+        for block in json_blocks:
+            try:
+                items = json.loads(block)
+                if isinstance(items, list):
+                    for item in items:
+                        if isinstance(item, dict) and "path" in item and "content" in item:
+                            rel_path = item["path"].strip().lstrip("/")
+                            content = item["content"]
+                            target = harness_dir / rel_path
+                            target.parent.mkdir(parents=True, exist_ok=True)
+                            if target.suffix == ".py":
+                                validate_script_ast(target, content, raise_on_error=True)
+                            target.write_text(content, encoding="utf-8")
+                            applied = True
+            except Exception as exc:
+                logger.debug("Failed to apply structured edit block: %s", exc)
+
+        return applied
+
     def _call_vertex_with_adc(
         self,
         *,
@@ -202,16 +237,20 @@ class VertexGeminiProposer(Proposer):
         primary_model: str,
     ) -> tuple[str, str, bool]:
         """Invoke Vertex AI Gemini using ADC."""
+        env_mode = os.environ.get("GODVIEW_ENV", "hermetic").lower()
         project_id = (
             os.environ.get("GCP_PROJECT_ID", "").strip()
             or os.environ.get("GOOGLE_CLOUD_PROJECT", "").strip()
         )
         if not project_id:
-            return (
-                self._run_hermetic_synthesis(work_dir, prompt, primary_model),
-                primary_model,
-                True,
-            )
+            if env_mode == "hermetic":
+                return (
+                    self._run_hermetic_synthesis(work_dir, prompt, primary_model),
+                    primary_model,
+                    True,
+                )
+            logger.error("Missing GCP project_id in non-hermetic mode")
+            return ("", primary_model, False)
 
         token = ""
         if self.ctx is not None and hasattr(self.ctx, "auth") and hasattr(self.ctx.auth, "access_token"):
@@ -229,11 +268,14 @@ class VertexGeminiProposer(Proposer):
                 token = ""
 
         if not token:
-            return (
-                self._run_hermetic_synthesis(work_dir, prompt, primary_model),
-                primary_model,
-                True,
-            )
+            if env_mode == "hermetic":
+                return (
+                    self._run_hermetic_synthesis(work_dir, prompt, primary_model),
+                    primary_model,
+                    True,
+                )
+            logger.error("Missing ADC token in non-hermetic mode")
+            return ("", primary_model, False)
 
         models_to_try = [primary_model]
         if self.fallback_model not in models_to_try:

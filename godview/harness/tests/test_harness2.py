@@ -160,7 +160,18 @@ def test_end_to_end_recursion_parallel_sequential_and_cloud_library_sync(
             "domain": "application",
             "description": "Inbound request payload schema drift requiring updated validation.",
             "required_script": "check_payload_schema.py",
+            "root_cause_category": "schema_drift",
+            "remediation_capability": "git.create_pr",
             "require_adaptation_on_h0": True,
+        },
+    )
+    adapter.register_scenario(
+        "incident_distribution_shift",
+        {
+            "domain": "data",
+            "description": "Statistical distribution shift across customer feature vectors.",
+            "root_cause_category": "distribution_shift",
+            "remediation_capability": "data.retrain_model",
         },
     )
     proposer = VertexGeminiProposer()

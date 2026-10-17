@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
+from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -30,6 +32,9 @@ from godview_shared.fakes import (
 )
 from google.adk.agents import LlmAgent
 from google.adk.agents.remote_a2a_agent import RemoteA2aAgent
+from google.adk.models import BaseLlm, LlmRequest
+from google.adk.models import LlmResponse as AdkLlmResponse
+from google.genai import types
 
 from godview.agents.adk.court import (
     CONSENSUS_THRESHOLD,
@@ -119,6 +124,7 @@ class MockSovereignContext:
         self.hooks.on_approval_decided = []
         self.llm = llm
         self.court_orchestrator = None
+        self.executors = {"obs.query_logs_scoped": lambda **kwargs: {"status": "ok", "logs": []}}
         self.court_manager = CourtManager(
             firestore=self.docs,
             pubsub=self.bus,
@@ -167,6 +173,12 @@ def test_specialist_agent_generic_archetypes_and_tools() -> None:
         read_res = tools.invoke_capability("obs.query_logs_scoped", {"filter": "error"})
         assert read_res["status"] == "ok"
 
+        # Zero Echo: unhandled capability raises NoExecutorError
+        from godview.sovereign.remediation.types import NoExecutorError
+
+        with pytest.raises(NoExecutorError):
+            tools.invoke_capability("unregistered.read_capability")
+
         mut_res = tools.invoke_capability("k8s.rollout_restart", {"deployment": "core-api"})
         assert mut_res["status"] == "approval_required"
         assert mut_res["requires_approval"] is True
@@ -207,6 +219,77 @@ async def test_specialist_agent_async_llm_diagnose() -> None:
     assert diag.root_cause_category == "certificate_expired"
     assert len(diag.proposed_actions) >= 1
     assert diag.proposed_actions[0].capability_id == "cert.renew_certificate"
+
+
+class FunctionCallingFakeLlm(BaseLlm):
+    model: str = "fake-tool-llm"
+    calls: int = 0
+
+    async def generate_content_async(
+        self, llm_request: LlmRequest, stream: bool = False
+    ) -> AsyncGenerator[AdkLlmResponse]:
+        self.calls += 1
+        if self.calls == 1:
+            part = types.Part.from_function_call(name="get_incident", args={"incident_id": "inc-42"})
+            yield AdkLlmResponse(content=types.Content(parts=[part], role="model"))
+        else:
+            part = types.Part.from_text(
+                text=json.dumps({
+                    "hypothesis": "Function calling verified incident inc-42 DB lock contention",
+                    "confidence": 0.94,
+                    "root_cause_category": "database_lock",
+                    "citations": ["incident:inc-42"],
+                })
+            )
+            yield AdkLlmResponse(content=types.Content(parts=[part], role="model"))
+
+
+@pytest.mark.asyncio
+async def test_specialist_adk_native_function_tool_calling() -> None:
+    fake_llm = FunctionCallingFakeLlm()
+    ctx = MockSovereignContext()
+    ctx.docs.set("incidents", "inc-42", {"incident_id": "inc-42", "summary": "DB lock timeout"})
+
+    agent = create_specialist_agent(
+        archetype="data",
+        subject_ref="postgres-primary",
+        ctx=ctx,
+        llm_runner=fake_llm,
+    )
+
+    diag = await agent.diagnose("inc-42")
+    assert isinstance(diag, Diagnosis)
+    assert fake_llm.calls == 2
+    assert "Function calling verified" in diag.hypothesis
+    assert diag.confidence == 0.94
+    assert diag.root_cause_category == "database_lock"
+
+
+@pytest.mark.asyncio
+async def test_zero_invented_confidence_on_parse_error() -> None:
+    class MalformedFakeLlm(BaseLlm):
+        model: str = "malformed-llm"
+
+        async def generate_content_async(
+            self, llm_request: LlmRequest, stream: bool = False
+        ) -> AsyncGenerator[AdkLlmResponse]:
+            part = types.Part.from_text(text="NOT_VALID_JSON_CANNOT_PARSE")
+            yield AdkLlmResponse(content=types.Content(parts=[part], role="model"))
+
+    malformed_llm = MalformedFakeLlm()
+    ctx = MockSovereignContext()
+    agent = create_specialist_agent(
+        archetype="application",
+        subject_ref="payments-svc",
+        ctx=ctx,
+        llm_runner=malformed_llm,
+    )
+
+    diag = await agent.diagnose("inc-corrupt")
+    assert isinstance(diag, Diagnosis)
+    assert diag.confidence == 0.0
+    assert diag.hypothesis == "not diagnosed: parse error"
+    assert diag.root_cause_category == "parse_error"
 
 
 @pytest.mark.asyncio
@@ -251,6 +334,59 @@ async def test_court_orchestrator_parallel_fanout_and_critic_consensus() -> None
     assert diagnosis.root_cause_category == "certificate_expired"
     assert len(diagnosis.proposed_actions) >= 1
     assert diagnosis.proposed_actions[0].capability_id == "cert.renew_certificate"
+
+
+@pytest.mark.asyncio
+async def test_court_critic_multi_round_debate_challenges_revision() -> None:
+    class DebateFakeCriticLlm(BaseLlm):
+        model: str = "debate-critic-llm"
+        round_calls: int = 0
+
+        async def generate_content_async(
+            self, llm_request: LlmRequest, stream: bool = False
+        ) -> AsyncGenerator[AdkLlmResponse]:
+            self.round_calls += 1
+            if self.round_calls == 1:
+                part = types.Part.from_text(
+                    text=json.dumps({
+                        "consensus_score": 0.65,
+                        "hypothesis": "Initial hypothesis challenged",
+                        "confidence": 0.65,
+                        "root_cause_category": "pending_revision",
+                        "challenges": ["Provide network trace evidence for latency surge"],
+                    })
+                )
+            else:
+                part = types.Part.from_text(
+                    text=json.dumps({
+                        "consensus_score": 0.93,
+                        "hypothesis": "Swarm debate consensus reached: TLS cert expiration",
+                        "confidence": 0.93,
+                        "root_cause_category": "certificate_expired",
+                        "citations": ["evidence:tls_handshake_abort"],
+                        "proposed_actions": [
+                            {"capability_id": "cert.renew_certificate", "confidence": 0.93}
+                        ],
+                    })
+                )
+            yield AdkLlmResponse(content=types.Content(parts=[part], role="model"))
+
+    critic_llm = DebateFakeCriticLlm()
+    spec_llm = AsyncFakeLlm()
+    ctx = MockSovereignContext(llm=spec_llm)
+    orchestrator = CourtOrchestrator(ctx=ctx)
+    orchestrator.critic.llm_runner = critic_llm
+    orchestrator.critic.adk_agent.model = critic_llm
+
+    diag = await orchestrator.convene(
+        incident_id="inc-debate-test",
+        evidence_pack={"trace_data": "sample"},
+        specialists=["application", "platform"],
+    )
+    assert isinstance(diag, Diagnosis)
+    assert critic_llm.round_calls == 2
+    assert diag.confidence >= 0.85
+    assert "Swarm debate consensus reached" in diag.hypothesis
 
 
 @pytest.mark.asyncio

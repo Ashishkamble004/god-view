@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from datetime import UTC, datetime
 from typing import Any
 
@@ -24,15 +25,18 @@ logger = logging.getLogger("godview.control_api.routers.court")
 
 
 async def _require_auth(request: Request, ctx: Any) -> Any:
+    settings = getattr(ctx, "settings", None)
+    env_mode = getattr(settings, "env_mode", None) or os.environ.get("GODVIEW_ENV", "hermetic").lower()
     auth = getattr(ctx, "auth", None)
-    if auth is None:
+    if auth is not None:
+        p = auth.verify_iap_jwt(request)
+        if p and getattr(p, "email", None):
+            return p
+        p = auth.verify_google_oidc(request)
+        if p and getattr(p, "email", None):
+            return p
+    if env_mode in ("hermetic", "local"):
         return None
-    p = auth.verify_iap_jwt(request)
-    if p:
-        return p
-    p = auth.verify_google_oidc(request)
-    if p:
-        return p
     raise HTTPException(
         status_code=401,
         detail="Unauthorized: operator (IAP) or service (OIDC) identity required",
