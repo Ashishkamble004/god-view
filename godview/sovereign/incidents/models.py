@@ -27,3 +27,6 @@ class IncidentDoc(EpisodicIncidentDoc):
     clear_ticks: int = 0
     diagnoses: list[Diagnosis] = Field(default_factory=list)
     raw_evidence: dict[str, Any] = Field(default_factory=dict)
+    root_cause_category: str | None = None
+    remediation_capability: str | None = None
+    resolution_summary: str | None = None
