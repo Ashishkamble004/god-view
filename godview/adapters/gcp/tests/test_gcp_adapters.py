@@ -334,7 +334,7 @@ async def test_scoped_log_query_enforces_page_size_cap_and_pii_detector(
                     "type": "cloud_run_revision",
                     "labels": {"service_name": "svc-origination-901"},
                 },
-                "textPayload": "Verify applicant PAN ABCDE1234F and Aadhaar 4912 8834 9012 failed",
+                "textPayload": "Verify applicant email test.user@example.com and SSN 123-45-6789 failed",
                 "severity": "ERROR",
                 "timestamp": "2026-10-16T10:00:00Z",
             }
@@ -360,9 +360,9 @@ async def test_scoped_log_query_enforces_page_size_cap_and_pii_detector(
     assert len(result["entries"]) == 1
     pii_findings = log_adapter.scan_entries_for_pii(result["entries"])
     assert len(pii_findings) == 1
-    assert pii_findings[0]["pii_types"] == ["PAN", "AADHAAR"]
-    assert "ABCDE1234F" not in pii_findings[0]["masked_sample"]
-    assert "4912 8834 9012" not in pii_findings[0]["masked_sample"]
+    assert set(pii_findings[0]["pii_types"]) == {"EMAIL", "SSN"}
+    assert "test.user@example.com" not in pii_findings[0]["masked_sample"]
+    assert "123-45-6789" not in pii_findings[0]["masked_sample"]
 
 
 @pytest.mark.unit

@@ -590,10 +590,14 @@ class _FixtureAsyncTransport(httpx.BaseTransport, httpx.AsyncBaseTransport):
                 return self._json_response(
                     403, {"error": {"code": 403, "message": f"SA {sa_segment} not in project"}}
                 )
-            token_val = self._fixtures["iam"].get(
-                "impersonated_access_token",
-                "ya29.c.b0Aaekm1K-recorded-fixture-act-sa-token",
-            )
+            token_val = self._fixtures["iam"].get("impersonated_access_token")
+            if not token_val:
+                if os.environ.get("GODVIEW_ENV") != "hermetic":
+                    return self._json_response(
+                        401,
+                        {"error": {"code": 401, "message": "Impersonated token requires hermetic mode or explicit fixture"}},
+                    )
+                token_val = "hermetic-fixture-token-act-sa"
             return self._json_response(
                 200,
                 {
@@ -654,18 +658,23 @@ def _redact_tfstate_node(node: Any) -> Any:
     """Recursively redact sensitive credentials, passwords, and tokens from tfstate (Decision A2/A8)."""
     if isinstance(node, dict):
         cleaned: dict[str, Any] = {}
-        sensitive_paths: set[str] = set()
+        sensitive_paths: list[list[str]] = []
         for sa in node.get("sensitive_attributes", []):
-            if isinstance(sa, list) and sa and isinstance(sa[0], dict) and "type" in sa[0]:
-                val = sa[0].get("value")
-                if val:
-                    sensitive_paths.add(str(val))
+            if isinstance(sa, list):
+                path: list[str] = []
+                for step in sa:
+                    if isinstance(step, dict) and "value" in step:
+                        path.append(str(step["value"]))
+                    elif isinstance(step, str):
+                        path.append(step)
+                if path:
+                    sensitive_paths.append(path)
             elif isinstance(sa, str):
-                sensitive_paths.add(sa)
+                sensitive_paths.append(sa.split("."))
 
         for k, v in node.items():
             lower_k = str(k).lower()
-            if any(s in lower_k for s in _SENSITIVE_KEY_SUBSTRINGS) or k in sensitive_paths:
+            if any(s in lower_k for s in _SENSITIVE_KEY_SUBSTRINGS):
                 cleaned[k] = "[REDACTED]"
             elif lower_k in ("result", "bcrypt_hash") and isinstance(v, str) and len(v) > 0:
                 cleaned[k] = "[REDACTED]"
@@ -675,6 +684,24 @@ def _redact_tfstate_node(node: Any) -> Any:
                 cleaned[k] = "[REDACTED]"
             else:
                 cleaned[k] = _redact_tfstate_node(v)
+
+        def _apply_redaction(target: Any, path: list[str]) -> None:
+            if not isinstance(target, dict) or not path:
+                return
+            first = path[0]
+            if len(path) == 1:
+                if first in target:
+                    target[first] = "[REDACTED]"
+            else:
+                if first in target:
+                    _apply_redaction(target[first], path[1:])
+
+        # Apply sensitive paths against cleaned instance attributes and cleaned root
+        for p in sensitive_paths:
+            if "attributes" in cleaned and isinstance(cleaned["attributes"], dict):
+                _apply_redaction(cleaned["attributes"], p)
+            _apply_redaction(cleaned, p)
+
         return cleaned
     if isinstance(node, list):
         return [_redact_tfstate_node(item) for item in node]
@@ -732,18 +759,26 @@ class TerraformDriftAdapter(SenseAdapter):
         return httpx.AsyncClient(**kwargs)
 
     async def discover(self) -> DiscoveryResult:
-        state_data = await self._read_tfstate(prefix="platform")
-        resources = state_data.get("state", {}).get("resources", [])
-        return DiscoveryResult(
-            services=[],
-            edges=[],
-            entities=[],
-            evidence={
-                "bucket": self.tfstate_bucket,
-                "generation": state_data.get("generation"),
-                "terraform_resources_count": len(resources),
-            },
-        )
+        try:
+            state_data = await self._read_tfstate(prefix="platform")
+            resources = state_data.get("state", {}).get("resources", [])
+            return DiscoveryResult(
+                services=[],
+                edges=[],
+                entities=[],
+                evidence={
+                    "bucket": self.tfstate_bucket,
+                    "generation": state_data.get("generation"),
+                    "terraform_resources_count": len(resources),
+                },
+            )
+        except Exception as exc:
+            return DiscoveryResult(
+                services=[],
+                edges=[],
+                entities=[],
+                evidence={"error": str(exc), "state": "unavailable", "bucket": self.tfstate_bucket},
+            )
 
     def senses(self) -> list[SenseCategory]:
         return [SenseCategory.CHANGE_PLANE, SenseCategory.CONTRACTS]
@@ -765,14 +800,18 @@ class TerraformDriftAdapter(SenseAdapter):
                 has_tfstate = resp.status_code == 200
         except httpx.HTTPError:
             has_tfstate = False
+        evidence: dict[str, Any] = {
+            "bucket": self.tfstate_bucket,
+            "prefix": "platform",
+            "has_tfstate": has_tfstate,
+        }
+        if not has_tfstate:
+            evidence["error"] = "GCS tfstate object not found or unavailable"
         return AdapterHealth(
             adapter_name=self.name,
             family="gcp",
             state="available" if has_tfstate else "unavailable",
-            evidence={
-                "bucket": self.tfstate_bucket,
-                "prefix": "platform",
-            },
+            evidence=evidence,
             checked_at=datetime.now(tz=UTC),
         )
 
@@ -852,29 +891,98 @@ class TerraformDriftAdapter(SenseAdapter):
         live_sql_by_name: dict[str, dict[str, Any]] = {}
 
         async with self._http_client() as client:
-            run_resp = await client.get(
-                f"https://run.googleapis.com/v2/projects/{self.project_id}/locations/{self.region}/services"
-            )
-            if run_resp.status_code == 200:
-                for svc in run_resp.json().get("services", []):
-                    short_name = str(svc.get("name", "")).rsplit("/", 1)[-1]
-                    live_run_by_name[short_name] = svc
+            # 1. Cloud Run (locations/- with pagination)
+            page_token: str | None = None
+            while True:
+                params = {"pageToken": page_token} if page_token else {}
+                run_resp = await client.get(
+                    f"https://run.googleapis.com/v2/projects/{self.project_id}/locations/-/services",
+                    params=params,
+                )
+                if run_resp.status_code == 200:
+                    data = run_resp.json()
+                    for svc in data.get("services", []):
+                        short_name = str(svc.get("name", "")).rsplit("/", 1)[-1]
+                        live_run_by_name[short_name] = svc
+                    page_token = data.get("nextPageToken")
+                    if not page_token:
+                        break
+                else:
+                    break
 
-            comp_resp = await client.get(
-                f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/zones/{self.zone}/instances"
-            )
-            if comp_resp.status_code == 200:
-                for vm in comp_resp.json().get("items", []):
-                    live_vm_by_name[str(vm.get("name", ""))] = vm
+            # 2. Compute Engine (aggregated/instances with pagination)
+            page_token = None
+            while True:
+                params = {"pageToken": page_token} if page_token else {}
+                comp_resp = await client.get(
+                    f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/aggregated/instances",
+                    params=params,
+                )
+                if comp_resp.status_code == 200:
+                    data = comp_resp.json()
+                    raw_items = data.get("items", {})
+                    if isinstance(raw_items, dict):
+                        for scope_val in raw_items.values():
+                            if isinstance(scope_val, dict) and "instances" in scope_val:
+                                for vm in scope_val["instances"]:
+                                    live_vm_by_name[str(vm.get("name", ""))] = vm
+                    elif isinstance(raw_items, list):
+                        for vm in raw_items:
+                            live_vm_by_name[str(vm.get("name", ""))] = vm
+                    page_token = data.get("nextPageToken")
+                    if not page_token:
+                        break
+                elif comp_resp.status_code in (404, 405):
+                    # fallback to zonal instances
+                    z_resp = await client.get(
+                        f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/zones/{self.zone}/instances",
+                    )
+                    if z_resp.status_code == 200:
+                        for vm in z_resp.json().get("items", []):
+                            live_vm_by_name[str(vm.get("name", ""))] = vm
+                    break
+                else:
+                    break
 
-            sql_resp = await client.get(
-                f"https://sqladmin.googleapis.com/sql/v1beta4/projects/{self.project_id}/instances"
-            )
-            if sql_resp.status_code == 200:
-                for sql_inst in sql_resp.json().get("items", []):
-                    live_sql_by_name[str(sql_inst.get("name", ""))] = sql_inst
+            # 3. Cloud SQL (instances with pagination)
+            page_token = None
+            while True:
+                params = {"pageToken": page_token} if page_token else {}
+                sql_resp = await client.get(
+                    f"https://sqladmin.googleapis.com/sql/v1beta4/projects/{self.project_id}/instances",
+                    params=params,
+                )
+                if sql_resp.status_code == 200:
+                    data = sql_resp.json()
+                    for sql_inst in data.get("items", []):
+                        live_sql_by_name[str(sql_inst.get("name", ""))] = sql_inst
+                    page_token = data.get("nextPageToken")
+                    if not page_token:
+                        break
+                else:
+                    break
 
         return live_run_by_name, live_vm_by_name, live_sql_by_name
+
+    async def _fetch_live_iam_bindings(self) -> list[dict[str, str]]:
+        if self._fixtures is not None and "live_iam_bindings" in self._fixtures:
+            return list(self._fixtures["live_iam_bindings"])
+        bindings_list: list[dict[str, str]] = []
+        try:
+            async with self._http_client() as client:
+                resp = await client.post(
+                    f"https://cloudresourcemanager.googleapis.com/v1/projects/{self.project_id}:getIamPolicy",
+                    json={},
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    for b in data.get("bindings", []):
+                        role = b.get("role", "")
+                        for m in b.get("members", []):
+                            bindings_list.append({"resource": self.project_id, "role": role, "member": m})
+        except Exception:
+            pass
+        return bindings_list
 
     async def _drift_diff(
         self,
@@ -1066,7 +1174,8 @@ class TerraformDriftAdapter(SenseAdapter):
                         )
 
         # Check live IAM bindings for any unauthorized member or Sev-1 allUsers/allAuthenticatedUsers
-        for live_binding in (self._fixtures or {}).get("live_iam_bindings", []):
+        live_iam_bindings = await self._fetch_live_iam_bindings()
+        for live_binding in live_iam_bindings:
             res_target = str(live_binding.get("resource", "")).rsplit("/", 1)[-1]
             role = str(live_binding.get("role", ""))
             member = str(live_binding.get("member", ""))

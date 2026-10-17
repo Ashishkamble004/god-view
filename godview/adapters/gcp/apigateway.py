@@ -182,6 +182,7 @@ class ApiGatewayAdapter(SenseAdapter):
         now_iso = datetime.now(tz=UTC).isoformat()
         services: list[DiscoveredServiceDoc] = []
         edges: list[DiscoveredEdgeDoc] = []
+        config_errors: dict[str, str] = {}
 
         for gw in gateways:
             gw_full_name = str(gw.get("name", ""))
@@ -260,8 +261,8 @@ class ApiGatewayAdapter(SenseAdapter):
                                         routes.append(route_entry)
                                         if backend_address:
                                             backend_targets.add(backend_address)
-                except Exception:
-                    pass
+                except Exception as c_exc:
+                    config_errors[gw_short_name] = str(c_exc)
 
             services.append(
                 DiscoveredServiceDoc(
@@ -284,9 +285,18 @@ class ApiGatewayAdapter(SenseAdapter):
             for addr in backend_targets:
                 parsed = urlparse(addr)
                 hostname = parsed.hostname or addr
-                # If target is *.run.app
-                target_service_name = hostname.split(".")[0]
-                dst_id = f"{self.env_id}__cloud_run.{target_service_name}"
+                if ".run.app" in hostname:
+                    base_host = hostname.split(".run.app")[0]
+                    parts = base_host.split("-")
+                    if len(parts) >= 3 and len(parts[-2]) >= 8:
+                        target_service_name = "-".join(parts[:-2])
+                    else:
+                        target_service_name = base_host
+                    dst_id = f"{self.env_id}__cloud_run.{target_service_name}"
+                else:
+                    target_service_name = hostname.split(":")[0]
+                    dst_id = f"{self.env_id}__service.{target_service_name}"
+
                 edges.append(
                     DiscoveredEdgeDoc(
                         doc_id=f"{doc_id}__to__{dst_id}",
@@ -301,14 +311,18 @@ class ApiGatewayAdapter(SenseAdapter):
                     )
                 )
 
+        evidence: dict[str, Any] = {
+            "gateways_count": len(services),
+            "total_routes_discovered": sum(len(s.routes) for s in services),
+        }
+        if config_errors:
+            evidence["config_errors"] = config_errors
+
         return DiscoveryResult(
             services=services,
             edges=edges,
             entities=[],
-            evidence={
-                "gateways_count": len(services),
-                "total_routes_discovered": sum(len(s.routes) for s in services),
-            },
+            evidence=evidence,
         )
 
     async def _execute_capability_impl(
@@ -322,10 +336,15 @@ class ApiGatewayAdapter(SenseAdapter):
             if not self._cached_openapi_by_gateway:
                 await self.discover()
             if gw_name:
-                if gw_name in self._cached_openapi_by_gateway:
-                    return self._cached_openapi_by_gateway[gw_name]
-                return {}
-            if self._cached_openapi_by_gateway:
+                short_gw = str(gw_name).rsplit("/", 1)[-1]
+                return (
+                    self._cached_openapi_by_gateway.get(gw_name)
+                    or self._cached_openapi_by_gateway.get(short_gw)
+                    or {}
+                )
+            if len(self._cached_openapi_by_gateway) == 1:
                 return next(iter(self._cached_openapi_by_gateway.values()))
+            if len(self._cached_openapi_by_gateway) > 1:
+                return dict(self._cached_openapi_by_gateway)
             return {}
         raise NotImplementedError(capability_id)

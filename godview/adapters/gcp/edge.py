@@ -11,6 +11,7 @@ Implements capabilities:
 
 from __future__ import annotations
 
+import copy
 import re
 from datetime import UTC, datetime
 from typing import Any
@@ -125,33 +126,61 @@ class CloudEdgeAdapter(SenseAdapter):
         agg_url = f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/aggregated/forwardingRules"
         try:
             return await self._fetch_paginated(agg_url, "items")
-        except Exception:
-            global_url = f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/global/forwardingRules"
-            return await self._fetch_paginated(global_url, "items")
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in (404, 405):
+                global_url = f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/global/forwardingRules"
+                return await self._fetch_paginated(global_url, "items")
+            raise
+
+    async def _fetch_target_http_proxies(self) -> list[dict[str, Any]]:
+        agg_url = f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/aggregated/targetHttpProxies"
+        try:
+            return await self._fetch_paginated(agg_url, "items")
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in (404, 405):
+                global_url = f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/global/targetHttpProxies"
+                return await self._fetch_paginated(global_url, "items")
+            raise
+
+    async def _fetch_target_https_proxies(self) -> list[dict[str, Any]]:
+        agg_url = f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/aggregated/targetHttpsProxies"
+        try:
+            return await self._fetch_paginated(agg_url, "items")
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in (404, 405):
+                global_url = f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/global/targetHttpsProxies"
+                return await self._fetch_paginated(global_url, "items")
+            raise
 
     async def _fetch_url_maps(self) -> list[dict[str, Any]]:
         agg_url = f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/aggregated/urlMaps"
         try:
             return await self._fetch_paginated(agg_url, "items")
-        except Exception:
-            global_url = f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/global/urlMaps"
-            return await self._fetch_paginated(global_url, "items")
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in (404, 405):
+                global_url = f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/global/urlMaps"
+                return await self._fetch_paginated(global_url, "items")
+            raise
 
     async def _fetch_backend_services(self) -> list[dict[str, Any]]:
         agg_url = f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/aggregated/backendServices"
         try:
             return await self._fetch_paginated(agg_url, "items")
-        except Exception:
-            global_url = f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/global/backendServices"
-            return await self._fetch_paginated(global_url, "items")
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in (404, 405):
+                global_url = f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/global/backendServices"
+                return await self._fetch_paginated(global_url, "items")
+            raise
 
     async def _fetch_security_policies(self) -> list[dict[str, Any]]:
         agg_url = f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/aggregated/securityPolicies"
         try:
             return await self._fetch_paginated(agg_url, "items")
-        except Exception:
-            global_url = f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/global/securityPolicies"
-            return await self._fetch_paginated(global_url, "items")
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in (404, 405):
+                global_url = f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/global/securityPolicies"
+                return await self._fetch_paginated(global_url, "items")
+            raise
 
     def senses(self) -> list[SenseCategory]:
         return [SenseCategory.CHANGE_PLANE, SenseCategory.SCOPED_OBSERVABILITY]
@@ -163,21 +192,31 @@ class CloudEdgeAdapter(SenseAdapter):
         }
 
     async def health(self) -> AdapterHealth:
-        try:
-            frs = await self._fetch_forwarding_rules()
-            state = "available"
-            count = len(frs)
-            error = None
-        except Exception as exc:
-            state = "unavailable"
-            count = 0
-            error = str(exc)
-        evidence = {
+        counts: dict[str, int] = {}
+        errors: dict[str, str] = {}
+        for name, fetcher in [
+            ("forwarding_rules", self._fetch_forwarding_rules),
+            ("url_maps", self._fetch_url_maps),
+            ("backend_services", self._fetch_backend_services),
+            ("security_policies", self._fetch_security_policies),
+        ]:
+            try:
+                items = await fetcher()
+                counts[name] = len(items)
+            except Exception as exc:
+                errors[name] = str(exc)
+                counts[name] = 0
+
+        state = "available"
+        if errors:
+            state = "partial" if any(counts.values()) else "unavailable"
+
+        evidence: dict[str, Any] = {
             "api": "compute.googleapis.com/compute/v1",
-            "forwarding_rules_count": count,
+            **{f"{k}_count": v for k, v in counts.items()},
         }
-        if error:
-            evidence["error"] = error
+        if errors:
+            evidence["errors"] = errors
         return AdapterHealth(
             adapter_name=self.name,
             family="gcp",
@@ -193,6 +232,18 @@ class CloudEdgeAdapter(SenseAdapter):
         except Exception as exc:
             forwarding_rules = []
             errors["forwarding_rules"] = str(exc)
+
+        target_proxies: list[dict[str, Any]] = []
+        try:
+            t_http = await self._fetch_target_http_proxies()
+            target_proxies.extend(t_http)
+        except Exception:
+            pass
+        try:
+            t_https = await self._fetch_target_https_proxies()
+            target_proxies.extend(t_https)
+        except Exception:
+            pass
 
         try:
             url_maps = await self._fetch_url_maps()
@@ -215,6 +266,27 @@ class CloudEdgeAdapter(SenseAdapter):
         now_iso = datetime.now(tz=UTC).isoformat()
         services: list[DiscoveredServiceDoc] = []
         edges: list[DiscoveredEdgeDoc] = []
+
+        # Build target proxy -> urlMap mapping
+        proxy_to_urlmap: dict[str, str] = {}
+        for tp in target_proxies:
+            p_name = str(tp.get("name", ""))
+            um_url = str(tp.get("urlMap", ""))
+            if p_name and um_url:
+                proxy_to_urlmap[p_name] = um_url.rsplit("/", 1)[-1]
+
+        # Map forwarding rules to url maps
+        fr_to_urlmaps: dict[str, list[str]] = {}
+        for fr in forwarding_rules:
+            fr_name = str(fr.get("name", ""))
+            target_proxy = str(fr.get("target", "")).rsplit("/", 1)[-1]
+            if target_proxy in proxy_to_urlmap:
+                fr_to_urlmaps.setdefault(fr_name, []).append(proxy_to_urlmap[target_proxy])
+            else:
+                for um in url_maps:
+                    u_name = str(um.get("name", ""))
+                    if u_name == target_proxy or u_name == fr_name or len(url_maps) == 1:
+                        fr_to_urlmaps.setdefault(fr_name, []).append(u_name)
 
         # 1. Security Policies
         policy_lookup: dict[str, dict[str, Any]] = {}
@@ -348,22 +420,24 @@ class CloudEdgeAdapter(SenseAdapter):
                     )
                 )
 
-            # Edge from backend service to compute backend (via NEGs or backends list)
+            # Edge from backend service to compute backend (via NEGs or instance groups)
             backends = bs.get("backends", [])
             for b in backends:
                 group_url = str(b.get("group", ""))
                 group_name = group_url.rsplit("/", 1)[-1]
-                # If group points to a Serverless NEG or instance group
                 if group_name:
-                    # In GCP serverless NEGs are typically named <svc>-neg or similar
-                    target_svc_name = group_name.removesuffix("-neg")
-                    target_id = f"{self.env_id}__cloud_run.{target_svc_name}"
+                    if "/networkEndpointGroups/" in group_url or "neg" in group_name.lower():
+                        target_id = f"{self.env_id}__neg.{group_name}"
+                    elif "/instanceGroups/" in group_url or "instancegroup" in group_name.lower():
+                        target_id = f"{self.env_id}__instance_group.{group_name}"
+                    else:
+                        target_id = f"{self.env_id}__backend_group.{group_name}"
                     edges.append(
                         DiscoveredEdgeDoc(
                             doc_id=f"{bs_doc_id}__to__{target_id}",
                             src=bs_doc_id,
                             dst=target_id,
-                            protocol="http",
+                            protocol="lb_route",
                             evidence="lb_route",
                             evidence_kind="lb_route",
                             confidence=0.9,
@@ -400,7 +474,6 @@ class CloudEdgeAdapter(SenseAdapter):
         for um in url_maps:
             um_name = str(um.get("name", ""))
             default_bs = str(um.get("defaultService", "")).rsplit("/", 1)[-1]
-            frontend_id = f"{self.env_id}__lb_frontend.{um_name}"
 
             all_target_bs: set[str] = set()
             if default_bs:
@@ -424,37 +497,50 @@ class CloudEdgeAdapter(SenseAdapter):
                                     for h in hosts:
                                         um_routes.append({"host": h, "path": p, "backend_service": p_svc, "url_map": um_name})
 
-            for target_bs in all_target_bs:
-                dst_id = f"{self.env_id}__backend_service.{target_bs}"
-                edges.append(
-                    DiscoveredEdgeDoc(
-                        doc_id=f"{frontend_id}__to__{dst_id}",
-                        src=frontend_id,
-                        dst=dst_id,
-                        protocol="lb_route",
-                        evidence="lb_route",
-                        evidence_kind="lb_route",
-                        confidence=1.0,
-                        first_seen=now_iso,
-                        last_seen=now_iso,
+            # Map to matching forwarding rule(s)
+            matching_fr_names = [frn for frn, ums in fr_to_urlmaps.items() if um_name in ums]
+            frontend_ids = (
+                [f"{self.env_id}__lb_frontend.{frn}" for frn in matching_fr_names]
+                if matching_fr_names
+                else [f"{self.env_id}__lb_frontend.{um_name}"]
+            )
+
+            for frontend_id in frontend_ids:
+                for target_bs in all_target_bs:
+                    edges.append(
+                        DiscoveredEdgeDoc(
+                            doc_id=f"{frontend_id}__to__{self.env_id}__backend_service.{target_bs}",
+                            src=frontend_id,
+                            dst=f"{self.env_id}__backend_service.{target_bs}",
+                            protocol="lb_route",
+                            evidence="lb_route",
+                            evidence_kind="lb_route",
+                            confidence=1.0,
+                            first_seen=now_iso,
+                            last_seen=now_iso,
+                        )
                     )
-                )
 
         if um_routes:
             for s in services:
                 if s.kind == "lb_frontend":
                     s.routes = list(um_routes)
 
+        evidence: dict[str, Any] = {
+            "forwarding_rules_count": len(forwarding_rules),
+            "url_maps_count": len(url_maps),
+            "backend_services_count": len(backend_services),
+            "security_policies_count": len(security_policies),
+        }
+        if errors:
+            evidence["errors"] = errors
+            evidence["state"] = "partial" if services else "unavailable"
+
         return DiscoveryResult(
             services=services,
             edges=edges,
             entities=[],
-            evidence={
-                "forwarding_rules_count": len(forwarding_rules),
-                "url_maps_count": len(url_maps),
-                "backend_services_count": len(backend_services),
-                "security_policies_count": len(security_policies),
-            },
+            evidence=evidence,
         )
 
     async def _execute_capability_impl(
@@ -464,7 +550,10 @@ class CloudEdgeAdapter(SenseAdapter):
         trust_decision: TrustDecision | None = None,
     ) -> Any:
         if capability_id == "edge.describe_backends":
-            backends = await self._fetch_backend_services()
+            try:
+                backends = await self._fetch_backend_services()
+            except Exception as exc:
+                return {"backends": [], "error": str(exc)}
             try:
                 url_maps = await self._fetch_url_maps()
                 backend_hosts: dict[str, list[str]] = {}
@@ -488,7 +577,38 @@ class CloudEdgeAdapter(SenseAdapter):
             except Exception:
                 pass
             return backends
+
         if capability_id == "edge.describe_security_policies":
-            policies = await self._fetch_security_policies()
-            return policies
+            try:
+                policies = await self._fetch_security_policies()
+            except Exception as exc:
+                return {"policies": [], "error": str(exc)}
+
+            parsed_policies: list[dict[str, Any]] = []
+            for p in policies:
+                p_copy = copy.deepcopy(p)
+                parsed_rules: list[dict[str, Any]] = []
+                for r in p_copy.get("rules", []):
+                    expr = str(r.get("match", {}).get("expr", {}).get("expression", ""))
+                    has_preconfigured = (
+                        "evaluatePreconfiguredWaf" in expr
+                        or "evaluatePreconfiguredExpr" in expr
+                    )
+                    sens_match = _SENSITIVITY_RE.search(expr)
+                    sensitivity = int(sens_match.group(1)) if sens_match else None
+                    parsed_rule = {
+                        "priority": r.get("priority"),
+                        "action": r.get("action", "allow"),
+                        "preview": bool(r.get("preview", False)),
+                        "description": r.get("description", ""),
+                        "evaluate_preconfigured": has_preconfigured,
+                        "sensitivity": sensitivity,
+                        "preconfigured_waf_config": r.get("preconfiguredWafConfig", {}),
+                        "match_expression": expr,
+                        "raw_rule": r,
+                    }
+                    parsed_rules.append(parsed_rule)
+                p_copy["parsed_rules"] = parsed_rules
+                parsed_policies.append(p_copy)
+            return parsed_policies
         raise NotImplementedError(capability_id)

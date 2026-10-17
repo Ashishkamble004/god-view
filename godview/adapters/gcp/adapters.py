@@ -27,6 +27,7 @@ from __future__ import annotations
 import copy
 import inspect
 import ipaddress
+import json
 import os
 import re
 import time
@@ -155,6 +156,46 @@ def _validate_single_select_sql(statement: str) -> str:
     return cleaned
 
 
+def _assert_ssrf_safe_url(url: str, allow_private: bool = False) -> None:
+    """Validate target URL against SSRF, metadata, decimal, hex, and loopback attacks."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"SSRF violation: scheme '{parsed.scheme}' is forbidden")
+    hostname = (parsed.hostname or "").lower()
+    if not hostname:
+        raise ValueError("SSRF violation: missing target hostname")
+
+    if hostname in ("metadata.google.internal", "metadata", "localhost"):
+        raise ValueError(f"SSRF violation: probing '{hostname}' is forbidden")
+
+    ip_obj: ipaddress.IPv4Address | ipaddress.IPv6Address | None = None
+    if hostname.isdigit():
+        try:
+            ip_obj = ipaddress.ip_address(int(hostname))
+        except (ValueError, TypeError):
+            pass
+    elif hostname.startswith(("0x", "0X")):
+        try:
+            ip_obj = ipaddress.ip_address(int(hostname, 16))
+        except (ValueError, TypeError):
+            pass
+    if ip_obj is None:
+        try:
+            ip_obj = ipaddress.ip_address(hostname)
+        except ValueError:
+            ip_obj = None
+
+    if ip_obj is not None:
+        if ip_obj.version == 6 and ip_obj.ipv4_mapped:
+            ip_obj = ip_obj.ipv4_mapped
+
+        ip_str = str(ip_obj)
+        if ip_str == "169.254.169.254" or ip_obj.is_link_local or ip_obj.is_loopback:
+            raise ValueError(f"SSRF violation: probing metadata/link-local/loopback IP '{hostname}' is forbidden")
+        if ip_obj.is_private and not allow_private:
+            raise ValueError(f"SSRF violation: probing private IP '{hostname}' is forbidden")
+
+
 class _BaseGcpAdapter(SenseAdapter):
     family = "gcp"
 
@@ -216,6 +257,7 @@ class _BaseGcpAdapter(SenseAdapter):
         url: str,
         items_key: str,
         params: dict[str, Any] | None = None,
+        max_items: int | None = None,
     ) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         page_token: str | None = None
@@ -241,10 +283,12 @@ class _BaseGcpAdapter(SenseAdapter):
                             results.extend(sub)
                 elif isinstance(raw_items, list):
                     results.extend(raw_items)
+                if max_items is not None and len(results) >= max_items:
+                    return results[:max_items]
                 page_token = data.get("nextPageToken")
                 if not page_token:
                     break
-        return results
+        return results[:max_items] if max_items is not None else results
 
 
 # ------------------------------------------------------------------------------
@@ -254,6 +298,27 @@ class _BaseGcpAdapter(SenseAdapter):
 
 class CloudAssetInventoryAdapter(_BaseGcpAdapter):
     name = "gcp-asset-inventory"
+
+    def __init__(
+        self,
+        *,
+        project_id: str | None = None,
+        region: str = "us-central1",
+        regions: Sequence[str] | None = None,
+        auth: Any | None = None,
+        fixtures: dict[str, Any] | None = None,
+        http_transport: httpx.BaseTransport | httpx.AsyncBaseTransport | None = None,
+        include_observers: bool = False,
+    ) -> None:
+        super().__init__(
+            project_id=project_id,
+            region=region,
+            regions=regions,
+            auth=auth,
+            fixtures=fixtures,
+            http_transport=http_transport,
+        )
+        self.include_observers = include_observers
 
     async def _fetch_assets(self) -> list[dict[str, Any]]:
         url = f"https://cloudasset.googleapis.com/v1/projects/{self.project_id}/assets"
@@ -293,8 +358,14 @@ class CloudAssetInventoryAdapter(_BaseGcpAdapter):
             res_data = asset.get("resource", {}).get("data", {})
             labels = dict(res_data.get("labels") or res_data.get("userLabels") or {})
 
-            if is_resource_excluded(short_name, labels):
+            is_observer = (
+                labels.get("godview_role") == "observer"
+                or is_resource_excluded(short_name, labels)
+            )
+            if is_observer and not self.include_observers:
                 continue
+            if is_observer:
+                labels["godview_role"] = "observer"
 
             kind = asset_kind_map.get(asset_type)
             if kind is None:
@@ -415,9 +486,10 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
         self._fallback_timeseries = fallback_timeseries or []
         self._probe_sender = probe_sender
 
-    async def _fetch_services(self) -> list[dict[str, Any]]:
-        # Plan §3.2: all regions with locations/-
-        url = f"https://run.googleapis.com/v2/projects/{self.project_id}/locations/-/services"
+    async def _fetch_services(self, region: str | None = None) -> list[dict[str, Any]]:
+        # Plan §3.2: all regions with locations/- or explicit region
+        loc = region if region else "-"
+        url = f"https://run.googleapis.com/v2/projects/{self.project_id}/locations/{loc}/services"
         return await self._fetch_paginated(url, "services")
 
     async def discover(self) -> DiscoveryResult:
@@ -434,6 +506,16 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
         now_iso = datetime.now(tz=UTC).isoformat()
         services: list[DiscoveredServiceDoc] = []
         edges: list[DiscoveredEdgeDoc] = []
+
+        service_lookup: dict[str, str] = {}
+        for s in raw_services:
+            sn = str(s.get("name", "")).rsplit("/", 1)[-1]
+            service_lookup[sn] = sn
+            s_uri = str(s.get("uri", ""))
+            if s_uri:
+                h = urlparse(s_uri).hostname
+                if h:
+                    service_lookup[h] = sn
 
         for svc in raw_services:
             full_name = str(svc.get("name", ""))
@@ -475,25 +557,44 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
                     env_val = str(env_entry.get("value", ""))
                     if not env_val:
                         continue
-                    if ".run.app" in env_val or env_val.startswith(("http://", "https://")):
+                    target_name: str | None = None
+                    if env_val.startswith(("http://", "https://")):
                         parsed = urlparse(env_val)
-                        host = parsed.hostname or env_val
-                        target_name = host.split(".")[0]
-                        if target_name and target_name != short_name:
-                            target_id = f"{self.env_id}__cloud_run.{target_name}"
-                            edges.append(
-                                DiscoveredEdgeDoc(
-                                    doc_id=f"{doc_id}__to__{target_id}",
-                                    src=doc_id,
-                                    dst=target_id,
-                                    protocol="http",
-                                    evidence="config",
-                                    evidence_kind="env_ref",
-                                    confidence=0.9,
-                                    first_seen=now_iso,
-                                    last_seen=now_iso,
-                                )
+                        host = parsed.hostname or ""
+                        if host in service_lookup:
+                            target_name = service_lookup[host]
+                        elif ".run.app" in host:
+                            for sn in service_lookup.values():
+                                if host.startswith(f"{sn}-") or host == f"{sn}.run.app":
+                                    target_name = sn
+                                    break
+                            if not target_name:
+                                base_host = host.split(".run.app")[0]
+                                parts = base_host.split("-")
+                                target_name = "-".join(parts[:-2]) if len(parts) >= 3 and len(parts[-2]) >= 8 else parts[0]
+                        else:
+                            for sn in service_lookup.values():
+                                if host == sn or host.startswith(f"{sn}:"):
+                                    target_name = sn
+                                    break
+                    elif env_val in service_lookup:
+                        target_name = service_lookup[env_val]
+
+                    if target_name and target_name != short_name:
+                        target_id = f"{self.env_id}__cloud_run.{target_name}"
+                        edges.append(
+                            DiscoveredEdgeDoc(
+                                doc_id=f"{doc_id}__to__{target_id}",
+                                src=doc_id,
+                                dst=target_id,
+                                protocol="http",
+                                evidence="config",
+                                evidence_kind="env_ref",
+                                confidence=0.9,
+                                first_seen=now_iso,
+                                last_seen=now_iso,
                             )
+                        )
 
         return DiscoveryResult(
             services=services,
@@ -560,32 +661,43 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
     async def _get_service_posture(self, args: dict[str, Any]) -> dict[str, Any]:
         target_name = str(args.get("service_name", "")).strip()
         short = target_name.rsplit("/", 1)[-1]
+        region = args.get("region") or self.region
         try:
-            services = await self._fetch_services()
+            services = await self._fetch_services(region=region)
+            if not any(str(s.get("name", "")).rsplit("/", 1)[-1] == short or s.get("name") == target_name for s in services):
+                services = await self._fetch_services()
             for svc in services:
                 s_name = str(svc.get("name", "")).rsplit("/", 1)[-1]
-                if s_name == short or svc.get("name") == target_name:
+                full_name = str(svc.get("name", ""))
+                if s_name == short or full_name == target_name:
                     ingress = svc.get("ingress", "INGRESS_TRAFFIC_ALL")
                     invoker_iam_disabled = bool(svc.get("invokerIamDisabled", False))
+                    has_all_users = bool(svc.get("allUsers", False))
+                    for b in svc.get("bindings", []):
+                        if "allUsers" in b.get("members", []):
+                            has_all_users = True
                     labels = dict(svc.get("labels") or {})
                     return {
                         "service_name": short,
+                        "found": True,
                         "ingress": ingress,
                         "invoker_iam_disabled": invoker_iam_disabled,
-                        "all_users": invoker_iam_disabled,
+                        "all_users": has_all_users or invoker_iam_disabled,
                         "labels": labels,
                         "iap": False,
                         "waf": None,
                     }
         except Exception as exc:
-            return {"service_name": short, "error": str(exc), "ingress": "unknown"}
+            return {"service_name": short, "found": False, "error": str(exc), "ingress": "unknown"}
         return {
             "service_name": short,
+            "found": False,
             "ingress": "unknown",
             "invoker_iam_disabled": False,
             "all_users": False,
             "iap": False,
             "waf": None,
+            "error": f"Service '{short}' not found",
         }
 
     async def _scrape_metrics_with_fallback(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -633,7 +745,7 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
             series_list: list[dict[str, Any]] = []
             if self._obs_mcp is not None:
                 mcp_res = await self._obs_mcp.list_timeseries(
-                    filter_str=f'resource.type="cloud_run_revision" AND resource.labels.service_name="{service_name}"'
+                    filter_str=f'metric.type="run.googleapis.com/request_latencies" AND resource.type="cloud_run_revision" AND resource.labels.service_name="{service_name}"'
                 )
                 if isinstance(mcp_res, dict) and isinstance(mcp_res.get("timeSeries"), list):
                     series_list = list(mcp_res["timeSeries"])
@@ -697,17 +809,23 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
         body = copy.deepcopy(dict(args.get("body") or {}))
         body["is_ai_generated"] = True
 
-        parsed = urlparse(url)
-        hostname = (parsed.hostname or "").lower()
-        if hostname in ("metadata.google.internal", "metadata") or hostname == "169.254.169.254":
-            raise ValueError(f"SSRF violation: probing '{hostname}' is forbidden")
+        _assert_ssrf_safe_url(url, allow_private=(self._transport is not None or os.environ.get("GODVIEW_ENV") == "hermetic"))
+
+        # Sanitize caller headers: strip platform credentials, metadata headers, and cookies
+        safe_headers: dict[str, str] = {}
+        for k, v in dict(args.get("headers") or {}).items():
+            k_lower = k.lower()
+            if k_lower in ("authorization", "metadata-flavor", "cookie") or k_lower.startswith("x-goog-"):
+                continue
+            safe_headers[k] = str(v)
+        headers.update(safe_headers)
 
         if self._probe_sender is not None:
             raw = self._probe_sender(method, url, headers, body)
             return await raw if inspect.isawaitable(raw) else raw
 
         # Do NOT use self._http_client() which injects GCP platform credentials and headers!
-        kwargs: dict[str, Any] = {"timeout": 15.0}
+        kwargs: dict[str, Any] = {"timeout": 15.0, "follow_redirects": False}
         if self._transport is not None:
             kwargs["transport"] = self._transport
         async with httpx.AsyncClient(**kwargs) as client:
@@ -720,7 +838,7 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
 
     def _lookup_live_service_labels_sync(self, service_name: str) -> dict[str, str] | None:
         short = service_name.rsplit("/", 1)[-1]
-        url = f"https://run.googleapis.com/v2/projects/{self.project_id}/locations/{self.region}/services"
+        url = f"https://run.googleapis.com/v2/projects/{self.project_id}/locations/-/services"
         try:
             with self._sync_http_client() as client:
                 resp = client.get(url)
@@ -967,7 +1085,16 @@ class GkeAdapter(_BaseGcpAdapter):
             cluster_name = str(args.get("name", "")).strip()
             if not cluster_name:
                 raise ValueError("k8s.get_cluster requires a non-empty cluster 'name'")
-            location = args.get("location") or args.get("region") or "-"
+            location = args.get("location") or args.get("region")
+            if not location or location == "-":
+                clusters = await self._fetch_clusters()
+                for cl in clusters:
+                    cl_name = str(cl.get("name", "")).rsplit("/", 1)[-1]
+                    if cl_name == cluster_name or cl.get("name") == cluster_name:
+                        location = cl.get("location") or self.region
+                        break
+                if not location or location == "-":
+                    location = self.region
             if self._gke_mcp is not None:
                 return await self._gke_mcp.get_cluster(
                     name=cluster_name,
@@ -1345,9 +1472,13 @@ class CloudMonitoringAdapter(_BaseGcpAdapter):
             aligner = args.get("aligner") or args.get("perSeriesAligner")
             if aligner:
                 params["aggregation.perSeriesAligner"] = aligner
-            elif "latency" in filter_str or "duration" in filter_str:
+            elif "latency" in filter_str or "duration" in filter_str or "distribution" in filter_str:
                 params["aggregation.perSeriesAligner"] = "ALIGN_PERCENTILE_95"
                 params["aggregation.crossSeriesReducer"] = "REDUCE_PERCENTILE_95"
+            elif "count" in filter_str or "rate" in filter_str:
+                params["aggregation.perSeriesAligner"] = "ALIGN_RATE"
+            else:
+                params["aggregation.perSeriesAligner"] = "ALIGN_MEAN"
 
             url = f"https://monitoring.googleapis.com/v3/projects/{self.project_id}/timeSeries"
             results = await self._fetch_paginated(url, "timeSeries", params=params)
@@ -1388,9 +1519,9 @@ class CloudTraceAdapter(_BaseGcpAdapter):
         )
         self._obs_mcp = observability_mcp
 
-    async def _fetch_traces(self) -> list[dict[str, Any]]:
+    async def _fetch_traces(self, max_traces: int = 100) -> list[dict[str, Any]]:
         url = f"https://cloudtrace.googleapis.com/v1/projects/{self.project_id}/traces"
-        return await self._fetch_paginated(url, "traces")
+        return await self._fetch_paginated(url, "traces", max_items=max_traces)
 
     async def discover(self) -> DiscoveryResult:
         try:
@@ -1518,8 +1649,6 @@ class CloudTraceAdapter(_BaseGcpAdapter):
 # ------------------------------------------------------------------------------
 
 DEFAULT_PII_PATTERNS: dict[str, re.Pattern[str]] = {
-    "PAN": re.compile(r"\b[A-Z]{5}[0-9]{4}[A-Z]\b"),
-    "AADHAAR": re.compile(r"\b\d{4}\s\d{4}\s\d{4}\b"),
     "EMAIL": re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b"),
     "CREDIT_CARD": re.compile(r"\b(?:\d{4}[ -]?){3}\d{4}\b"),
     "SSN": re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
@@ -1609,20 +1738,19 @@ class CloudLoggingAuditAdapter(_BaseGcpAdapter):
         page_size: int,
         window_s: int | None = None,
     ) -> list[dict[str, Any]]:
+        actual_window_s = window_s if window_s is not None else 300
+        start_iso = (datetime.now(UTC) - timedelta(seconds=actual_window_s)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        full_filter = f"({filter_str}) AND timestamp >= \"{start_iso}\"" if filter_str else f"timestamp >= \"{start_iso}\""
+
         if self._log_entries_fixture is not None:
             return copy.deepcopy(self._log_entries_fixture[:page_size])
         if self._obs_mcp is not None:
             mcp_res = await self._obs_mcp.list_log_entries(
-                filter_str=filter_str,
+                filter_str=full_filter,
                 page_size=page_size,
                 project_id=self.project_id,
             )
             return list(mcp_res) if isinstance(mcp_res, list) else []
-
-        full_filter = filter_str
-        if window_s:
-            start_iso = (datetime.now(UTC) - timedelta(seconds=window_s)).strftime("%Y-%m-%dT%H:%M:%SZ")
-            full_filter = f"({filter_str}) AND timestamp >= \"{start_iso}\"" if filter_str else f"timestamp >= \"{start_iso}\""
 
         entries: list[dict[str, Any]] = []
         page_token: str | None = None
@@ -1649,6 +1777,7 @@ class CloudLoggingAuditAdapter(_BaseGcpAdapter):
                 page_token = data.get("nextPageToken")
                 if not page_token or not page_entries:
                     break
+
         return entries[:page_size]
 
     async def _execute_capability_impl(
@@ -1678,6 +1807,17 @@ class CloudLoggingAuditAdapter(_BaseGcpAdapter):
             lb_filter = 'resource.type=("http_load_balancer" OR "http_external_regional_lb_rule" OR "internal_http_lb_rule")'
             full_filter = f"{lb_filter} AND ({user_filter})" if user_filter else lb_filter
             entries = await self._query_log_entries(full_filter, page_size, window_s=window_s)
+            for e in entries:
+                jp = e.setdefault("jsonPayload", {})
+                if isinstance(jp, dict):
+                    if "statusDetails" not in jp:
+                        jp["statusDetails"] = e.get("httpRequest", {}).get("statusDetails", "")
+                    sec_pol = jp.get("enforcedSecurityPolicy")
+                    if isinstance(sec_pol, dict):
+                        jp["enforcedSecurityPolicyName"] = sec_pol.get("name", "")
+                        jp["enforcedSecurityPolicyOutcome"] = sec_pol.get("outcome", "")
+                    elif "enforcedSecurityPolicy" not in jp:
+                        jp["enforcedSecurityPolicy"] = None
             return entries
 
         if capability_id == "logging.query":
@@ -1842,9 +1982,23 @@ class PubSubAdapter(_BaseGcpAdapter):
             # Edge from push subscription to destination service
             if push_endpoint:
                 parsed = urlparse(push_endpoint)
-                host = parsed.hostname or push_endpoint
-                target_svc = host.split(".")[0]
-                target_id = f"{self.env_id}__cloud_run.{target_svc}"
+                host = parsed.hostname or ""
+                if host:
+                    if ".run.app" in host:
+                        base_host = host.split(".run.app")[0]
+                        parts = base_host.split("-")
+                        if len(parts) >= 3 and len(parts[-2]) >= 8:
+                            target_svc = "-".join(parts[:-2])
+                        else:
+                            target_svc = base_host
+                        target_id = f"{self.env_id}__cloud_run.{target_svc}"
+                    else:
+                        target_svc = host.split(":")[0]
+                        target_id = f"{self.env_id}__service.{target_svc}"
+                else:
+                    target_svc = push_endpoint
+                    target_id = f"{self.env_id}__service.{target_svc}"
+
                 edges.append(
                     DiscoveredEdgeDoc(
                         doc_id=f"{doc_id}__to__{target_id}",
@@ -1918,6 +2072,7 @@ class PubSubAdapter(_BaseGcpAdapter):
 
             for s in subs:
                 s_name = str(s.get("name", "")).rsplit("/", 1)[-1]
+                counts_by_class: dict[str, int] = {"2xx": 0, "4xx": 0, "5xx": 0}
                 if s.get("pushConfig", {}).get("pushEndpoint"):
                     try:
                         metric_filter = (
@@ -1937,29 +2092,56 @@ class PubSubAdapter(_BaseGcpAdapter):
                                 },
                             )
                             if resp.status_code == 200:
-                                s["push_metrics"] = resp.json().get("timeSeries", [])
-                    except Exception:
-                        pass
+                                raw_series = resp.json().get("timeSeries", [])
+                                s["push_metrics"] = raw_series
+                                for ts in raw_series:
+                                    metric_labels = ts.get("metric", {}).get("labels", {})
+                                    r_class = metric_labels.get("response_class") or ""
+                                    if not r_class:
+                                        code = metric_labels.get("response_code") or ""
+                                        if code.isdigit() and len(code) == 3:
+                                            r_class = f"{code[0]}xx"
+                                        else:
+                                            r_class = "other"
+                                    pts = ts.get("points", [])
+                                    total_pts = sum(int(p.get("value", {}).get("int64Value", 0)) for p in pts)
+                                    counts_by_class[r_class] = counts_by_class.get(r_class, 0) + total_pts
+                    except Exception as p_exc:
+                        s["push_metrics_error"] = str(p_exc)
+                s["push_request_counts_by_response_class"] = counts_by_class
             return subs
 
         if capability_id == "pubsub.dlq_depth":
-            sub_name = str(
+            sub_raw = str(
                 args.get("subscription_name")
                 or args.get("subscription_id")
                 or args.get("subscription")
                 or ""
             ).strip()
             subs = await self._fetch_subscriptions()
-            if not sub_name:
+            if not sub_raw:
                 dlq_candidates = [s for s in subs if s.get("deadLetterPolicy")]
                 if dlq_candidates:
-                    sub_name = str(dlq_candidates[0].get("name", "")).rsplit("/", 1)[-1]
+                    sub_raw = str(dlq_candidates[0].get("name", "")).rsplit("/", 1)[-1]
                 elif subs:
-                    sub_name = str(subs[0].get("name", "")).rsplit("/", 1)[-1]
+                    sub_raw = str(subs[0].get("name", "")).rsplit("/", 1)[-1]
                 else:
-                    sub_name = "unknown-subscription"
+                    sub_raw = "unknown-subscription"
 
-            matching = [s for s in subs if s.get("name", "").endswith(f"/{sub_name}") or s.get("name") == sub_name]
+            short_sub = sub_raw.rsplit("/", 1)[-1]
+            full_sub = f"projects/{self.project_id}/subscriptions/{short_sub}" if not sub_raw.startswith("projects/") else sub_raw
+
+            matching = [s for s in subs if s.get("name", "").endswith(f"/{short_sub}") or s.get("name") == full_sub or s.get("name") == sub_raw]
+            if not matching and sub_raw != "unknown-subscription":
+                return {
+                    "subscription": short_sub,
+                    "found": False,
+                    "dlq_configured": False,
+                    "dlq_topic": None,
+                    "num_undelivered_messages": 0,
+                    "ack_latency_s": 0.0,
+                }
+
             dlq_policy = matching[0].get("deadLetterPolicy") if matching else None
 
             num_undelivered = 0
@@ -1973,7 +2155,7 @@ class PubSubAdapter(_BaseGcpAdapter):
                     resp_undelivered = await client.get(
                         ts_url,
                         params={
-                            "filter": f'metric.type = "pubsub.googleapis.com/subscription/num_undelivered_messages" AND resource.labels.subscription_id = "{sub_name}"',
+                            "filter": f'metric.type = "pubsub.googleapis.com/subscription/num_undelivered_messages" AND (resource.labels.subscription_id = "{short_sub}" OR resource.labels.subscription_id = "{full_sub}")',
                             "interval.startTime": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
                             "interval.endTime": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
                         },
@@ -1987,7 +2169,7 @@ class PubSubAdapter(_BaseGcpAdapter):
                     resp_age = await client.get(
                         ts_url,
                         params={
-                            "filter": f'metric.type = "pubsub.googleapis.com/subscription/oldest_unacked_message_age" AND resource.labels.subscription_id = "{sub_name}"',
+                            "filter": f'metric.type = "pubsub.googleapis.com/subscription/oldest_unacked_message_age" AND (resource.labels.subscription_id = "{short_sub}" OR resource.labels.subscription_id = "{full_sub}")',
                             "interval.startTime": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
                             "interval.endTime": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
                         },
@@ -2000,7 +2182,8 @@ class PubSubAdapter(_BaseGcpAdapter):
                 pass
 
             return {
-                "subscription": sub_name,
+                "subscription": short_sub,
+                "found": bool(matching),
                 "dlq_configured": dlq_policy is not None,
                 "dlq_topic": dlq_policy.get("deadLetterTopic") if dlq_policy else None,
                 "num_undelivered_messages": num_undelivered,
@@ -2267,11 +2450,18 @@ class AgentEngineAdapter(_BaseGcpAdapter):
     name = "gcp-agent-engine"
 
     async def _fetch_engines(self) -> list[dict[str, Any]]:
-        url = (
-            f"https://{self.region}-aiplatform.googleapis.com/v1beta1/"
-            f"projects/{self.project_id}/locations/{self.region}/reasoningEngines"
-        )
-        return await self._fetch_paginated(url, "reasoningEngines")
+        results: list[dict[str, Any]] = []
+        for reg in self.regions:
+            url = (
+                f"https://{reg}-aiplatform.googleapis.com/v1beta1/"
+                f"projects/{self.project_id}/locations/{reg}/reasoningEngines"
+            )
+            try:
+                engines = await self._fetch_paginated(url, "reasoningEngines")
+                results.extend(engines)
+            except Exception:
+                pass
+        return results
 
     def _fetch_engines_sync(self) -> list[dict[str, Any]]:
         url = (
@@ -2473,21 +2663,21 @@ class AgentRegistryAdapter(_BaseGcpAdapter):
     name = "gcp-agent-registry"
 
     async def _probe_registry(self) -> tuple[bool, dict[str, Any]]:
-        url = (
-            f"https://agentregistry.googleapis.com/v1/projects/{self.project_id}/"
-            f"locations/{self.region}/agents"
-        )
-        try:
-            async with self._http_client() as client:
-                resp = await client.get(url)
-                if resp.status_code != 200:
-                    return False, {}
-                data = resp.json()
-                if "error" in data:
-                    return False, {}
-                return True, data
-        except httpx.HTTPError:
-            return False, {}
+        for reg in self.regions:
+            url = (
+                f"https://agentregistry.googleapis.com/v1/projects/{self.project_id}/"
+                f"locations/{reg}/agents"
+            )
+            try:
+                async with self._http_client() as client:
+                    resp = await client.get(url)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        if "error" not in data:
+                            return True, data
+            except httpx.HTTPError:
+                pass
+        return False, {}
 
     async def discover(self) -> DiscoveryResult:
         avail, reg = await self._probe_registry()
@@ -2578,11 +2768,18 @@ class ModelArmorAdapter(_BaseGcpAdapter):
     name = "gcp-model-armor"
 
     async def _fetch_templates(self) -> list[dict[str, Any]]:
-        url = (
-            f"https://modelarmor.{self.region}.rep.googleapis.com/v1/"
-            f"projects/{self.project_id}/locations/{self.region}/templates"
-        )
-        return await self._fetch_paginated(url, "templates")
+        results: list[dict[str, Any]] = []
+        for reg in self.regions:
+            url = (
+                f"https://modelarmor.{reg}.rep.googleapis.com/v1/"
+                f"projects/{self.project_id}/locations/{reg}/templates"
+            )
+            try:
+                tmpls = await self._fetch_paginated(url, "templates")
+                results.extend(tmpls)
+            except Exception:
+                pass
+        return results
 
     async def discover(self) -> DiscoveryResult:
         try:
@@ -2831,29 +3028,10 @@ class HttpProbeAdapter(SenseAdapter):
             if not url:
                 raise ValueError("http.probe requires a non-empty target url")
 
-            parsed = urlparse(url)
-            if parsed.scheme not in ("http", "https"):
-                raise ValueError(f"http.probe requires http or https scheme (got '{parsed.scheme}')")
-
-            hostname = (parsed.hostname or "").lower()
-            if not hostname:
-                raise ValueError("http.probe invalid target hostname")
-
-            # SSRF guard: block cloud metadata and loopback
-            if hostname in ("metadata.google.internal", "metadata", "localhost"):
-                raise ValueError(f"SSRF violation: probing '{hostname}' is forbidden")
-
-            try:
-                ip_obj = ipaddress.ip_address(hostname)
-                if ip_obj.is_loopback or ip_obj.is_link_local:
-                    raise ValueError(f"SSRF violation: probing loopback/link-local '{hostname}' is forbidden")
-                if str(ip_obj) == "169.254.169.254":
-                    raise ValueError("SSRF violation: probing metadata IP is forbidden")
-                if ip_obj.is_private and self._transport is None and os.environ.get("GODVIEW_ENV") != "hermetic":
-                    raise ValueError(f"SSRF violation: probing private IP '{hostname}' is forbidden")
-            except ValueError as ve:
-                if "SSRF violation" in str(ve):
-                    raise
+            _assert_ssrf_safe_url(
+                url,
+                allow_private=(self._transport is not None or os.environ.get("GODVIEW_ENV") == "hermetic"),
+            )
 
             # Filter headers: strip sensitive / auth / metadata headers
             raw_headers = dict(args.get("headers") or {})
@@ -2864,31 +3042,58 @@ class HttpProbeAdapter(SenseAdapter):
             }
 
             timeout_s = min(max(float(args.get("timeout_s", 5.0)), 0.5), 15.0)
-            kwargs: dict[str, Any] = {"headers": safe_headers, "timeout": timeout_s}
+            kwargs: dict[str, Any] = {
+                "headers": safe_headers,
+                "timeout": timeout_s,
+                "follow_redirects": False,
+            }
             if self._transport is not None:
                 kwargs["transport"] = self._transport
 
             start_t = time.monotonic()
             try:
                 async with httpx.AsyncClient(**kwargs) as client:
-                    resp = await client.request(method, url)
-                    latency_ms = round((time.monotonic() - start_t) * 1000.0, 2)
-                    parsed_json = None
-                    try:
-                        if "json" in resp.headers.get("content-type", "").lower() or resp.text.strip().startswith(("{", "[")):
-                            parsed_json = resp.json()
-                    except Exception:
-                        parsed_json = None
+                    async with client.stream(method, url) as resp:
+                        chunks: list[bytes] = []
+                        total_bytes = 0
+                        exceeded_cap = False
+                        async for chunk in resp.aiter_bytes():
+                            chunks.append(chunk)
+                            total_bytes += len(chunk)
+                            if total_bytes > 65536:
+                                exceeded_cap = True
+                                break
+                        raw_bytes = b"".join(chunks)[:65536]
+                        body_text = raw_bytes.decode("utf-8", errors="replace")
 
-                    return {
-                        "ok": resp.status_code < 400,
-                        "status_code": resp.status_code,
-                        "latency_ms": latency_ms,
-                        "headers": dict(resp.headers),
-                        "json": parsed_json,
-                        "body": resp.text[:2000],
-                        "error": None,
-                    }
+                        resp_headers = dict(resp.headers)
+                        content_type = resp_headers.get("content-type", "").lower()
+                        is_json_type = "json" in content_type
+
+                        parsed_json = None
+                        json_error = None
+                        if exceeded_cap and is_json_type:
+                            parsed_json = None
+                            json_error = "Payload exceeds 64KB cap; parsed JSON omitted"
+                        elif is_json_type or body_text.strip().startswith(("{", "[")):
+                            try:
+                                parsed_json = json.loads(body_text)
+                            except Exception as j_exc:
+                                parsed_json = None
+                                if is_json_type:
+                                    json_error = str(j_exc)
+
+                        latency_ms = round((time.monotonic() - start_t) * 1000.0, 2)
+                        return {
+                            "ok": resp.status_code < 400,
+                            "status_code": resp.status_code,
+                            "latency_ms": latency_ms,
+                            "headers": resp_headers,
+                            "json": parsed_json,
+                            "json_error": json_error,
+                            "body": body_text[:2000],
+                            "error": None,
+                        }
             except Exception as exc:
                 latency_ms = round((time.monotonic() - start_t) * 1000.0, 2)
                 return {
@@ -2897,6 +3102,7 @@ class HttpProbeAdapter(SenseAdapter):
                     "latency_ms": latency_ms,
                     "headers": {},
                     "json": None,
+                    "json_error": None,
                     "body": "",
                     "error": str(exc),
                 }

@@ -53,15 +53,16 @@ def _format_perception_response(report: PerceptionReport, docs: Any, ctx: Any = 
     res.update(
         {
             "sovereign_id": f"sovereign-{report.env_id}",
+            "sovereign_status": "operational",
             "heartbeat_at": report.perceived_at,
+            "sentinel_cadence_s": getattr(getattr(ctx, "settings", None), "sentinel_cadence_s", 10),
             "senses": [h.model_dump(mode="json") for h in report.adapter_health],
             "discovered_services": services_list,
             "discovered_edges": edges_list,
             "discovered_entities": raw_entities,
+            "operator_state": getattr(ctx, "operator_state", {"tenant_paused": False, "kill_switch_enabled": False, "hibernate_enabled": False}),
         }
     )
-    if ctx is not None and hasattr(ctx, "operator_state"):
-        res["operator_state"] = ctx.operator_state
     return res
 
 

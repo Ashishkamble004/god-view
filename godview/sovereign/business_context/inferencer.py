@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -192,6 +193,13 @@ class BusinessContextInferencer:
                     response_schema=BusinessContext,
                 )
                 model_name = getattr(self.llm, "model_name", getattr(self.llm, "model", "llm-reasoner"))
+                if hasattr(res, "parsed") and res.parsed is not None:
+                    res = res.parsed
+                elif hasattr(res, "text") and res.text:
+                    try:
+                        res = json.loads(res.text)
+                    except Exception:
+                        pass
                 if isinstance(res, BusinessContext):
                     res.inferred_by = model_name
                     res.inferred_at = now_iso
@@ -271,6 +279,19 @@ class BusinessContextInferencer:
                 role="reasoning",
                 contents=prompt,
             )
+            if hasattr(res, "parsed") and res.parsed is not None:
+                res = res.parsed
+            elif hasattr(res, "text") and res.text:
+                raw_text = res.text.strip()
+                if raw_text.startswith("```"):
+                    raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text)
+                    raw_text = re.sub(r"\s*```$", "", raw_text)
+                try:
+                    res = json.loads(raw_text)
+                except Exception as parse_err:
+                    logger.warning("Failed to parse journey JSON: %s (raw=%s)", parse_err, raw_text[:200])
+            if isinstance(res, dict) and "journeys" in res:
+                res = res["journeys"]
             if isinstance(res, list):
                 journeys: list[JourneyDoc] = []
                 for item in res:
