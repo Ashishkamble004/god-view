@@ -27,7 +27,7 @@ def test_topology_builder_schema_and_tiers() -> None:
             name="fe-ingress",
             kind="lb_frontend",
             adapter_family="gcp",
-            locator="https://34.120.1.1",
+            locator="https://203.0.113.1",
             labels={"tier": "edge"},
             first_seen=now,
             last_seen=now,

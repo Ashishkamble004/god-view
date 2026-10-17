@@ -128,7 +128,6 @@ def _resolve_bearer_token(explicit_token: str | None) -> str:
     for env_var in (
         "GODVIEW_K8S_BEARER_TOKEN",
         "KUBERNETES_BEARER_TOKEN",
-        "GOOGLE_OAUTH_ACCESS_TOKEN",
         "K8S_BEARER_TOKEN",
     ):
         val = os.environ.get(env_var, "").strip()
@@ -222,7 +221,7 @@ class KubernetesSenseAdapter(SenseAdapter):
         *,
         api_url: str | None = None,
         bearer_token: str | None = None,
-        env_id: str = "local-compose",
+        env_id: str = "k8s-cluster",
         cluster_mode: Literal["gke", "kind", "auto"] = "auto",
         gke_mcp_client: McpToolClientProtocol | None = None,
         verify_tls: bool | str = True,

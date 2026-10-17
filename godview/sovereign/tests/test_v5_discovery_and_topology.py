@@ -15,6 +15,7 @@ Covers plan §1.4, §3.2 requirements:
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
@@ -28,6 +29,7 @@ from godview_shared.adapter_contract import (
 from godview_shared.capabilities import CapabilitySpec, get_capability
 from godview_shared.config import GodViewSettings
 from godview_shared.contracts import (
+    BusinessContext,
     DiscoveredEdgeDoc,
     DiscoveredServiceDoc,
     JourneyDoc,
@@ -42,9 +44,69 @@ from godview.sovereign.business_context.inferencer import (
     compute_evidence_hash,
 )
 from godview.sovereign.control_api.routers.topology import build_router
-from godview.sovereign.perception import PerceptionOrgan
+from godview.sovereign.perception import PerceptionOrgan, resolve_env_id
 from godview.sovereign.topology.builder import TopologyBuilder
 from shared.tools.lint_neutrality import BANNED_TERMS
+
+
+class _FakeLlm:
+    def __init__(self, model_name: str = "gemini-1.5-pro", fail: bool = False) -> None:
+        self.model_name = model_name
+        self.fail = fail
+        self.calls = 0
+
+    async def generate(self, role: str, contents: str, response_schema: Any = None) -> Any:
+        self.calls += 1
+        if self.fail:
+            raise RuntimeError("429 ResourceExhausted: rate limit exceeded")
+        if response_schema == BusinessContext:
+            return BusinessContext(
+                role_summary="Order processor and validator",
+                domain="orders",
+                capabilities=["listRecords", "createRecord"],
+                upstream=[],
+                downstream=[],
+                journeys=[],
+                kpis=[],
+                invariants=[],
+                confidence=0.88,
+                inferred_by=self.model_name,
+            )
+        if "journeys" in contents.lower():
+            return [
+                {
+                    "name": "Order Placement Flow",
+                    "steps": [
+                        {"node": "gateway", "operation": "submitOrder"},
+                        {"node": "svc-order", "operation": "createOrder"},
+                        {"node": "svc-billing", "operation": "chargeCustomer"},
+                    ],
+                }
+            ]
+        return {}
+
+
+class _FailingSenseAdapter(SenseAdapter):
+    name = "failing-adapter"
+    family = "gcp"
+
+    async def discover(self) -> DiscoveryResult:
+        raise PermissionError("403 Forbidden: Caller lacks compute.instances.list permission")
+
+    def senses(self) -> list[SenseCategory]:
+        return [SenseCategory.INFRASTRUCTURE]
+
+    def capabilities(self) -> dict[str, CapabilitySpec]:
+        return {}
+
+    async def health(self) -> AdapterHealth:
+        return AdapterHealth(
+            adapter_name=self.name,
+            family=self.family,
+            state="unavailable",
+            evidence={"error": "403 Forbidden"},
+            checked_at=datetime.now(tz=UTC),
+        )
 
 
 class _DummySenseAdapter(SenseAdapter):
@@ -90,7 +152,7 @@ def test_topology_builder_schema_and_tiers() -> None:
             name="fe-ingress",
             kind="lb_frontend",
             adapter_family="gcp",
-            locator="https://34.120.1.1",
+            locator="https://203.0.113.1",
             labels={"tier": "edge"},
             first_seen=now,
             last_seen=now,
@@ -246,7 +308,8 @@ def test_evidence_bundle_strips_secret_values() -> None:
 @pytest.mark.unit
 async def test_evidence_hash_caching() -> None:
     """Verify inference caches results by evidence hash (<= 1 call per node per evidence change)."""
-    inferencer = BusinessContextInferencer()
+    fake_llm = _FakeLlm()
+    inferencer = BusinessContextInferencer(llm=fake_llm)
     now = datetime.now(tz=UTC).isoformat()
     svc = DiscoveredServiceDoc(
         env_id="test-env",
@@ -269,6 +332,7 @@ async def test_evidence_hash_caching() -> None:
     # Second call with identical evidence -> returned from cache
     ctx2 = await inferencer.infer_service_context(svc, edges)
     assert ctx1 == ctx2
+    assert fake_llm.calls == 1
 
     # Modified evidence -> cache key changes
     svc_modified = svc.model_copy(
@@ -285,9 +349,10 @@ async def test_evidence_hash_caching() -> None:
 
 
 @pytest.mark.unit
-def test_journey_inference_from_trace_dags() -> None:
+async def test_journey_inference_from_trace_dags() -> None:
     """Verify multi-service journeys are inferred from topology call graphs."""
-    inferencer = BusinessContextInferencer()
+    fake_llm = _FakeLlm()
+    inferencer = BusinessContextInferencer(llm=fake_llm)
     now = datetime.now(tz=UTC).isoformat()
     services = [
         DiscoveredServiceDoc(
@@ -328,6 +393,7 @@ def test_journey_inference_from_trace_dags() -> None:
             dst="test-env__cloud_run.svc-order",
             protocol="http",
             evidence="trace",
+            evidence_kind="trace",
             first_seen=now,
             last_seen=now,
         ),
@@ -336,12 +402,13 @@ def test_journey_inference_from_trace_dags() -> None:
             dst="test-env__cloud_run.svc-billing",
             protocol="http",
             evidence="trace",
+            evidence_kind="trace",
             first_seen=now,
             last_seen=now,
         ),
     ]
 
-    journeys = inferencer.infer_journeys_from_topology(services, edges)
+    journeys = await inferencer.infer_journeys_from_topology(services, edges)
     assert len(journeys) >= 1
     j = journeys[0]
     assert j.intended_order_source == "trace_dag"
@@ -448,8 +515,54 @@ def test_topology_router_endpoints() -> None:
     data_bc = r_bc.json()
     assert data_bc["service_name"] == "svc-processor"
     assert data_bc["kind"] == "cloud_run"
-    assert data_bc["confidence"] > 0.0
+    assert "business_context" in data_bc
 
     # 4. Unknown node returns 404
     r_404 = client.get("/api/v1/business-context/unknown-node-xyz")
     assert r_404.status_code == 404
+
+
+@pytest.mark.unit
+async def test_adapter_partial_failure_isolation() -> None:
+    """Verify failing adapter does not crash perception and marks adapter unavailable with evidence."""
+    fs = InMemoryFirestore()
+    ps = InMemoryPubSub()
+    now = datetime.now(tz=UTC).isoformat()
+    ok_svc = DiscoveredServiceDoc(
+        env_id="test-env",
+        name="ok-svc",
+        kind="cloud_run",
+        adapter_family="gcp",
+        locator="https://ok-svc.run.app",
+        first_seen=now,
+        last_seen=now,
+    )
+    ok_adapter = _DummySenseAdapter(services=[ok_svc])
+    failing_adapter = _FailingSenseAdapter()
+
+    organ = PerceptionOrgan(firestore=fs, pubsub=ps, adapters=[ok_adapter, failing_adapter])
+    report = await organ.perceive(reset=True)
+
+    # Perception must not crash and healthy adapter services must still be discovered
+    assert report.services_count == 1
+    health_by_name = {h.adapter_name: h.state for h in report.adapter_health}
+    assert health_by_name["dummy-adapter"] == "available"
+    assert health_by_name["failing-adapter"] == "unavailable"
+
+
+@pytest.mark.unit
+def test_resolve_env_id_canonical() -> None:
+    """Verify canonical env_id resolution per plan §3.2."""
+    # Hermetic
+    s_hermetic = GodViewSettings.from_env({"GODVIEW_ENV": "hermetic"})
+    assert resolve_env_id(s_hermetic) == "hermetic"
+
+    # GCP mode with project
+    gcp_env = {
+        "GODVIEW_ENV": "gcp",
+        "GOOGLE_CLOUD_PROJECT": "my-sample-proj",
+        "GODVIEW_COURT_DAILY_CEILING_USD": "100.0",
+        **{f"GODVIEW_BUDGET_{k.upper()}_USD": "10.0" for k in ("application", "business_line", "change", "data", "platform", "sovereign")},
+    }
+    s_gcp = GodViewSettings.from_env(gcp_env)
+    assert resolve_env_id(s_gcp) == "gcp-my-sample-proj"

@@ -255,7 +255,7 @@
           {
             "network": "https://www.googleapis.com/compute/v1/projects/proj-alpha-771/global/networks/god-view-vpc",
             "subnetwork": "https://www.googleapis.com/compute/v1/projects/proj-alpha-771/regions/us-central1/subnetworks/god-view-subnet",
-            "networkIP": "10.10.0.15"
+            "networkIP": "10.200.0.15"
           }
         ],
         "serviceAccounts": [
@@ -783,7 +783,7 @@
     "items": [
       {
         "name": "lb-frontend-main",
-        "IPAddress": "34.120.55.10",
+        "IPAddress": "203.0.113.10",
         "IPProtocol": "TCP",
         "portRange": "443-443",
         "target": "projects/test-project-123/global/targetHttpsProxies/proxy-main",
@@ -974,5 +974,61 @@
         }
       }
     ]
-  }
+  },
+  "pubsub_num_undelivered": 42,
+  "pubsub_ack_age_s": 15,
+  "lb_log_entries": [
+    {
+      "httpRequest": {
+        "status": 200,
+        "latency": "0.045s",
+        "requestMethod": "GET",
+        "requestUrl": "https://api.example.com/v1/items",
+        "responseSize": "1024"
+      },
+      "resource": {
+        "type": "http_load_balancer",
+        "labels": {
+          "url_map_name": "edge-url-map",
+          "backend_service_name": "bs-core"
+        }
+      },
+      "jsonPayload": {
+        "statusDetails": "response_from_backend",
+        "enforcedSecurityPolicy": {
+          "name": "edge-security-policy",
+          "priority": 1000,
+          "outcome": "ACCEPT",
+          "preconfiguredExprIds": ["owasp-crs-v030301-id942100-sqli"]
+        }
+      },
+      "timestamp": "2026-10-17T17:00:00Z"
+    },
+    {
+      "httpRequest": {
+        "status": 403,
+        "latency": "0.002s",
+        "requestMethod": "POST",
+        "requestUrl": "https://api.example.com/v1/items",
+        "responseSize": "256"
+      },
+      "resource": {
+        "type": "http_load_balancer",
+        "labels": {
+          "url_map_name": "edge-url-map",
+          "backend_service_name": "bs-core"
+        }
+      },
+      "jsonPayload": {
+        "statusDetails": "denied_by_security_policy",
+        "enforcedSecurityPolicy": {
+          "name": "edge-security-policy",
+          "priority": 1000,
+          "outcome": "DENY",
+          "preconfiguredExprIds": ["owasp-crs-v030301-id942100-sqli"]
+        }
+      },
+      "timestamp": "2026-10-17T17:00:01Z"
+    }
+  ]
 }

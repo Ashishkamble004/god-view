@@ -187,8 +187,12 @@ class ApiGatewayAdapter(SenseAdapter):
             gw_full_name = str(gw.get("name", ""))
             gw_short_name = gw_full_name.rsplit("/", 1)[-1]
             labels = dict(gw.get("labels") or {})
-            if is_resource_excluded(gw_short_name, labels):
-                continue
+            is_observer = (
+                labels.get("godview_role") == "observer"
+                or is_resource_excluded(gw_short_name, labels)
+            )
+            if is_observer:
+                labels["godview_role"] = "observer"
 
             default_hostname = str(gw.get("defaultHostname", ""))
             if default_hostname:
@@ -221,11 +225,12 @@ class ApiGatewayAdapter(SenseAdapter):
                             if spec_dict:
                                 self._cached_openapi_by_gateway[gw_short_name] = spec_dict
                                 paths = spec_dict.get("paths", {})
+                                root_backend = spec_dict.get("x-google-backend", {})
                                 for path_str, path_item in paths.items():
                                     if not isinstance(path_item, dict):
                                         continue
-                                    # Path-level or operation-level backend
-                                    path_backend = path_item.get("x-google-backend", {})
+                                    # Path-level or operation-level backend (inherits root)
+                                    path_backend = path_item.get("x-google-backend", root_backend)
                                     for method, op in path_item.items():
                                         method_lower = method.lower()
                                         if method_lower not in _HTTP_METHODS or not isinstance(op, dict):
@@ -314,15 +319,13 @@ class ApiGatewayAdapter(SenseAdapter):
     ) -> Any:
         if capability_id == "apigateway.get_openapi":
             gw_name = args.get("gateway")
-            if gw_name and gw_name in self._cached_openapi_by_gateway:
-                return self._cached_openapi_by_gateway[gw_name]
+            if not self._cached_openapi_by_gateway:
+                await self.discover()
+            if gw_name:
+                if gw_name in self._cached_openapi_by_gateway:
+                    return self._cached_openapi_by_gateway[gw_name]
+                return {}
             if self._cached_openapi_by_gateway:
                 return next(iter(self._cached_openapi_by_gateway.values()))
-            # If not yet discovered or cached, attempt discovery
-            await self.discover()
-            if gw_name and gw_name in self._cached_openapi_by_gateway:
-                return self._cached_openapi_by_gateway[gw_name]
-            if self._cached_openapi_by_gateway:
-                return next(iter(self._cached_openapi_by_gateway.values()))
-            return {"openapi": "3.0.0", "info": {"title": "API Gateway"}, "paths": {}}
+            return {}
         raise NotImplementedError(capability_id)

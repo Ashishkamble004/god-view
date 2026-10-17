@@ -26,11 +26,13 @@ from __future__ import annotations
 
 import copy
 import inspect
+import ipaddress
+import os
 import re
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from urllib.parse import urlparse
@@ -231,8 +233,10 @@ class _BaseGcpAdapter(SenseAdapter):
                 if isinstance(raw_items, dict):
                     # aggregatedList format: zone/region -> subdict
                     for sub in raw_items.values():
-                        if isinstance(sub, dict) and "instances" in sub:
-                            results.extend(sub.get("instances", []))
+                        if isinstance(sub, dict):
+                            for v in sub.values():
+                                if isinstance(v, list):
+                                    results.extend(v)
                         elif isinstance(sub, list):
                             results.extend(sub)
                 elif isinstance(raw_items, list):
@@ -435,9 +439,12 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
             full_name = str(svc.get("name", ""))
             short_name = full_name.rsplit("/", 1)[-1]
             labels = dict(svc.get("labels") or {})
-
-            if is_resource_excluded(short_name, labels):
-                continue
+            is_observer = (
+                labels.get("godview_role") == "observer"
+                or is_resource_excluded(short_name, labels)
+            )
+            if is_observer:
+                labels["godview_role"] = "observer"
 
             uri = str(svc.get("uri", full_name))
             doc_id = f"{self.env_id}__cloud_run.{short_name}"
@@ -690,11 +697,20 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
         body = copy.deepcopy(dict(args.get("body") or {}))
         body["is_ai_generated"] = True
 
+        parsed = urlparse(url)
+        hostname = (parsed.hostname or "").lower()
+        if hostname in ("metadata.google.internal", "metadata") or hostname == "169.254.169.254":
+            raise ValueError(f"SSRF violation: probing '{hostname}' is forbidden")
+
         if self._probe_sender is not None:
             raw = self._probe_sender(method, url, headers, body)
             return await raw if inspect.isawaitable(raw) else raw
 
-        async with self._http_client() as client:
+        # Do NOT use self._http_client() which injects GCP platform credentials and headers!
+        kwargs: dict[str, Any] = {"timeout": 15.0}
+        if self._transport is not None:
+            kwargs["transport"] = self._transport
+        async with httpx.AsyncClient(**kwargs) as client:
             resp = await client.request(method, url, headers=headers, json=body)
             resp.raise_for_status()
             data = resp.json()
@@ -869,8 +885,12 @@ class GkeAdapter(_BaseGcpAdapter):
         for cl in clusters:
             cl_name = str(cl.get("name", ""))
             labels = dict(cl.get("resourceLabels") or {})
-            if is_resource_excluded(cl_name, labels):
-                continue
+            is_observer = (
+                labels.get("godview_role") == "observer"
+                or is_resource_excluded(cl_name, labels)
+            )
+            if is_observer:
+                labels["godview_role"] = "observer"
             services.append(
                 DiscoveredServiceDoc(
                     doc_id=f"{self.env_id}__gke_workload.{cl_name}",
@@ -947,15 +967,16 @@ class GkeAdapter(_BaseGcpAdapter):
             cluster_name = str(args.get("name", "")).strip()
             if not cluster_name:
                 raise ValueError("k8s.get_cluster requires a non-empty cluster 'name'")
+            location = args.get("location") or args.get("region") or "-"
             if self._gke_mcp is not None:
                 return await self._gke_mcp.get_cluster(
                     name=cluster_name,
                     project_id=args.get("project_id", self.project_id),
-                    location=args.get("location", self.region),
+                    location=location,
                 )
             url = (
                 f"https://container.googleapis.com/v1/projects/{self.project_id}/"
-                f"locations/{self.region}/clusters/{cluster_name}"
+                f"locations/{location}/clusters/{cluster_name}"
             )
             async with self._http_client() as client:
                 resp = await client.get(url)
@@ -1033,11 +1054,14 @@ class ComputeEngineAdapter(_BaseGcpAdapter):
         for vm in items:
             vm_name = str(vm.get("name", ""))
             labels = dict(vm.get("labels") or {})
-            if is_resource_excluded(vm_name, labels):
-                continue
+            is_observer = (
+                labels.get("godview_role") == "observer"
+                or is_resource_excluded(vm_name, labels)
+            )
+            if is_observer:
+                labels["godview_role"] = "observer"
             net_ifs = vm.get("networkInterfaces") or [{}]
             priv_ip = str(net_ifs[0].get("networkIP", vm_name))
-            # Plan §3.2: remove fixed legacy port locator, kind is gce_instance
             services.append(
                 DiscoveredServiceDoc(
                     doc_id=f"{self.env_id}__gce_instance.{vm_name}",
@@ -1139,10 +1163,28 @@ class CloudSqlAdminAdapter(_BaseGcpAdapter):
             sql_name = str(sql_inst.get("name", ""))
             settings = sql_inst.get("settings", {})
             labels = dict(settings.get("userLabels") or {})
-            if is_resource_excluded(sql_name, labels):
-                continue
-            ips = sql_inst.get("ipAddresses") or [{}]
-            priv_ip = str(ips[0].get("ipAddress", sql_name))
+            is_observer = (
+                labels.get("godview_role") == "observer"
+                or is_resource_excluded(sql_name, labels)
+            )
+            if is_observer:
+                labels["godview_role"] = "observer"
+
+            db_ver = str(sql_inst.get("databaseVersion", "")).upper()
+            if "MYSQL" in db_ver:
+                scheme = "mysql"
+                port = 3306
+            elif "SQLSERVER" in db_ver:
+                scheme = "mssql"
+                port = 1433
+            else:
+                scheme = "postgresql"
+                port = 5432
+
+            ip_addresses = sql_inst.get("ipAddresses") or []
+            priv_ip = next((ip.get("ipAddress") for ip in ip_addresses if ip.get("type") == "PRIVATE"), None)
+            if not priv_ip and ip_addresses:
+                priv_ip = ip_addresses[0].get("ipAddress")
 
             # Fetch databases and users (names only, no secrets) per plan §3.2
             db_names = await self._fetch_databases(sql_name)
@@ -1157,7 +1199,7 @@ class CloudSqlAdminAdapter(_BaseGcpAdapter):
                     name=sql_name,
                     kind="cloud_sql",
                     adapter_family="gcp",
-                    locator=f"postgres://{priv_ip}:5432",
+                    locator=f"{scheme}://{priv_ip or sql_name}:{port}",
                     labels=labels,
                     classification="other_read_only",
                     first_seen=now_iso,
@@ -1281,39 +1323,38 @@ class CloudMonitoringAdapter(_BaseGcpAdapter):
         args: dict[str, Any],
         trust_decision: TrustDecision | None = None,
     ) -> Any:
-        if capability_id == "obs.list_timeseries":
-            filter_str = str(args.get("filter", ""))
-            if self._obs_mcp is not None:
-                return await self._obs_mcp.list_timeseries(
-                    filter_str=filter_str,
-                    interval_seconds=int(args.get("interval_seconds", 300)),
-                    project_id=self.project_id,
-                )
-            url = f"https://monitoring.googleapis.com/v3/projects/{self.project_id}/timeSeries"
-            async with self._http_client() as client:
-                resp = await client.get(url, params={"filter": filter_str})
-                if resp.status_code == 404:
-                    return {"timeSeries": []}
-                resp.raise_for_status()
-                return resp.json()
+        if capability_id in ("obs.list_timeseries", "monitoring.query_timeseries"):
+            filter_str = str(args.get("filter", "")).strip()
+            window_s = int(args.get("window_s", args.get("interval_seconds", 300)))
+            if not filter_str:
+                raise ValueError("monitoring query requires a non-empty filter")
+            if "metric.type" not in filter_str:
+                raise ValueError("Cloud Monitoring filter MUST specify metric.type (e.g. 'metric.type = \"...\"')")
 
-        if capability_id == "monitoring.query_timeseries":
-            filter_str = str(args.get("filter", ""))
-            window_s = int(args.get("window_s", 300))
-            if self._obs_mcp is not None:
-                res = await self._obs_mcp.list_timeseries(
-                    filter_str=filter_str,
-                    interval_seconds=window_s,
-                    project_id=self.project_id,
-                )
-                return res if isinstance(res, list) else list(res.get("timeSeries", []))
+            now = datetime.now(UTC)
+            start = now - timedelta(seconds=max(60, window_s))
+            end_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+            start_iso = start.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            params: dict[str, Any] = {
+                "filter": filter_str,
+                "interval.startTime": start_iso,
+                "interval.endTime": end_iso,
+                "aggregation.alignmentPeriod": f"{max(60, window_s)}s",
+            }
+            aligner = args.get("aligner") or args.get("perSeriesAligner")
+            if aligner:
+                params["aggregation.perSeriesAligner"] = aligner
+            elif "latency" in filter_str or "duration" in filter_str:
+                params["aggregation.perSeriesAligner"] = "ALIGN_PERCENTILE_95"
+                params["aggregation.crossSeriesReducer"] = "REDUCE_PERCENTILE_95"
+
             url = f"https://monitoring.googleapis.com/v3/projects/{self.project_id}/timeSeries"
-            async with self._http_client() as client:
-                resp = await client.get(url, params={"filter": filter_str})
-                if resp.status_code == 404:
-                    return []
-                resp.raise_for_status()
-                return list(resp.json().get("timeSeries", []))
+            results = await self._fetch_paginated(url, "timeSeries", params=params)
+
+            if capability_id == "obs.list_timeseries":
+                return {"timeSeries": results}
+            return results
 
         raise NotImplementedError(capability_id)
 
@@ -1477,12 +1518,13 @@ class CloudTraceAdapter(_BaseGcpAdapter):
 # ------------------------------------------------------------------------------
 
 DEFAULT_PII_PATTERNS: dict[str, re.Pattern[str]] = {
-    "PAN": re.compile(r"\b([A-Z]{5}[0-9]{4}[A-Z])\b"),
-    "AADHAAR": re.compile(r"\b([2-9][0-9]{3}\s?[0-9]{4}\s?[0-9]{4})\b"),
+    "PAN": re.compile(r"\b[A-Z]{5}[0-9]{4}[A-Z]\b"),
+    "AADHAAR": re.compile(r"\b\d{4}\s\d{4}\s\d{4}\b"),
     "EMAIL": re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b"),
     "CREDIT_CARD": re.compile(r"\b(?:\d{4}[ -]?){3}\d{4}\b"),
     "SSN": re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
     "PHONE": re.compile(r"\b(?:\+1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b"),
+    "API_KEY": re.compile(r"\b(?:AIza[0-9A-Za-z-_]{35}|ya29\.[0-9A-Za-z-_]+)\b"),
 }
 
 
@@ -1561,7 +1603,12 @@ class CloudLoggingAuditAdapter(_BaseGcpAdapter):
             checked_at=datetime.now(tz=UTC),
         )
 
-    async def _query_log_entries(self, filter_str: str, page_size: int) -> list[dict[str, Any]]:
+    async def _query_log_entries(
+        self,
+        filter_str: str,
+        page_size: int,
+        window_s: int | None = None,
+    ) -> list[dict[str, Any]]:
         if self._log_entries_fixture is not None:
             return copy.deepcopy(self._log_entries_fixture[:page_size])
         if self._obs_mcp is not None:
@@ -1571,19 +1618,38 @@ class CloudLoggingAuditAdapter(_BaseGcpAdapter):
                 project_id=self.project_id,
             )
             return list(mcp_res) if isinstance(mcp_res, list) else []
+
+        full_filter = filter_str
+        if window_s:
+            start_iso = (datetime.now(UTC) - timedelta(seconds=window_s)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            full_filter = f"({filter_str}) AND timestamp >= \"{start_iso}\"" if filter_str else f"timestamp >= \"{start_iso}\""
+
+        entries: list[dict[str, Any]] = []
+        page_token: str | None = None
         async with self._http_client() as client:
-            resp = await client.post(
-                "https://logging.googleapis.com/v2/entries:list",
-                json={
+            while len(entries) < page_size:
+                body: dict[str, Any] = {
                     "resourceNames": [f"projects/{self.project_id}"],
-                    "filter": filter_str,
-                    "pageSize": page_size,
-                },
-            )
-            if resp.status_code == 404:
-                return []
-            resp.raise_for_status()
-            return list(resp.json().get("entries", []))
+                    "filter": full_filter,
+                    "pageSize": min(page_size - len(entries), 100),
+                    "orderBy": "timestamp desc",
+                }
+                if page_token:
+                    body["pageToken"] = page_token
+                resp = await client.post(
+                    "https://logging.googleapis.com/v2/entries:list",
+                    json=body,
+                )
+                if resp.status_code == 404:
+                    return entries
+                resp.raise_for_status()
+                data = resp.json()
+                page_entries = data.get("entries", [])
+                entries.extend(page_entries)
+                page_token = data.get("nextPageToken")
+                if not page_token or not page_entries:
+                    break
+        return entries[:page_size]
 
     async def _execute_capability_impl(
         self,
@@ -1608,15 +1674,17 @@ class CloudLoggingAuditAdapter(_BaseGcpAdapter):
         if capability_id == "logging.query_lb_requests":
             user_filter = str(args.get("filter", "")).strip()
             page_size = int(args.get("page_size", 100))
-            lb_filter = 'resource.type="http_load_balancer"'
+            window_s = int(args.get("window_s", 300))
+            lb_filter = 'resource.type=("http_load_balancer" OR "http_external_regional_lb_rule" OR "internal_http_lb_rule")'
             full_filter = f"{lb_filter} AND ({user_filter})" if user_filter else lb_filter
-            entries = await self._query_log_entries(full_filter, page_size)
+            entries = await self._query_log_entries(full_filter, page_size, window_s=window_s)
             return entries
 
         if capability_id == "logging.query":
             user_filter = str(args.get("filter", "")).strip()
             page_size = int(args.get("page_size", 50))
-            entries = await self._query_log_entries(user_filter, page_size)
+            window_s = int(args.get("window_s", 0)) or None
+            entries = await self._query_log_entries(user_filter, page_size, window_s=window_s)
             return entries
 
         raise NotImplementedError(capability_id)
@@ -1639,12 +1707,7 @@ class CloudLoggingAuditAdapter(_BaseGcpAdapter):
                 if pat.search(payload):
                     detected_types.append(pii_name)
                     # Mask match
-                    if pii_name == "PAN":
-                        masked = pat.sub(lambda m: m.group(1)[:2] + "***" + m.group(1)[-1], masked)
-                    elif pii_name == "AADHAAR":
-                        masked = pat.sub(lambda m: "***-***-" + m.group(1)[-4:], masked)
-                    else:
-                        masked = pat.sub(lambda m: "***REDACTED***", masked)
+                    masked = pat.sub(lambda m: "***REDACTED***", masked)
 
             if detected_types:
                 svc = (
@@ -1702,8 +1765,13 @@ class PubSubAdapter(_BaseGcpAdapter):
             t_short = t_full.rsplit("/", 1)[-1]
             topic_names.append(t_full)
             labels = dict(t.get("labels") or {})
-            if is_resource_excluded(t_short, labels):
-                continue
+            is_observer = (
+                labels.get("godview_role") == "observer"
+                or is_resource_excluded(t_short, labels)
+            )
+            if is_observer:
+                labels["godview_role"] = "observer"
+
             doc_id = f"{self.env_id}__pubsub_topic.{t_short}"
             services.append(
                 DiscoveredServiceDoc(
@@ -1727,8 +1795,13 @@ class PubSubAdapter(_BaseGcpAdapter):
             s_short = s_full.rsplit("/", 1)[-1]
             s_topic = str(s.get("topic", "")).rsplit("/", 1)[-1]
             labels = dict(s.get("labels") or {})
-            if is_resource_excluded(s_short, labels):
-                continue
+            is_observer = (
+                labels.get("godview_role") == "observer"
+                or is_resource_excluded(s_short, labels)
+            )
+            if is_observer:
+                labels["godview_role"] = "observer"
+
             doc_id = f"{self.env_id}__pubsub_subscription.{s_short}"
             push_config = s.get("pushConfig", {})
             push_endpoint = str(push_config.get("pushEndpoint", ""))
@@ -1790,7 +1863,7 @@ class PubSubAdapter(_BaseGcpAdapter):
             services=services,
             edges=edges,
             evidence={
-                "topics_count": len(services),
+                "topics_count": len(topic_names),
                 "subscriptions_count": len(raw_subs),
                 "has_nervous_system": any(t.endswith("/godview-nervous-system") for t in topic_names),
                 "has_dlq": any(t.endswith("/godview-nervous-system-dlq") for t in topic_names),
@@ -1842,23 +1915,96 @@ class PubSubAdapter(_BaseGcpAdapter):
             target = args.get("subscription_name") or args.get("subscription_id") or args.get("resource_id")
             if target:
                 subs = [s for s in subs if s.get("name", "").endswith(f"/{target}") or s.get("name") == target]
+
+            for s in subs:
+                s_name = str(s.get("name", "")).rsplit("/", 1)[-1]
+                if s.get("pushConfig", {}).get("pushEndpoint"):
+                    try:
+                        metric_filter = (
+                            f'metric.type = "pubsub.googleapis.com/subscription/push_request_count" '
+                            f'AND resource.labels.subscription_id = "{s_name}"'
+                        )
+                        now = datetime.now(UTC)
+                        start = now - timedelta(seconds=300)
+                        ts_url = f"https://monitoring.googleapis.com/v3/projects/{self.project_id}/timeSeries"
+                        async with self._http_client() as client:
+                            resp = await client.get(
+                                ts_url,
+                                params={
+                                    "filter": metric_filter,
+                                    "interval.startTime": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                                    "interval.endTime": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                                },
+                            )
+                            if resp.status_code == 200:
+                                s["push_metrics"] = resp.json().get("timeSeries", [])
+                    except Exception:
+                        pass
             return subs
+
         if capability_id == "pubsub.dlq_depth":
             sub_name = str(
                 args.get("subscription_name")
                 or args.get("subscription_id")
                 or args.get("subscription")
-                or "godview-nervous-system-dlq-sub"
-            )
+                or ""
+            ).strip()
             subs = await self._fetch_subscriptions()
+            if not sub_name:
+                dlq_candidates = [s for s in subs if s.get("deadLetterPolicy")]
+                if dlq_candidates:
+                    sub_name = str(dlq_candidates[0].get("name", "")).rsplit("/", 1)[-1]
+                elif subs:
+                    sub_name = str(subs[0].get("name", "")).rsplit("/", 1)[-1]
+                else:
+                    sub_name = "unknown-subscription"
+
             matching = [s for s in subs if s.get("name", "").endswith(f"/{sub_name}") or s.get("name") == sub_name]
             dlq_policy = matching[0].get("deadLetterPolicy") if matching else None
+
+            num_undelivered = 0
+            ack_latency_s = 0.0
+            try:
+                now = datetime.now(UTC)
+                start = now - timedelta(seconds=300)
+                ts_url = f"https://monitoring.googleapis.com/v3/projects/{self.project_id}/timeSeries"
+                async with self._http_client() as client:
+                    # 1. Undelivered messages
+                    resp_undelivered = await client.get(
+                        ts_url,
+                        params={
+                            "filter": f'metric.type = "pubsub.googleapis.com/subscription/num_undelivered_messages" AND resource.labels.subscription_id = "{sub_name}"',
+                            "interval.startTime": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                            "interval.endTime": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        },
+                    )
+                    if resp_undelivered.status_code == 200:
+                        series = resp_undelivered.json().get("timeSeries", [])
+                        if series and series[0].get("points"):
+                            num_undelivered = int(series[0]["points"][0].get("value", {}).get("int64Value", 0))
+
+                    # 2. Oldest unacked message age
+                    resp_age = await client.get(
+                        ts_url,
+                        params={
+                            "filter": f'metric.type = "pubsub.googleapis.com/subscription/oldest_unacked_message_age" AND resource.labels.subscription_id = "{sub_name}"',
+                            "interval.startTime": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                            "interval.endTime": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        },
+                    )
+                    if resp_age.status_code == 200:
+                        series = resp_age.json().get("timeSeries", [])
+                        if series and series[0].get("points"):
+                            ack_latency_s = float(series[0]["points"][0].get("value", {}).get("int64Value", 0))
+            except Exception:
+                pass
+
             return {
                 "subscription": sub_name,
                 "dlq_configured": dlq_policy is not None,
                 "dlq_topic": dlq_policy.get("deadLetterTopic") if dlq_policy else None,
-                "num_undelivered_messages": 0,
-                "ack_latency_s": 0.0,
+                "num_undelivered_messages": num_undelivered,
+                "ack_latency_s": ack_latency_s,
             }
         raise NotImplementedError(capability_id)
 
@@ -2091,13 +2237,14 @@ class FirestoreAdapter(_BaseGcpAdapter):
     async def health(self) -> AdapterHealth:
         try:
             dbs = await self._fetch_databases()
-            has_mem_db = any(str(d.get("name", "")).endswith("/god-view-memory-db") for d in dbs)
-            state = "available" if has_mem_db else ("partial" if dbs else "unavailable")
+            state = "available" if dbs is not None else "unavailable"
+            count = len(dbs) if dbs is not None else 0
             error = None
         except Exception as exc:
             state = "unavailable"
+            count = 0
             error = str(exc)
-        evidence: dict[str, Any] = {"database": "god-view-memory-db", "vector_dimension": 768}
+        evidence: dict[str, Any] = {"databases_count": count}
         if error:
             evidence["error"] = error
         return AdapterHealth(
@@ -2677,29 +2824,68 @@ class HttpProbeAdapter(SenseAdapter):
         if capability_id == "http.probe":
             url = str(args.get("url", "")).strip()
             method = str(args.get("method", "GET")).upper()
-            if method != "GET":
+            if method not in ("GET", "HEAD"):
                 raise ValueError(
-                    f"Capability 'http.probe' is strictly GET-only (got method '{method}')"
+                    f"Capability 'http.probe' is strictly GET/HEAD-only (got method '{method}')"
                 )
             if not url:
                 raise ValueError("http.probe requires a non-empty target url")
 
-            headers = dict(args.get("headers") or {})
-            timeout_s = float(args.get("timeout_s", 5.0))
-            kwargs: dict[str, Any] = {"headers": headers, "timeout": timeout_s}
+            parsed = urlparse(url)
+            if parsed.scheme not in ("http", "https"):
+                raise ValueError(f"http.probe requires http or https scheme (got '{parsed.scheme}')")
+
+            hostname = (parsed.hostname or "").lower()
+            if not hostname:
+                raise ValueError("http.probe invalid target hostname")
+
+            # SSRF guard: block cloud metadata and loopback
+            if hostname in ("metadata.google.internal", "metadata", "localhost"):
+                raise ValueError(f"SSRF violation: probing '{hostname}' is forbidden")
+
+            try:
+                ip_obj = ipaddress.ip_address(hostname)
+                if ip_obj.is_loopback or ip_obj.is_link_local:
+                    raise ValueError(f"SSRF violation: probing loopback/link-local '{hostname}' is forbidden")
+                if str(ip_obj) == "169.254.169.254":
+                    raise ValueError("SSRF violation: probing metadata IP is forbidden")
+                if ip_obj.is_private and self._transport is None and os.environ.get("GODVIEW_ENV") != "hermetic":
+                    raise ValueError(f"SSRF violation: probing private IP '{hostname}' is forbidden")
+            except ValueError as ve:
+                if "SSRF violation" in str(ve):
+                    raise
+
+            # Filter headers: strip sensitive / auth / metadata headers
+            raw_headers = dict(args.get("headers") or {})
+            forbidden_prefixes = ("authorization", "metadata-flavor", "cookie", "x-goog-")
+            safe_headers = {
+                k: v for k, v in raw_headers.items()
+                if not any(k.lower().startswith(p) for p in forbidden_prefixes)
+            }
+
+            timeout_s = min(max(float(args.get("timeout_s", 5.0)), 0.5), 15.0)
+            kwargs: dict[str, Any] = {"headers": safe_headers, "timeout": timeout_s}
             if self._transport is not None:
                 kwargs["transport"] = self._transport
 
             start_t = time.monotonic()
             try:
                 async with httpx.AsyncClient(**kwargs) as client:
-                    resp = await client.get(url)
+                    resp = await client.request(method, url)
                     latency_ms = round((time.monotonic() - start_t) * 1000.0, 2)
+                    parsed_json = None
+                    try:
+                        if "json" in resp.headers.get("content-type", "").lower() or resp.text.strip().startswith(("{", "[")):
+                            parsed_json = resp.json()
+                    except Exception:
+                        parsed_json = None
+
                     return {
                         "ok": resp.status_code < 400,
                         "status_code": resp.status_code,
                         "latency_ms": latency_ms,
                         "headers": dict(resp.headers),
+                        "json": parsed_json,
                         "body": resp.text[:2000],
                         "error": None,
                     }
@@ -2710,6 +2896,7 @@ class HttpProbeAdapter(SenseAdapter):
                     "status_code": 0,
                     "latency_ms": latency_ms,
                     "headers": {},
+                    "json": None,
                     "body": "",
                     "error": str(exc),
                 }
@@ -2758,7 +2945,7 @@ def build_all_gcp_adapters(
         AgentRegistryAdapter(project_id=project_id, region=region, auth=auth, fixtures=fixtures, http_transport=http_transport),
         ModelArmorAdapter(project_id=project_id, region=region, auth=auth, fixtures=fixtures, http_transport=http_transport),
         CloudIamAdapter(project_id=project_id, fixtures=fixtures, auth=auth, http_transport=http_transport),
-        TerraformDriftAdapter(project_id=project_id, region=region, zone=zone, fixtures=fixtures, http_transport=http_transport),
+        TerraformDriftAdapter(project_id=project_id, region=region, zone=zone, auth=auth, fixtures=fixtures, http_transport=http_transport),
         CloudEdgeAdapter(project_id=project_id, region=region, zone=zone, auth=auth, fixtures=fixtures, http_transport=http_transport),
         ApiGatewayAdapter(project_id=project_id, region=region, zone=zone, auth=auth, fixtures=fixtures, http_transport=http_transport),
         HttpProbeAdapter(http_transport=http_transport),

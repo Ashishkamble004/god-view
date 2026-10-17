@@ -325,7 +325,7 @@ class GitSenseAdapter(SenseAdapter):
         webhook_secret: str | None = None,
         github_token: str | None = None,
         github_api_url: str = "https://api.github.com",
-        env_id: str = "local-compose",
+        env_id: str = "git-workspace",
         http_transport: httpx.BaseTransport | httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self.github_mcp_client = github_mcp_client

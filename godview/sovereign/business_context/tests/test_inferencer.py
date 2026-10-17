@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
-from godview_shared.contracts import DiscoveredEdgeDoc, DiscoveredServiceDoc
+from godview_shared.contracts import (
+    BusinessContext,
+    DiscoveredEdgeDoc,
+    DiscoveredServiceDoc,
+)
 
 from godview.sovereign.business_context.inferencer import (
     INFERENCE_SYSTEM_PROMPT,
@@ -13,6 +18,43 @@ from godview.sovereign.business_context.inferencer import (
     compute_evidence_hash,
 )
 from shared.tools.lint_neutrality import BANNED_TERMS
+
+
+class _FakeLlm:
+    def __init__(self, model_name: str = "gemini-1.5-pro", fail: bool = False) -> None:
+        self.model_name = model_name
+        self.fail = fail
+        self.calls = 0
+
+    async def generate(self, role: str, contents: str, response_schema: Any = None) -> Any:
+        self.calls += 1
+        if self.fail:
+            raise RuntimeError("429 ResourceExhausted: rate limit exceeded")
+        if response_schema == BusinessContext:
+            return BusinessContext(
+                role_summary="Order processor and validator",
+                domain="orders",
+                capabilities=["listRecords", "createRecord"],
+                upstream=[],
+                downstream=[],
+                journeys=[],
+                kpis=[],
+                invariants=[],
+                confidence=0.88,
+                inferred_by=self.model_name,
+            )
+        if "journeys" in contents.lower():
+            return [
+                {
+                    "name": "Order Placement Flow",
+                    "steps": [
+                        {"node": "gateway", "operation": "submitOrder"},
+                        {"node": "svc-order", "operation": "createOrder"},
+                        {"node": "svc-billing", "operation": "chargeCustomer"},
+                    ],
+                }
+            ]
+        return {}
 
 
 @pytest.mark.unit
@@ -62,9 +104,10 @@ def test_evidence_bundle_strips_secret_values() -> None:
 
 
 @pytest.mark.unit
-async def test_evidence_hash_caching() -> None:
-    """Verify inference caches results by evidence hash (<= 1 call per node per evidence change)."""
-    inferencer = BusinessContextInferencer()
+async def test_evidence_hash_caching_and_provenance() -> None:
+    """Verify inference caches results by evidence hash and records honest provenance."""
+    fake_llm = _FakeLlm()
+    inferencer = BusinessContextInferencer(llm=fake_llm)
     now = datetime.now(tz=UTC).isoformat()
     svc = DiscoveredServiceDoc(
         env_id="test-env",
@@ -81,12 +124,15 @@ async def test_evidence_hash_caching() -> None:
 
     # First call
     ctx1 = await inferencer.infer_service_context(svc, edges)
-    assert ctx1.domain
-    assert ctx1.confidence > 0.0
+    assert ctx1.domain == "orders"
+    assert ctx1.confidence == 0.88
+    assert ctx1.inferred_by == "gemini-1.5-pro"
+    assert fake_llm.calls == 1
 
-    # Second call with identical evidence -> returned from cache
+    # Second call with identical evidence -> returned from cache (no extra LLM call)
     ctx2 = await inferencer.infer_service_context(svc, edges)
     assert ctx1 == ctx2
+    assert fake_llm.calls == 1
 
     # Modified evidence -> cache key changes
     svc_modified = svc.model_copy(
@@ -103,9 +149,32 @@ async def test_evidence_hash_caching() -> None:
 
 
 @pytest.mark.unit
-def test_journey_inference_from_trace_dags() -> None:
-    """Verify multi-service journeys are inferred from topology call graphs."""
-    inferencer = BusinessContextInferencer()
+async def test_llm_failure_records_zero_confidence_and_no_fabrications() -> None:
+    """Verify that when LLM fails or is unavailable, confidence is 0.0 and no KPIs/invariants are invented."""
+    failing_llm = _FakeLlm(fail=True)
+    inferencer = BusinessContextInferencer(llm=failing_llm)
+    now = datetime.now(tz=UTC).isoformat()
+    svc = DiscoveredServiceDoc(
+        env_id="test-env",
+        name="svc-records",
+        kind="cloud_run",
+        adapter_family="gcp",
+        locator="https://svc-records.run.app",
+        routes=[{"method": "GET", "path": "/v1/records", "summary": "List records"}],
+        first_seen=now,
+        last_seen=now,
+    )
+    res = await inferencer.infer_service_context(svc, edges=[])
+    assert res.confidence == 0.0
+    assert res.inferred_by == "none"
+    assert res.domain == "unknown"
+    assert res.kpis == []
+    assert res.invariants == []
+
+
+@pytest.mark.unit
+async def test_journey_inference_with_and_without_llm() -> None:
+    """Verify journeys are only inferred with real evidence and LLM, never fabricated."""
     now = datetime.now(tz=UTC).isoformat()
     services = [
         DiscoveredServiceDoc(
@@ -128,16 +197,6 @@ def test_journey_inference_from_trace_dags() -> None:
             first_seen=now,
             last_seen=now,
         ),
-        DiscoveredServiceDoc(
-            env_id="test-env",
-            name="svc-billing",
-            kind="cloud_run",
-            adapter_family="gcp",
-            locator="https://svc-billing.run.app",
-            routes=[{"method": "POST", "path": "/v1/charge", "operation_id": "chargeCustomer"}],
-            first_seen=now,
-            last_seen=now,
-        ),
     ]
 
     edges = [
@@ -146,21 +205,19 @@ def test_journey_inference_from_trace_dags() -> None:
             dst="test-env__cloud_run.svc-order",
             protocol="http",
             evidence="trace",
-            first_seen=now,
-            last_seen=now,
-        ),
-        DiscoveredEdgeDoc(
-            src="test-env__cloud_run.svc-order",
-            dst="test-env__cloud_run.svc-billing",
-            protocol="http",
-            evidence="trace",
+            evidence_kind="trace",
             first_seen=now,
             last_seen=now,
         ),
     ]
 
-    journeys = inferencer.infer_journeys_from_topology(services, edges)
-    assert len(journeys) >= 1
-    j = journeys[0]
-    assert j.intended_order_source == "trace_dag"
-    assert len(j.steps) >= 2
+    # Without LLM -> empty journeys honestly
+    inferencer_no_llm = BusinessContextInferencer(llm=None)
+    journeys_no_llm = await inferencer_no_llm.infer_journeys_from_topology(services, edges)
+    assert journeys_no_llm == []
+
+    # With LLM -> journeys inferred from traces
+    inferencer_llm = BusinessContextInferencer(llm=_FakeLlm())
+    journeys_llm = await inferencer_llm.infer_journeys_from_topology(services, edges)
+    assert len(journeys_llm) >= 1
+    assert journeys_llm[0].name == "Order Placement Flow"

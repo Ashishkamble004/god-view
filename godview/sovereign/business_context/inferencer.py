@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from datetime import UTC, datetime
 from typing import Any
 
@@ -21,6 +22,8 @@ from godview_shared.contracts import (
     DiscoveredServiceDoc,
     JourneyDoc,
 )
+
+logger = logging.getLogger("godview.sovereign.business_context.inferencer")
 
 INFERENCE_SYSTEM_PROMPT = """You are an evidence-based system architecture analyzer.
 Your task is to infer the business role, capabilities, domain, KPIs, and invariants of a software service purely from the provided technical evidence.
@@ -188,150 +191,112 @@ class BusinessContextInferencer:
                     contents=prompt,
                     response_schema=BusinessContext,
                 )
+                model_name = getattr(self.llm, "model_name", getattr(self.llm, "model", "llm-reasoner"))
                 if isinstance(res, BusinessContext):
+                    res.inferred_by = model_name
+                    res.inferred_at = now_iso
                     return res
                 if isinstance(res, dict):
+                    res["inferred_by"] = model_name
+                    res["inferred_at"] = now_iso
                     return BusinessContext(**res)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("LLM business context inference failed for %s: %s", service_name, exc)
+                return BusinessContext(
+                    role_summary=f"Inference failed for {service_name}",
+                    domain="unknown",
+                    capabilities=[],
+                    upstream=upstreams,
+                    downstream=downstreams,
+                    journeys=[],
+                    kpis=[],
+                    invariants=[],
+                    risk_notes=[],
+                    confidence=0.0,
+                    evidence=[],
+                    inferred_by="none",
+                    inferred_at=now_iso,
+                )
 
-        # Evidence-grounded heuristic fallback for tests / when LLM is unavailable:
-        # Strictly uses evidence from routes, summaries, and env names.
-        capabilities: list[str] = []
-        evidence_refs: list[dict[str, Any]] = []
-
-        for r in routes:
-            op_id = r.get("operation_id") or f"{r.get('method')} {r.get('path')}"
-            summary = r.get("summary") or op_id
-            capabilities.append(summary)
-            evidence_refs.append(
-                {
-                    "kind": "openapi",
-                    "ref": f"{r.get('method')} {r.get('path')}",
-                    "excerpt": summary,
-                }
-            )
-
-        for env_n in evidence_bundle.get("env_var_names", []):
-            evidence_refs.append(
-                {
-                    "kind": "env",
-                    "ref": env_n,
-                    "excerpt": env_n,
-                }
-            )
-
-        # Inferred domain text from operation keywords or service name tokens
-        inferred_domain = "automated_service_processing"
-        if routes:
-            # Look at path prefixes (e.g. /v1/something)
-            first_path = routes[0].get("path", "")
-            segments = [s for s in first_path.split("/") if s and not s.startswith("v")]
-            if segments:
-                inferred_domain = f"{segments[0].replace('-', ' ')} operations"
-
-        role_summary = (
-            f"Service managing {len(routes)} operational contract routes with {len(upstreams)} upstream "
-            f"callers and {len(downstreams)} downstream dependencies."
-            if routes
-            else f"Infrastructure component '{service_name}' supporting environment execution."
-        )
-
-        confidence = 0.85 if routes else 0.40
-
+        # When LLM is not configured / unavailable, return un-inferred BusinessContext honestly with confidence 0.0
         return BusinessContext(
-            role_summary=role_summary,
-            domain=inferred_domain,
-            capabilities=capabilities,
+            role_summary=f"Infrastructure service '{service_name}'",
+            domain="unknown",
+            capabilities=[r.get("summary") or r.get("operation_id") or f"{r.get('method')} {r.get('path')}" for r in routes],
             upstream=upstreams,
             downstream=downstreams,
             journeys=[],
-            kpis=[
-                {
-                    "name": "operation_latency_p95",
-                    "definition": f"p95 latency for {service_name}",
-                    "unit": "ms",
-                    "confidence": confidence,
-                    "evidence": "golden_signals",
-                }
-            ],
-            invariants=[
-                {
-                    "statement": f"{service_name} responds with valid status codes on contract routes",
-                    "check": "http_status < 500",
-                    "severity": "sev2",
-                    "confidence": confidence,
-                    "evidence": "openapi_contract",
-                }
-            ],
+            kpis=[],
+            invariants=[],
             risk_notes=[],
-            confidence=confidence,
-            evidence=evidence_refs,
-            inferred_by="gemini-4-argon@global" if self.llm else "evidence_heuristic",
+            confidence=0.0,
+            evidence=[],
+            inferred_by="none",
             inferred_at=now_iso,
         )
 
-    def infer_journeys_from_topology(
+    async def infer_journeys_from_topology(
         self,
         services: list[DiscoveredServiceDoc],
         edges: list[DiscoveredEdgeDoc],
     ) -> list[JourneyDoc]:
-        """Infer multi-service user journeys from call graphs and trace edges."""
-        # Find entrypoint nodes (nodes with 0 incoming trace/route edges or lb_frontend / api_gateway)
-        edge_map: dict[str, list[str]] = {}
-        incoming_count: dict[str, int] = {}
-        svc_by_id = {
-            (s.doc_id or f"{s.env_id}__{s.kind}.{s.name}"): s
-            for s in services
+        """Infer multi-service business journeys using LLM reasoning from trace DAGs and operation names."""
+        trace_edges = [e for e in edges if e.evidence_kind == "trace" or e.protocol in ("http", "grpc")]
+        if not trace_edges or self.llm is None:
+            # Without traces or reasoning LLM, return empty list honestly (no fabricated flow__x_to_y journeys)
+            return []
+
+        service_ops: dict[str, list[str]] = {}
+        for s in services:
+            sid = s.doc_id or s.name
+            service_ops[sid] = [r.get("operation_id") or r.get("path", "") for r in (s.routes or [])]
+
+        dag_evidence = {
+            "edges": [{"src": e.src, "dst": e.dst, "rps": e.rps} for e in trace_edges],
+            "operations_by_service": service_ops,
         }
 
-        for e in edges:
-            edge_map.setdefault(e.src, []).append(e.dst)
-            incoming_count[e.dst] = incoming_count.get(e.dst, 0) + 1
-            incoming_count.setdefault(e.src, 0)
+        prompt = (
+            "Analyze these distributed trace call edges and service operations. "
+            "Identify distinct end-to-end multi-service business journeys if supported by evidence. "
+            "For each journey, specify its business name, sequential steps with node and actual operation name, "
+            "confidence (0.0 to 1.0), and evidence summary. "
+            "If the evidence is insufficient to identify distinct business journeys, return an empty journeys list.\n\n"
+            f"Trace and operation evidence:\n{json.dumps(dag_evidence, indent=2)}"
+        )
 
-        entrypoints = [
-            node_id
-            for node_id, inc in incoming_count.items()
-            if inc == 0 or (node_id in svc_by_id and svc_by_id[node_id].kind in ("lb_frontend", "api_gateway"))
-        ]
-
-        journeys: list[JourneyDoc] = []
-        visited_paths: set[str] = set()
-
-        for ep in entrypoints:
-            # Simple DFS to discover paths of length >= 2
-            stack = [(ep, [ep])]
-
-            while stack:
-                curr, curr_path = stack.pop()
-                next_nodes = edge_map.get(curr, [])
-                if not next_nodes or len(curr_path) >= 5:
-                    path_key = "->".join(curr_path)
-                    if len(curr_path) >= 2 and path_key not in visited_paths:
-                        visited_paths.add(path_key)
-                        j_name = f"flow__{curr_path[0].split('.')[-1]}_to_{curr_path[-1].split('.')[-1]}"
-                        steps: list[dict[str, Any]] = []
-                        for idx, n in enumerate(curr_path):
-                            s_doc = svc_by_id.get(n)
-                            op_name = "PROCESS"
-                            if s_doc and s_doc.routes:
-                                op_name = s_doc.routes[0].get("operation_id") or s_doc.routes[0].get("path") or "PROCESS"
-                            steps.append({"node": n, "operation": op_name, "seq": idx + 1})
-
-                        j_doc = JourneyDoc(
-                            doc_id=j_name,
-                            name=j_name,
-                            steps=[str(s["node"]) for s in steps],
-                            intended_order_source="trace_dag",
-                            status="active",
+        try:
+            self.total_llm_calls += 1
+            res = await self.llm.generate(
+                role="reasoning",
+                contents=prompt,
+            )
+            if isinstance(res, list):
+                journeys: list[JourneyDoc] = []
+                for item in res:
+                    if isinstance(item, dict) and "name" in item:
+                        raw_steps = item.get("steps", [])
+                        steps_str: list[str] = []
+                        for s in raw_steps:
+                            if isinstance(s, str):
+                                steps_str.append(s)
+                            elif isinstance(s, dict):
+                                node = s.get("node", "")
+                                op = s.get("operation", "")
+                                steps_str.append(f"{node}.{op}" if op else str(node))
+                            else:
+                                steps_str.append(str(s))
+                        journeys.append(
+                            JourneyDoc(
+                                doc_id=f"journey__{item['name'].lower().replace(' ', '_')}",
+                                name=item["name"],
+                                steps=steps_str,
+                                intended_order_source="trace_dag",
+                                status="active",
+                            )
                         )
-                        # Attach structured steps
-                        j_doc.__dict__["structured_steps"] = steps
-                        journeys.append(j_doc)
-                else:
-                    for nxt in next_nodes:
-                        if nxt not in curr_path:
-                            stack.append((nxt, curr_path + [nxt]))
+                return journeys
+        except Exception as exc:
+            logger.warning("LLM journey inference failed: %s", exc)
 
-        return journeys
+        return []

@@ -204,7 +204,7 @@ async def test_k8s_discovery_gke_and_kind_with_kubectl_fixtures() -> None:
                                 },
                             },
                             "spec": {"clusterIP": "10.24.1.15", "ports": [{"port": 8080}]},
-                            "status": {"loadBalancer": {"ingress": [{"ip": "10.10.0.51"}]}},
+                            "status": {"loadBalancer": {"ingress": [{"ip": "10.200.0.51"}]}},
                         },
                         {
                             "metadata": {"name": svc_beta, "namespace": ns_tenant, "labels": {}},
@@ -267,7 +267,7 @@ async def test_k8s_discovery_gke_and_kind_with_kubectl_fixtures() -> None:
     by_name = {s.name: s for s in discovery.services}
     assert by_name[svc_alpha].kind == "gke_workload"
     assert by_name[svc_alpha].classification == "other_read_only"
-    assert by_name[svc_alpha].metrics_endpoint == "http://10.10.0.51:8080/metrics"
+    assert by_name[svc_alpha].metrics_endpoint == "http://10.200.0.51:8080/metrics"
     assert by_name[svc_beta].classification == "other_read_only"
     assert discovery.evidence["services_list_status_code"] == 200
 

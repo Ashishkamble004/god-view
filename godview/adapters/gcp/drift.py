@@ -74,19 +74,17 @@ def assert_managed_resource(
         raise UnmanagedResourceError(
             f"Refusing to mutate '{resource_ref}': resource is excluded by observer role or GODVIEW_HINT_EXCLUDE (TDD I-07, Decision A11)"
         )
-    if live_labels is not None:
-        if live_labels.get(MANAGED_LABEL_KEY) != MANAGED_LABEL_VALUE:
-            raise UnmanagedResourceError(
-                f"Refusing to mutate '{resource_ref}': live resource lacks label {MANAGED_LABEL_KEY}='{MANAGED_LABEL_VALUE}' (TDD I-07)"
-            )
-    if labels is not None:
-        if labels.get(MANAGED_LABEL_KEY) != MANAGED_LABEL_VALUE:
-            raise UnmanagedResourceError(
-                f"Refusing to mutate '{resource_ref}': resource lacks label {MANAGED_LABEL_KEY}='{MANAGED_LABEL_VALUE}' (TDD I-07)"
-            )
-    if live_labels is None and labels is None:
+    if live_labels is None:
         raise UnmanagedResourceError(
-            f"Refusing to mutate '{resource_ref}': no resource labels verified for {MANAGED_LABEL_KEY}='{MANAGED_LABEL_VALUE}' (TDD I-07)"
+            f"Refusing to mutate '{resource_ref}': live resource labels could not be verified (TDD I-07)"
+        )
+    if live_labels.get(MANAGED_LABEL_KEY) != MANAGED_LABEL_VALUE:
+        raise UnmanagedResourceError(
+            f"Refusing to mutate '{resource_ref}': live resource lacks label {MANAGED_LABEL_KEY}='{MANAGED_LABEL_VALUE}' (TDD I-07)"
+        )
+    if labels is not None and labels.get(MANAGED_LABEL_KEY) != MANAGED_LABEL_VALUE:
+        raise UnmanagedResourceError(
+            f"Refusing to mutate '{resource_ref}': resource lacks label {MANAGED_LABEL_KEY}='{MANAGED_LABEL_VALUE}' (TDD I-07)"
         )
 
 
@@ -307,12 +305,24 @@ class _FixtureAsyncTransport(httpx.BaseTransport, httpx.AsyncBaseTransport):
         # 4. Compute Engine
         if host == "compute.googleapis.com":
             if path.endswith("/forwardingRules"):
+                fr_items = self._fixtures.get("forwarding_rules", {}).get("items", [])
+                if "/aggregated/" in path:
+                    return self._json_response(200, {"items": {"global": {"forwardingRules": fr_items}}})
                 return self._json_response(200, self._fixtures.get("forwarding_rules", {"items": []}))
             if path.endswith("/urlMaps"):
+                um_items = self._fixtures.get("url_maps", {}).get("items", [])
+                if "/aggregated/" in path:
+                    return self._json_response(200, {"items": {"global": {"urlMaps": um_items}}})
                 return self._json_response(200, self._fixtures.get("url_maps", {"items": []}))
             if path.endswith("/backendServices"):
+                bs_items = self._fixtures.get("backend_services", {}).get("items", [])
+                if "/aggregated/" in path:
+                    return self._json_response(200, {"items": {"global": {"backendServices": bs_items}}})
                 return self._json_response(200, self._fixtures.get("backend_services", {"items": []}))
             if path.endswith("/securityPolicies"):
+                sp_items = self._fixtures.get("security_policies", {}).get("items", [])
+                if "/aggregated/" in path:
+                    return self._json_response(200, {"items": {"global": {"securityPolicies": sp_items}}})
                 return self._json_response(200, self._fixtures.get("security_policies", {"items": []}))
             if "/aggregated/instances" in path:
                 zone = str(self._fixtures.get("zone", "us-central1-a"))
@@ -365,6 +375,42 @@ class _FixtureAsyncTransport(httpx.BaseTransport, httpx.AsyncBaseTransport):
             if path.endswith("/alertPolicies"):
                 return self._json_response(200, self._fixtures["monitoring"])
             if path.endswith("/timeSeries"):
+                filter_str = str(request.url.params.get("filter", ""))
+                if "num_undelivered_messages" in filter_str:
+                    num_undelivered = self._fixtures.get("pubsub_num_undelivered", 0)
+                    return self._json_response(200, {
+                        "timeSeries": [{
+                            "metric": {"type": "pubsub.googleapis.com/subscription/num_undelivered_messages"},
+                            "points": [{"value": {"int64Value": str(num_undelivered)}}],
+                        }]
+                    })
+                if "oldest_unacked_message_age" in filter_str:
+                    ack_age = self._fixtures.get("pubsub_ack_age_s", 0)
+                    return self._json_response(200, {
+                        "timeSeries": [{
+                            "metric": {"type": "pubsub.googleapis.com/subscription/oldest_unacked_message_age"},
+                            "points": [{"value": {"int64Value": str(ack_age)}}],
+                        }]
+                    })
+                if "push_request_count" in filter_str:
+                    return self._json_response(200, {
+                        "timeSeries": [
+                            {
+                                "metric": {
+                                    "type": "pubsub.googleapis.com/subscription/push_request_count",
+                                    "labels": {"response_class": "2xx"},
+                                },
+                                "points": [{"value": {"int64Value": "150"}}],
+                            },
+                            {
+                                "metric": {
+                                    "type": "pubsub.googleapis.com/subscription/push_request_count",
+                                    "labels": {"response_class": "5xx"},
+                                },
+                                "points": [{"value": {"int64Value": "2"}}],
+                            },
+                        ]
+                    })
                 ts = self._fixtures["monitoring"].get("timeSeries", [])
                 return self._json_response(200, {"timeSeries": ts})
 
@@ -391,7 +437,12 @@ class _FixtureAsyncTransport(httpx.BaseTransport, httpx.AsyncBaseTransport):
                     )
                 return self._json_response(200, self._fixtures["logging_sinks"])
             if path.endswith("/entries:list"):
-                entries = self._fixtures.get("logging_entries", [])
+                body = json.loads(request.content.decode("utf-8")) if request.content else {}
+                filter_str = str(body.get("filter", ""))
+                if "http_load_balancer" in filter_str or "enforcedSecurityPolicy" in filter_str or "statusDetails" in filter_str:
+                    entries = self._fixtures.get("lb_log_entries") or self._fixtures.get("logging_entries", [])
+                else:
+                    entries = self._fixtures.get("logging_entries", [])
                 return self._json_response(200, {"entries": entries})
 
         # 9. Pub/Sub
@@ -489,7 +540,7 @@ class _FixtureAsyncTransport(httpx.BaseTransport, httpx.AsyncBaseTransport):
                     "bypass policy guard",
                     "drop table",
                     "union select",
-                    "0% interest",
+                    "override_guard",
                 )
                 matched = next((m for m in blocked_markers if m in prompt_text), None)
                 if matched is not None:
@@ -580,15 +631,47 @@ def build_fixture_http_transport(fixtures: dict[str, Any]) -> _FixtureAsyncTrans
     return _FixtureAsyncTransport(fixtures)
 
 
+_SENSITIVE_KEY_SUBSTRINGS = (
+    "password",
+    "private_key",
+    "secret",
+    "token",
+    "credential",
+    "auth_token",
+    "client_key",
+    "client_certificate",
+    "cluster_ca_certificate",
+    "key_string",
+    "kube_config",
+    "connection_string",
+    "database_url",
+    "jwt",
+    "signature",
+)
+
+
 def _redact_tfstate_node(node: Any) -> Any:
     """Recursively redact sensitive credentials, passwords, and tokens from tfstate (Decision A2/A8)."""
     if isinstance(node, dict):
         cleaned: dict[str, Any] = {}
+        sensitive_paths: set[str] = set()
+        for sa in node.get("sensitive_attributes", []):
+            if isinstance(sa, list) and sa and isinstance(sa[0], dict) and "type" in sa[0]:
+                val = sa[0].get("value")
+                if val:
+                    sensitive_paths.add(str(val))
+            elif isinstance(sa, str):
+                sensitive_paths.add(sa)
+
         for k, v in node.items():
             lower_k = str(k).lower()
-            if any(s in lower_k for s in ("password", "private_key", "secret", "token", "credential", "auth_token")):
+            if any(s in lower_k for s in _SENSITIVE_KEY_SUBSTRINGS) or k in sensitive_paths:
                 cleaned[k] = "[REDACTED]"
             elif lower_k in ("result", "bcrypt_hash") and isinstance(v, str) and len(v) > 0:
+                cleaned[k] = "[REDACTED]"
+            elif isinstance(v, dict) and bool(v.get("sensitive")):
+                cleaned[k] = {"sensitive": True, "value": "[REDACTED]"}
+            elif isinstance(v, str) and v.startswith("-----BEGIN "):
                 cleaned[k] = "[REDACTED]"
             else:
                 cleaned[k] = _redact_tfstate_node(v)
@@ -611,6 +694,7 @@ class TerraformDriftAdapter(SenseAdapter):
         region: str = "us-central1",
         zone: str = "us-central1-a",
         tfstate_bucket: str | None = None,
+        auth: Any | None = None,
         bearer_token: str | None = None,
         fixtures: dict[str, Any] | None = None,
         http_transport: httpx.AsyncBaseTransport | None = None,
@@ -620,6 +704,7 @@ class TerraformDriftAdapter(SenseAdapter):
         self.region = region
         self.zone = zone
         self.tfstate_bucket = tfstate_bucket or f"{self.project_id}-god-view-tfstate"
+        self.auth = auth
         self.bearer_token = resolve_gcp_bearer_token(bearer_token)
         self._transport = http_transport or (
             build_fixture_http_transport(fixtures) if fixtures is not None else None
@@ -631,8 +716,16 @@ class TerraformDriftAdapter(SenseAdapter):
 
     def _http_client(self) -> httpx.AsyncClient:
         headers: dict[str, str] = {"Accept": "application/json"}
-        if self.bearer_token:
-            headers["Authorization"] = f"Bearer {self.bearer_token}"
+        token: str | None = None
+        if self.auth is not None and hasattr(self.auth, "access_token"):
+            try:
+                token = self.auth.access_token()
+            except Exception:
+                token = None
+        if not token:
+            token = self.bearer_token or resolve_gcp_bearer_token()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
         kwargs: dict[str, Any] = {"headers": headers, "timeout": 15.0}
         if self._transport is not None:
             kwargs["transport"] = self._transport

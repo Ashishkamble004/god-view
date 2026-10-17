@@ -264,53 +264,91 @@ async def test_http_probe_adapter_safety(gcp_fixtures: dict[str, Any]) -> None:
             "http.probe", {"url": "https://service-a.run.app/data", "method": "POST"}
         )
 
+    # SSRF guard tests
+    with pytest.raises(ValueError, match="SSRF"):
+        await probe_adapter.execute_capability(
+            "http.probe", {"url": "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"}
+        )
+
+    with pytest.raises(ValueError, match="SSRF"):
+        await probe_adapter.execute_capability(
+            "http.probe", {"url": "http://169.254.169.254/computeMetadata/v1/"}
+        )
+
+    with pytest.raises(ValueError, match="SSRF"):
+        await probe_adapter.execute_capability(
+            "http.probe", {"url": "http://localhost:8080/metrics"}
+        )
+
 
 @pytest.mark.unit
 async def test_read_capabilities_exposure(gcp_fixtures: dict[str, Any]) -> None:
-    """Verify all 10 read capabilities are implemented and can be executed without error."""
+    """Verify all 10 read capabilities return real, parsed payload structures."""
     # 1. edge.describe_backends
     edge = CloudEdgeAdapter(fixtures=gcp_fixtures)
     res_edge = await edge.execute_capability("edge.describe_backends", {})
     assert isinstance(res_edge, list)
+    assert len(res_edge) >= 1
+    assert any("backend" in str(b.get("name", "")) for b in res_edge)
 
     # 2. edge.describe_security_policies
     res_sec = await edge.execute_capability("edge.describe_security_policies", {})
     assert isinstance(res_sec, list)
+    assert len(res_sec) >= 1
 
     # 3. apigateway.get_openapi
     gw = ApiGatewayAdapter(fixtures=gcp_fixtures)
     res_gw = await gw.execute_capability("apigateway.get_openapi", {})
     assert "paths" in res_gw
+    assert "/v1/items" in res_gw["paths"]
 
     # 4. pubsub.describe_subscriptions
     ps = PubSubAdapter(fixtures=gcp_fixtures)
     res_ps_sub = await ps.execute_capability("pubsub.describe_subscriptions", {})
     assert isinstance(res_ps_sub, list)
+    assert len(res_ps_sub) >= 1
 
-    # 5. pubsub.dlq_depth
+    # 5. pubsub.dlq_depth with live Monitoring query
     res_ps_dlq = await ps.execute_capability("pubsub.dlq_depth", {"subscription_id": "sub-events-push"})
-    assert "dlq_configured" in res_ps_dlq
+    assert res_ps_dlq["dlq_configured"] is True
+    assert res_ps_dlq["num_undelivered_messages"] == 42
+    assert res_ps_dlq["ack_latency_s"] == 15.0
 
     # 6. run.get_posture
     run_ad = CloudRunV2Adapter(fixtures=gcp_fixtures)
-    res_run = await run_ad.execute_capability("run.get_posture", {"service_name": "service-a"})
-    assert "ingress" in res_run
+    res_run = await run_ad.execute_capability("run.get_posture", {"service_name": "svc-origination-901"})
+    assert res_run["ingress"] == "INGRESS_TRAFFIC_ALL"
+    assert "invoker_iam_disabled" in res_run
+    assert "all_users" in res_run
 
-    # 7. logging.query_lb_requests
+    # 7. logging.query_lb_requests returns real Cloud Armor / LB status
     log_ad = CloudLoggingAuditAdapter(fixtures=gcp_fixtures)
-    res_lb = await log_ad.execute_capability("logging.query_lb_requests", {})
+    res_lb = await log_ad.execute_capability("logging.query_lb_requests", {"window_s": 300})
     assert isinstance(res_lb, list)
+    assert len(res_lb) >= 2
+    assert res_lb[0]["jsonPayload"]["statusDetails"] == "response_from_backend"
+    assert res_lb[0]["jsonPayload"]["enforcedSecurityPolicy"]["name"] == "edge-security-policy"
+    assert res_lb[1]["jsonPayload"]["statusDetails"] == "denied_by_security_policy"
+    assert res_lb[1]["jsonPayload"]["enforcedSecurityPolicy"]["outcome"] == "DENY"
 
     # 8. logging.query
-    res_log = await log_ad.execute_capability("logging.query", {"filter": "severity>=ERROR"})
+    res_log = await log_ad.execute_capability("logging.query", {"filter": "severity>=ERROR", "window_s": 300})
     assert isinstance(res_log, list)
 
-    # 9. monitoring.query_timeseries
+    # 9. monitoring.query_timeseries requires metric.type and includes interval
     mon_ad = CloudMonitoringAdapter(fixtures=gcp_fixtures)
-    res_mon = await mon_ad.execute_capability("monitoring.query_timeseries", {})
+    with pytest.raises(ValueError, match="metric.type"):
+        await mon_ad.execute_capability("monitoring.query_timeseries", {"filter": 'resource.type="gce_instance"'})
+
+    res_mon = await mon_ad.execute_capability(
+        "monitoring.query_timeseries",
+        {"filter": 'metric.type="compute.googleapis.com/instance/cpu/utilization"', "window_s": 300},
+    )
     assert isinstance(res_mon, list)
 
-    # 10. http.probe
+    # 10. http.probe returns json and body
     http_ad = HttpProbeAdapter(fixtures=gcp_fixtures)
     res_probe = await http_ad.execute_capability("http.probe", {"url": "https://service-a.run.app/healthz"})
     assert res_probe["ok"] is True
+    assert "json" in res_probe
+    assert "body" in res_probe

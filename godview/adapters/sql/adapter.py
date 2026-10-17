@@ -24,7 +24,12 @@ from datetime import UTC, datetime
 from typing import Any, Literal, Protocol, runtime_checkable
 from urllib.parse import urlparse, urlunparse
 
-import psycopg
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+except ImportError:
+    psycopg = None  # type: ignore[assignment]
+    dict_row = None  # type: ignore[assignment]
 from godview_shared.adapter_contract import (
     AdapterHealth,
     DiscoveryResult,
@@ -44,7 +49,8 @@ from godview_shared.contracts import (
     TrustDecision,
     TrustViolation,
 )
-from psycopg.rows import dict_row
+
+_PsycopgError: type[Exception] = getattr(psycopg, "Error", Exception) if psycopg is not None else Exception
 
 
 class ReadOnlyViolationError(ValueError):
@@ -316,7 +322,7 @@ class PostgresSenseAdapter(SenseAdapter):
         act_source: str | None = None,
         instance_name: str = "postgres",
         instance_labels: Mapping[str, str] | None = None,
-        env_id: str = "local-compose",
+        env_id: str = "sql-cluster",
         toolbox_client: McpToolClientProtocol | None = None,
         act_toolbox_client: McpToolClientProtocol | None = None,
         driver: SqlDriverProtocol | None = None,
@@ -457,7 +463,7 @@ class PostgresSenseAdapter(SenseAdapter):
 
         try:
             readiness = await self.check_logical_decoding_readiness()
-        except (ConnectionError, OSError, psycopg.Error, RuntimeError, ValueError) as exc:
+        except (ConnectionError, OSError, _PsycopgError, RuntimeError, ValueError) as exc:
             return AdapterHealth(
                 adapter_name=self.name,
                 family=self.family,

@@ -106,10 +106,12 @@ class CloudEdgeAdapter(SenseAdapter):
                 data = resp.json()
                 raw_items = data.get(items_key, [])
                 if isinstance(raw_items, dict):
-                    # aggregatedList style: map of region/zone -> list of items
+                    # aggregatedList format: zone/region -> subdict
                     for sub in raw_items.values():
-                        if isinstance(sub, dict) and "instances" in sub:
-                            results.extend(sub.get("instances", []))
+                        if isinstance(sub, dict):
+                            for v in sub.values():
+                                if isinstance(v, list):
+                                    results.extend(v)
                         elif isinstance(sub, list):
                             results.extend(sub)
                 elif isinstance(raw_items, list):
@@ -120,20 +122,36 @@ class CloudEdgeAdapter(SenseAdapter):
         return results
 
     async def _fetch_forwarding_rules(self) -> list[dict[str, Any]]:
-        url = f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/global/forwardingRules"
-        return await self._fetch_paginated(url, "items")
+        agg_url = f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/aggregated/forwardingRules"
+        try:
+            return await self._fetch_paginated(agg_url, "items")
+        except Exception:
+            global_url = f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/global/forwardingRules"
+            return await self._fetch_paginated(global_url, "items")
 
     async def _fetch_url_maps(self) -> list[dict[str, Any]]:
-        url = f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/global/urlMaps"
-        return await self._fetch_paginated(url, "items")
+        agg_url = f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/aggregated/urlMaps"
+        try:
+            return await self._fetch_paginated(agg_url, "items")
+        except Exception:
+            global_url = f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/global/urlMaps"
+            return await self._fetch_paginated(global_url, "items")
 
     async def _fetch_backend_services(self) -> list[dict[str, Any]]:
-        url = f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/global/backendServices"
-        return await self._fetch_paginated(url, "items")
+        agg_url = f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/aggregated/backendServices"
+        try:
+            return await self._fetch_paginated(agg_url, "items")
+        except Exception:
+            global_url = f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/global/backendServices"
+            return await self._fetch_paginated(global_url, "items")
 
     async def _fetch_security_policies(self) -> list[dict[str, Any]]:
-        url = f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/global/securityPolicies"
-        return await self._fetch_paginated(url, "items")
+        agg_url = f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/aggregated/securityPolicies"
+        try:
+            return await self._fetch_paginated(agg_url, "items")
+        except Exception:
+            global_url = f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/global/securityPolicies"
+            return await self._fetch_paginated(global_url, "items")
 
     def senses(self) -> list[SenseCategory]:
         return [SenseCategory.CHANGE_PLANE, SenseCategory.SCOPED_OBSERVABILITY]
@@ -169,18 +187,30 @@ class CloudEdgeAdapter(SenseAdapter):
         )
 
     async def discover(self) -> DiscoveryResult:
+        errors: dict[str, str] = {}
         try:
             forwarding_rules = await self._fetch_forwarding_rules()
+        except Exception as exc:
+            forwarding_rules = []
+            errors["forwarding_rules"] = str(exc)
+
+        try:
             url_maps = await self._fetch_url_maps()
+        except Exception as exc:
+            url_maps = []
+            errors["url_maps"] = str(exc)
+
+        try:
             backend_services = await self._fetch_backend_services()
+        except Exception as exc:
+            backend_services = []
+            errors["backend_services"] = str(exc)
+
+        try:
             security_policies = await self._fetch_security_policies()
         except Exception as exc:
-            return DiscoveryResult(
-                services=[],
-                edges=[],
-                entities=[],
-                evidence={"error": str(exc), "state": "unavailable"},
-            )
+            security_policies = []
+            errors["security_policies"] = str(exc)
 
         now_iso = datetime.now(tz=UTC).isoformat()
         services: list[DiscoveredServiceDoc] = []
@@ -268,7 +298,14 @@ class CloudEdgeAdapter(SenseAdapter):
                         break
 
             bs_doc_id = f"{self.env_id}__backend_service.{bs_name}"
-            is_observer = is_resource_excluded(bs_name)
+            bs_labels = dict(bs.get("labels") or {})
+            is_observer = (
+                bs_labels.get("godview_role") == "observer"
+                or is_resource_excluded(bs_name, bs_labels)
+            )
+            labels = dict(bs_labels)
+            if is_observer:
+                labels["godview_role"] = "observer"
             services.append(
                 DiscoveredServiceDoc(
                     doc_id=bs_doc_id,
@@ -277,7 +314,7 @@ class CloudEdgeAdapter(SenseAdapter):
                     kind="backend_service",
                     adapter_family="gcp",
                     locator=f"compute://backendServices/{bs_name}",
-                    labels={"observer": "true"} if is_observer else {},
+                    labels=labels,
                     posture=Posture(
                         iap=iap_enabled,
                         waf=waf_val,
