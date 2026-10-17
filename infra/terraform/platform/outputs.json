@@ -1,0 +1,266 @@
+{
+  "act_sa_email": {
+    "sensitive": false,
+    "type": "string",
+    "value": "godview-act-sa@general-ak.iam.gserviceaccount.com"
+  },
+  "api_gateway_hostname": {
+    "sensitive": false,
+    "type": "string",
+    "value": "god-view-loan-api-gw-9t9witd8.uc.gateway.dev"
+  },
+  "apigw_sa_email": {
+    "sensitive": false,
+    "type": "string",
+    "value": "godview-apigw-sa@general-ak.iam.gserviceaccount.com"
+  },
+  "artifact_registry_url": {
+    "sensitive": false,
+    "type": "string",
+    "value": "us-central1-docker.pkg.dev/general-ak/god-view-containers"
+  },
+  "bucket_names": {
+    "sensitive": false,
+    "type": [
+      "object",
+      {
+        "agent_skills": "string",
+        "agent_staging": "string",
+        "cdn_assets": "string",
+        "kyc_vault": "string",
+        "tfstate": "string"
+      }
+    ],
+    "value": {
+      "agent_skills": "general-ak-god-view-agent-skills",
+      "agent_staging": "general-ak-god-view-agent-staging",
+      "cdn_assets": "general-ak-god-view-cdn-assets",
+      "kyc_vault": "general-ak-god-view-kyc-vault",
+      "tfstate": "general-ak-god-view-tfstate"
+    }
+  },
+  "cbs_vm_internal_ip": {
+    "sensitive": false,
+    "type": "string",
+    "value": "10.10.0.5"
+  },
+  "cloud_armor_policy_name": {
+    "sensitive": false,
+    "type": "string",
+    "value": "god-view-edge-policy"
+  },
+  "deploy_sa_email": {
+    "sensitive": false,
+    "type": "string",
+    "value": "godview-deploy-sa@general-ak.iam.gserviceaccount.com"
+  },
+  "firestore_db_name": {
+    "sensitive": false,
+    "type": "string",
+    "value": "god-view-memory-db"
+  },
+  "gke_cluster_name": {
+    "sensitive": false,
+    "type": "string",
+    "value": "god-view-gke-cluster"
+  },
+  "gke_dns_endpoint": {
+    "sensitive": false,
+    "type": "string",
+    "value": "gke-00dca33da82641e7a02cb81ed031de9e7418-769002985772.us-central1.gke.goog"
+  },
+  "gke_endpoint": {
+    "sensitive": false,
+    "type": "string",
+    "value": "35.232.94.232"
+  },
+  "hibernate_job_name": {
+    "sensitive": false,
+    "type": "string",
+    "value": "god-view-hibernate-job"
+  },
+  "ilb_addresses": {
+    "sensitive": false,
+    "type": [
+      "object",
+      {
+        "kyc": "string",
+        "kyc_address_name": "string",
+        "kyc_ip": "string",
+        "kyc_name": "string",
+        "los": "string",
+        "los_address_name": "string",
+        "los_ip": "string",
+        "los_name": "string"
+      }
+    ],
+    "value": {
+      "kyc": "10.10.0.3",
+      "kyc_address_name": "god-view-kyc-ilb-ip",
+      "kyc_ip": "10.10.0.3",
+      "kyc_name": "god-view-kyc-ilb-ip",
+      "los": "10.10.0.2",
+      "los_address_name": "god-view-los-ilb-ip",
+      "los_ip": "10.10.0.2",
+      "los_name": "god-view-los-ilb-ip"
+    }
+  },
+  "kyc_ilb_address": {
+    "sensitive": false,
+    "type": "string",
+    "value": "10.10.0.3"
+  },
+  "kyc_ilb_address_name": {
+    "sensitive": false,
+    "type": "string",
+    "value": "god-view-kyc-ilb-ip"
+  },
+  "lb_ip_address": {
+    "sensitive": false,
+    "type": "string",
+    "value": "35.244.128.165"
+  },
+  "ledger_dataset_id": {
+    "sensitive": false,
+    "type": "string",
+    "value": "godview_ledger"
+  },
+  "los_ilb_address": {
+    "sensitive": false,
+    "type": "string",
+    "value": "10.10.0.2"
+  },
+  "los_ilb_address_name": {
+    "sensitive": false,
+    "type": "string",
+    "value": "god-view-los-ilb-ip"
+  },
+  "model_armor_template_id": {
+    "sensitive": false,
+    "type": "string",
+    "value": "projects/general-ak/locations/us-central1/templates/cymbal-text-guard"
+  },
+  "nervous_system_dlq_topic": {
+    "sensitive": false,
+    "type": "string",
+    "value": "godview-nervous-system-dlq"
+  },
+  "nervous_system_topic": {
+    "sensitive": false,
+    "type": "string",
+    "value": "godview-nervous-system"
+  },
+  "network_id": {
+    "sensitive": false,
+    "type": "string",
+    "value": "projects/general-ak/global/networks/god-view-vpc"
+  },
+  "project_id": {
+    "sensitive": false,
+    "type": "string",
+    "value": "general-ak"
+  },
+  "psa_cidr": {
+    "sensitive": false,
+    "type": "string",
+    "value": "10.186.0.0/16"
+  },
+  "psa_range": {
+    "sensitive": false,
+    "type": "string",
+    "value": "10.186.0.0/16"
+  },
+  "psa_range_cidr": {
+    "sensitive": false,
+    "type": "string",
+    "value": "10.186.0.0/16"
+  },
+  "region": {
+    "sensitive": false,
+    "type": "string",
+    "value": "us-central1"
+  },
+  "runtime_sa_email": {
+    "sensitive": false,
+    "type": "string",
+    "value": "godview-runtime-sa@general-ak.iam.gserviceaccount.com"
+  },
+  "secret_ids": {
+    "sensitive": false,
+    "type": [
+      "object",
+      {
+        "cymbal_pg_app_password": "string",
+        "godview_github_app_key": "string",
+        "godview_github_webhook_secret": "string"
+      }
+    ],
+    "value": {
+      "cymbal_pg_app_password": "cymbal-pg-app-password",
+      "godview_github_app_key": "godview-github-app-key",
+      "godview_github_webhook_secret": "godview-github-webhook-secret"
+    }
+  },
+  "sense_sa_email": {
+    "sensitive": false,
+    "type": "string",
+    "value": "godview-sense-sa@general-ak.iam.gserviceaccount.com"
+  },
+  "sovereign_service_url": {
+    "sensitive": false,
+    "type": "string",
+    "value": "https://god-view-sovereign-mcj3w7ujpq-uc.a.run.app"
+  },
+  "sql_connection_name": {
+    "sensitive": false,
+    "type": "string",
+    "value": "general-ak:us-central1:god-view-pg"
+  },
+  "sql_private_ip": {
+    "sensitive": false,
+    "type": "string",
+    "value": "10.186.0.3"
+  },
+  "sre_web_service_url": {
+    "sensitive": false,
+    "type": "string",
+    "value": "https://god-view-sre-web-mcj3w7ujpq-uc.a.run.app"
+  },
+  "subnet_cidr": {
+    "sensitive": false,
+    "type": "string",
+    "value": "10.10.0.0/20"
+  },
+  "subnet_id": {
+    "sensitive": false,
+    "type": "string",
+    "value": "projects/general-ak/regions/us-central1/subnetworks/god-view-subnet"
+  },
+  "tenant_service_urls": {
+    "sensitive": false,
+    "type": [
+      "object",
+      {
+        "ai_customer_simulator": "string",
+        "commercial_fleet_credit_svc": "string",
+        "customer_loan_portal_web": "string",
+        "internal_bank_los_web": "string",
+        "loan_orchestrator_api": "string",
+        "motor_insurance_svc": "string"
+      }
+    ],
+    "value": {
+      "ai_customer_simulator": "https://ai-customer-simulator-mcj3w7ujpq-uc.a.run.app",
+      "commercial_fleet_credit_svc": "https://commercial-fleet-credit-svc-mcj3w7ujpq-uc.a.run.app",
+      "customer_loan_portal_web": "https://customer-loan-portal-web-mcj3w7ujpq-uc.a.run.app",
+      "internal_bank_los_web": "https://internal-bank-los-web-mcj3w7ujpq-uc.a.run.app",
+      "loan_orchestrator_api": "https://loan-orchestrator-api-mcj3w7ujpq-uc.a.run.app",
+      "motor_insurance_svc": "https://motor-insurance-svc-mcj3w7ujpq-uc.a.run.app"
+    }
+  },
+  "wif_provider_name": {
+    "sensitive": false,
+    "type": "string",
+    "value": "projects/769002985772/locations/global/workloadIdentityPools/github-pool/providers/github-provider"
+  }
+}

@@ -1,0 +1,223 @@
+name: services-ci-cd
+
+on:
+  pull_request:
+    paths:
+      - "shared/**"
+      - "cymbal/**"
+      - "godview/**"
+      - ".github/workflows/services-ci-cd.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "shared/**"
+      - "cymbal/**"
+      - "godview/**"
+
+permissions:
+  id-token: write
+  contents: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: services-ci-cd-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID || 'general-ak' }}
+  GCP_REGION: ${{ vars.GCP_REGION || 'us-central1' }}
+  REGISTRY_PREFIX: "us-central1-docker.pkg.dev/general-ak/god-view-containers"
+  GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER || 'projects/769002985772/locations/global/workloadIdentityPools/github-pool/providers/github-provider' }}
+  GCP_DEPLOY_SA: ${{ vars.GCP_DEPLOY_SA || 'godview-deploy-sa@general-ak.iam.gserviceaccount.com' }}
+  TF_VAR_github_repository: ${{ vars.TF_VAR_github_repository || github.repository }}
+
+jobs:
+  quality-gates:
+    name: L1 Hermetic Unit, L2 Contract & Invariant Lints
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv and Python 3.13
+        uses: astral-sh/setup-uv@v4
+        with:
+          python-version: "3.13"
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Python dependencies
+        run: |
+          uv venv .venv
+          uv pip install --python .venv/bin/python pytest pytest-asyncio httpx pyyaml ruff fastapi uvicorn pydantic
+          if [ -f shared/pyproject.toml ]; then
+            uv pip install --python .venv/bin/python -e "./shared[dev]"
+          fi
+          for pkg in cymbal/services/*/pyproject.toml godview/pyproject.toml; do
+            if [ -f "$pkg" ]; then
+              uv pip install --python .venv/bin/python -e "$(dirname "$pkg")"
+            fi
+          done
+
+      - name: Install and build frontends
+        run: |
+          for dir in cymbal/frontends/customer-loan-portal-web cymbal/frontends/internal-bank-los-web godview/god-view-sre-web; do
+            if [ -f "$dir/package.json" ]; then
+              (cd "$dir" && npm ci && npm run build)
+            fi
+          done
+
+      - name: Run Brand & Neutrality Lints
+        run: |
+          make lint-brands
+          make lint-neutrality
+
+      - name: Run L1 Unit Tests & L2 Contract Tests
+        run: |
+          make test-unit
+          make test-contract
+
+  build-and-push:
+    name: Build & Push Container (${{ matrix.service.name }})
+    needs: quality-gates
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - { name: "loan-orchestrator-api", context: "cymbal/services/loan-orchestrator-api", root: "platform" }
+          - { name: "kyc-model-armor-svc", context: "cymbal/services/kyc-model-armor-svc", root: "workloads" }
+          - { name: "underwriting-los-svc", context: "cymbal/services/underwriting-los-svc", root: "workloads" }
+          - { name: "commercial-fleet-credit-svc", context: "cymbal/services/commercial-fleet-credit-svc", root: "platform" }
+          - { name: "motor-insurance-svc", context: "cymbal/services/motor-insurance-svc", root: "platform" }
+          - { name: "core-banking-cibil-vm", context: "cymbal/services/core-banking-cibil-vm", root: "platform" }
+          - { name: "ai-customer-simulator", context: "cymbal/services/ai-customer-simulator", root: "platform" }
+          - { name: "customer-loan-portal-web", context: "cymbal/frontends/customer-loan-portal-web", root: "platform" }
+          - { name: "internal-bank-los-web", context: "cymbal/frontends/internal-bank-los-web", root: "platform" }
+          - { name: "god-view-sovereign", context: ".", dockerfile: "godview/sovereign/Dockerfile", root: "platform" }
+          - { name: "god-view-sre-web", context: "godview/god-view-sre-web", root: "platform" }
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud via Workload Identity Federation
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_DEPLOY_SA }}
+          token_format: access_token
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+
+      - name: Build and push image
+        env:
+          MATRIX_SERVICE_NAME: ${{ matrix.service.name }}
+          MATRIX_CONTEXT: ${{ matrix.service.context }}
+          MATRIX_DOCKERFILE: ${{ matrix.service.dockerfile }}
+          GIT_SHA: ${{ github.sha }}
+        run: |
+          IMAGE_TAG="${REGISTRY_PREFIX}/${MATRIX_SERVICE_NAME}:${GIT_SHA}"
+          DOCKERFILE_PATH="${MATRIX_DOCKERFILE:-${MATRIX_CONTEXT}/Dockerfile}"
+          docker build -f "${DOCKERFILE_PATH}" -t "${IMAGE_TAG}" "${MATRIX_CONTEXT}"
+          docker push "${IMAGE_TAG}"
+
+  pin-images-tfvars:
+    name: Pin Image Digests in images.auto.tfvars & Dispatch Reconcile
+    needs: build-and-push
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Authenticate to Google Cloud via Workload Identity Federation
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_DEPLOY_SA }}
+          token_format: access_token
+
+      - name: Resolve sha256 digests and update platform/workloads images.auto.tfvars
+        env:
+          GIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          resolve_digest_ref() {
+            local svc="$1"
+            local tag="${REGISTRY_PREFIX}/${svc}:${GIT_SHA}"
+            local digest
+            digest="$(gcloud artifacts docker images describe "${tag}" --format='value(image_summary.digest)')"
+            if [[ -z "${digest}" || "${digest}" != sha256:* ]]; then
+              echo "ERROR: failed to resolve sha256 digest for ${tag} (got '${digest}')" >&2
+              exit 1
+            fi
+            printf '%s/%s@%s' "${REGISTRY_PREFIX}" "${svc}" "${digest}"
+          }
+
+          KYC_REF="$(resolve_digest_ref kyc-model-armor-svc)"
+          LOS_REF="$(resolve_digest_ref underwriting-los-svc)"
+          ORCH_REF="$(resolve_digest_ref loan-orchestrator-api)"
+          FLEET_REF="$(resolve_digest_ref commercial-fleet-credit-svc)"
+          INS_REF="$(resolve_digest_ref motor-insurance-svc)"
+          CBS_REF="$(resolve_digest_ref core-banking-cibil-vm)"
+          SIM_REF="$(resolve_digest_ref ai-customer-simulator)"
+          PORTAL_REF="$(resolve_digest_ref customer-loan-portal-web)"
+          LOS_WEB_REF="$(resolve_digest_ref internal-bank-los-web)"
+          SOV_REF="$(resolve_digest_ref god-view-sovereign)"
+          SRE_WEB_REF="$(resolve_digest_ref god-view-sre-web)"
+
+          cat > infra/terraform/workloads/images.auto.tfvars <<EOF
+          images = {
+            "kyc-model-armor-svc"  = "${KYC_REF}"
+            "underwriting-los-svc" = "${LOS_REF}"
+          }
+          EOF
+
+          cat > infra/terraform/platform/images.auto.tfvars <<EOF
+          images = {
+            "loan-orchestrator-api"       = "${ORCH_REF}"
+            "commercial-fleet-credit-svc" = "${FLEET_REF}"
+            "motor-insurance-svc"         = "${INS_REF}"
+            "core-banking-cibil-vm"       = "${CBS_REF}"
+            "ai-customer-simulator"       = "${SIM_REF}"
+            "customer-loan-portal-web"    = "${PORTAL_REF}"
+            "internal-bank-los-web"       = "${LOS_WEB_REF}"
+            "god-view-sovereign"          = "${SOV_REF}"
+            "god-view-sre-web"            = "${SRE_WEB_REF}"
+          }
+          EOF
+
+          [ "$(grep -c '@sha256:' infra/terraform/workloads/images.auto.tfvars)" -eq 2 ] || {
+            echo "ERROR: workloads images.auto.tfvars missing @sha256: digests" >&2
+            exit 1
+          }
+          [ "$(grep -c '@sha256:' infra/terraform/platform/images.auto.tfvars)" -eq 9 ] || {
+            echo "ERROR: platform images.auto.tfvars missing @sha256: digests" >&2
+            exit 1
+          }
+
+      - name: Commit, push pinned image digests, and dispatch Terraform workflows
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GIT_SHA: ${{ github.sha }}
+        run: |
+          git config user.name "god-view-ci-bot"
+          git config user.email "godview-deploy-sa@general-ak.iam.gserviceaccount.com"
+          git add infra/terraform/workloads/images.auto.tfvars infra/terraform/platform/images.auto.tfvars
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(ci): pin container image digests for ${GIT_SHA}"
+            git push origin HEAD:main
+            gh workflow run terraform-platform.yml --ref main \
+              -f reason="Automated image digest pin from services-ci-cd (${GIT_SHA})"
+            gh workflow run terraform-workloads.yml --ref main \
+              -f reason="Automated image digest pin from services-ci-cd (${GIT_SHA})"
+          fi

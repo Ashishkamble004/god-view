@@ -1,0 +1,688 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Cymbal Auto Finance \u2014 Core Banking & CIBIL VM Service (Utility 5)",
+    "description": "Credit bureau CIBIL pull (300-900), sanction letter, NACH e-Mandate, and idempotent CBS UTR settlement on GCE VM port 8085.",
+    "version": "4.0.0"
+  },
+  "paths": {
+    "/healthz": {
+      "get": {
+        "summary": "Healthz",
+        "operationId": "healthz_healthz_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Healthz Healthz Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "summary": "Metrics",
+        "operationId": "metrics_metrics_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/cibil-cbs/score": {
+      "post": {
+        "summary": "Evaluate Cibil Score",
+        "operationId": "evaluate_cibil_score_internal_cibil_cbs_score_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScoreRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScoreResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/cibil-cbs/disburse": {
+      "post": {
+        "summary": "Disburse Loan",
+        "operationId": "disburse_loan_internal_cibil_cbs_disburse_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DisburseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DisburseResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/cibil-cbs/score-and-disburse": {
+      "post": {
+        "summary": "Score And Disburse Loan",
+        "operationId": "score_and_disburse_loan_internal_cibil_cbs_score_and_disburse_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DisburseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DisburseResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/cibil-cbs/disbursements": {
+      "get": {
+        "summary": "List Disbursements",
+        "operationId": "list_disbursements_internal_cibil_cbs_disbursements_get",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response List Disbursements Internal Cibil Cbs Disbursements Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/cibil-cbs/disbursements/{loan_id}": {
+      "get": {
+        "summary": "Get Disbursement",
+        "operationId": "get_disbursement_internal_cibil_cbs_disbursements__loan_id__get",
+        "parameters": [
+          {
+            "name": "loan_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Loan Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "DisburseRequest": {
+        "properties": {
+          "loan_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Loan Id"
+          },
+          "customer_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Customer Id"
+          },
+          "journey_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Journey Id"
+          },
+          "pan_number": {
+            "type": "string",
+            "title": "Pan Number",
+            "default": "ABCDE1234F"
+          },
+          "persona_seed": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Persona Seed"
+          },
+          "disbursed_amount_inr": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$"
+              }
+            ],
+            "title": "Disbursed Amount Inr",
+            "default": "500000.00"
+          },
+          "dealer_account_no": {
+            "type": "string",
+            "title": "Dealer Account No",
+            "default": "CYMBAL-DLR-0001"
+          },
+          "disburse": {
+            "type": "boolean",
+            "title": "Disburse",
+            "default": true
+          },
+          "is_replay": {
+            "type": "boolean",
+            "title": "Is Replay",
+            "default": false
+          },
+          "target_status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DisbursementStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cibil_stub_900": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cibil Stub 900"
+          },
+          "gce_vm_latency_504": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gce Vm Latency 504"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "loan_id"
+        ],
+        "title": "DisburseRequest"
+      },
+      "DisburseResponse": {
+        "properties": {
+          "disbursement_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Disbursement Id"
+          },
+          "loan_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Loan Id"
+          },
+          "sanction_letter_no": {
+            "type": "string",
+            "title": "Sanction Letter No"
+          },
+          "cbs_utr_number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cbs Utr Number"
+          },
+          "nach_mandate_id": {
+            "type": "string",
+            "title": "Nach Mandate Id"
+          },
+          "disbursed_amount_inr": {
+            "type": "string",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Disbursed Amount Inr"
+          },
+          "dealer_account_no": {
+            "type": "string",
+            "title": "Dealer Account No"
+          },
+          "status": {
+            "$ref": "#/components/schemas/DisbursementStatus"
+          },
+          "attempts": {
+            "type": "integer",
+            "title": "Attempts"
+          },
+          "replay_of": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replay Of"
+          },
+          "disbursed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Disbursed At"
+          },
+          "cibil_score": {
+            "type": "integer",
+            "maximum": 900.0,
+            "minimum": 300.0,
+            "title": "Cibil Score"
+          },
+          "cibil_bureau_ref": {
+            "type": "string",
+            "title": "Cibil Bureau Ref"
+          },
+          "gce_vm_name": {
+            "type": "string",
+            "title": "Gce Vm Name"
+          },
+          "idempotent_replay": {
+            "type": "boolean",
+            "title": "Idempotent Replay",
+            "default": false
+          },
+          "event_type": {
+            "type": "string",
+            "title": "Event Type",
+            "default": "disbursement.settled"
+          }
+        },
+        "type": "object",
+        "required": [
+          "disbursement_id",
+          "loan_id",
+          "sanction_letter_no",
+          "nach_mandate_id",
+          "disbursed_amount_inr",
+          "dealer_account_no",
+          "status",
+          "attempts",
+          "cibil_score",
+          "cibil_bureau_ref",
+          "gce_vm_name"
+        ],
+        "title": "DisburseResponse"
+      },
+      "DisbursementStatus": {
+        "type": "string",
+        "enum": [
+          "PENDING",
+          "DISBURSED",
+          "FAILED",
+          "REPLAYED"
+        ],
+        "title": "DisbursementStatus"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "ScoreRequest": {
+        "properties": {
+          "pan_number": {
+            "type": "string",
+            "maxLength": 32,
+            "minLength": 5,
+            "title": "Pan Number",
+            "default": "ABCDE1234F"
+          },
+          "persona_seed": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Persona Seed"
+          },
+          "customer_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Customer Id"
+          },
+          "loan_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "uuid"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Loan Id"
+          },
+          "journey_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Journey Id"
+          },
+          "cibil_stub_900": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cibil Stub 900"
+          },
+          "gce_vm_latency_504": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gce Vm Latency 504"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "title": "ScoreRequest"
+      },
+      "ScoreResponse": {
+        "properties": {
+          "cibil_score": {
+            "type": "integer",
+            "maximum": 900.0,
+            "minimum": 300.0,
+            "title": "Cibil Score"
+          },
+          "cibil_bureau_ref": {
+            "type": "string",
+            "title": "Cibil Bureau Ref"
+          },
+          "gce_vm_name": {
+            "type": "string",
+            "title": "Gce Vm Name"
+          },
+          "pan_number": {
+            "type": "string",
+            "title": "Pan Number"
+          },
+          "event_type": {
+            "type": "string",
+            "title": "Event Type",
+            "default": "cibil.scored"
+          }
+        },
+        "type": "object",
+        "required": [
+          "cibil_score",
+          "cibil_bureau_ref",
+          "gce_vm_name",
+          "pan_number"
+        ],
+        "title": "ScoreResponse"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    }
+  }
+}

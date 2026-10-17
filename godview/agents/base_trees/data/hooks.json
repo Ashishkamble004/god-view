@@ -1,0 +1,30 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "sql.*",
+        "commands": [
+          "python3 scripts/check_prompt_drift_cusum.py"
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "commands": [
+          "python3 scripts/check_prompt_drift_cusum.py",
+          "python3 scripts/check_cibil_score_offsets.py"
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "*",
+        "commands": [
+          "python3 scripts/check_prompt_drift_cusum.py",
+          "python3 scripts/check_cibil_score_offsets.py"
+        ]
+      }
+    ]
+  }
+}

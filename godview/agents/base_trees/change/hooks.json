@@ -1,0 +1,30 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "git.*",
+        "commands": [
+          "python3 scripts/check_commit_regression.py"
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "commands": [
+          "python3 scripts/check_commit_regression.py",
+          "python3 scripts/check_cibil_score_offsets.py"
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "*",
+        "commands": [
+          "python3 scripts/check_commit_regression.py",
+          "python3 scripts/check_cibil_score_offsets.py"
+        ]
+      }
+    ]
+  }
+}

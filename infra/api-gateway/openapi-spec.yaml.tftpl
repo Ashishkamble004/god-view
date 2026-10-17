@@ -1,0 +1,250 @@
+swagger: "2.0"
+info:
+  title: Cymbal Auto Finance Loan Orchestrator Gateway API
+  description: Public and same-origin edge API for Cymbal Auto Finance vehicle loan journeys.
+  version: "4.0.0"
+schemes:
+  - https
+produces:
+  - application/json
+consumes:
+  - application/json
+x-google-backend:
+  address: ${orchestrator_uri}
+  path_translation: APPEND_PATH_TO_ADDRESS
+  deadline: 60.0
+paths:
+  /v1/vehicles:
+    get:
+      operationId: listVehiclesV1
+      summary: List vehicle catalog with CDN media URLs
+      x-godview-probe-safe: true
+      responses:
+        "200":
+          description: Vehicle catalog list
+  /api/v1/vehicles:
+    get:
+      operationId: listVehiclesApiV1
+      summary: List vehicle catalog with CDN media URLs (same-origin)
+      x-godview-probe-safe: true
+      responses:
+        "200":
+          description: Vehicle catalog list
+
+  /v1/loans/apply:
+    post:
+      operationId: applyLoanV1
+      summary: Start a vehicle finance loan origination journey
+      parameters:
+        - in: body
+          name: body
+          required: true
+          schema:
+            type: object
+      responses:
+        "200":
+          description: Journey initiated
+        "503":
+          description: Tenant paused
+  /api/v1/loans/apply:
+    post:
+      operationId: applyLoanApiV1
+      summary: Start a vehicle finance loan origination journey (same-origin)
+      parameters:
+        - in: body
+          name: body
+          required: true
+          schema:
+            type: object
+      responses:
+        "200":
+          description: Journey initiated
+        "503":
+          description: Tenant paused
+
+  /v1/loans:
+    get:
+      operationId: listLoansV1
+      summary: List loan applications and journey states
+      parameters:
+        - in: query
+          name: status
+          type: string
+          required: false
+        - in: query
+          name: limit
+          type: integer
+          required: false
+      responses:
+        "200":
+          description: Paginated list of loan applications
+  /api/v1/loans:
+    get:
+      operationId: listLoansApiV1
+      summary: List loan applications and journey states (same-origin)
+      parameters:
+        - in: query
+          name: status
+          type: string
+          required: false
+        - in: query
+          name: limit
+          type: integer
+          required: false
+      responses:
+        "200":
+          description: Paginated list of loan applications
+
+  /v1/loans/{loan_id}:
+    get:
+      operationId: getLoanV1
+      summary: Get single loan application and journey state
+      parameters:
+        - in: path
+          name: loan_id
+          type: string
+          required: true
+      responses:
+        "200":
+          description: Loan application detail
+        "404":
+          description: Loan not found
+  /api/v1/loans/{loan_id}:
+    get:
+      operationId: getLoanApiV1
+      summary: Get single loan application and journey state (same-origin)
+      parameters:
+        - in: path
+          name: loan_id
+          type: string
+          required: true
+      responses:
+        "200":
+          description: Loan application detail
+        "404":
+          description: Loan not found
+
+  /v1/kyc-documents/{customer_id}/{doc_type}:
+    get:
+      operationId: getKycDocumentV1
+      summary: Get signed URL for specimen KYC card
+      parameters:
+        - in: path
+          name: customer_id
+          type: string
+          required: true
+        - in: path
+          name: doc_type
+          type: string
+          required: true
+          enum: [pan, aadhaar]
+      responses:
+        "200":
+          description: Signed URL metadata
+        "404":
+          description: Specimen image not available for TEXT_ONLY journey
+  /api/v1/kyc-documents/{customer_id}/{doc_type}:
+    get:
+      operationId: getKycDocumentApiV1
+      summary: Get signed URL for specimen KYC card (same-origin)
+      parameters:
+        - in: path
+          name: customer_id
+          type: string
+          required: true
+        - in: path
+          name: doc_type
+          type: string
+          required: true
+          enum: [pan, aadhaar]
+      responses:
+        "200":
+          description: Signed URL metadata
+        "404":
+          description: Specimen image not available for TEXT_ONLY journey
+
+  /v1/observability/topology:
+    get:
+      operationId: getObservabilityTopologyV1
+      summary: Read-only tenant service topology view
+      x-godview-probe-safe: true
+      responses:
+        "200":
+          description: Topology graph
+  /api/v1/observability/topology:
+    get:
+      operationId: getObservabilityTopologyApiV1
+      summary: Read-only tenant service topology view (same-origin)
+      x-godview-probe-safe: true
+      responses:
+        "200":
+          description: Topology graph
+
+  /v1/observability/traces/{trace_id}:
+    get:
+      operationId: getObservabilityTraceV1
+      summary: Read-only tenant trace detail view
+      parameters:
+        - in: path
+          name: trace_id
+          type: string
+          required: true
+      responses:
+        "200":
+          description: Trace spans
+  /api/v1/observability/traces/{trace_id}:
+    get:
+      operationId: getObservabilityTraceApiV1
+      summary: Read-only tenant trace detail view (same-origin)
+      parameters:
+        - in: path
+          name: trace_id
+          type: string
+          required: true
+      responses:
+        "200":
+          description: Trace spans
+
+  /v1/telemetry/stream:
+    get:
+      operationId: streamTelemetryV1
+      summary: Server-Sent Events stream of live journey step events
+      produces:
+        - text/event-stream
+      x-google-backend:
+        address: ${orchestrator_uri}
+        path_translation: APPEND_PATH_TO_ADDRESS
+        deadline: 300.0
+      responses:
+        "200":
+          description: SSE event stream
+  /api/v1/telemetry/stream:
+    get:
+      operationId: streamTelemetryApiV1
+      summary: Server-Sent Events stream of live journey step events (same-origin)
+      produces:
+        - text/event-stream
+      x-google-backend:
+        address: ${orchestrator_uri}
+        path_translation: APPEND_PATH_TO_ADDRESS
+        deadline: 300.0
+      responses:
+        "200":
+          description: SSE event stream
+
+  /v1/me:
+    get:
+      operationId: getCurrentIdentityV1
+      summary: Return caller identity from IAP headers
+      x-godview-probe-safe: true
+      responses:
+        "200":
+          description: Caller identity
+  /api/v1/me:
+    get:
+      operationId: getCurrentIdentityApiV1
+      summary: Return caller identity from IAP headers (same-origin)
+      x-godview-probe-safe: true
+      responses:
+        "200":
+          description: Caller identity

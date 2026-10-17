@@ -1,0 +1,15 @@
+[
+  {"name": "transition_id", "type": "STRING", "mode": "REQUIRED"},
+  {"name": "transition_time", "type": "TIMESTAMP", "mode": "REQUIRED"},
+  {"name": "env_id", "type": "STRING", "mode": "REQUIRED"},
+  {"name": "entity", "type": "STRING", "mode": "REQUIRED"},
+  {"name": "entity_id", "type": "STRING", "mode": "REQUIRED"},
+  {"name": "journey_id", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "status_from", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "status_to", "type": "STRING", "mode": "REQUIRED"},
+  {"name": "actor_service", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "source", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "dwell_ms", "type": "INT64", "mode": "NULLABLE"},
+  {"name": "is_synthetic", "type": "BOOL", "mode": "NULLABLE"},
+  {"name": "attributes", "type": "JSON", "mode": "NULLABLE"}
+]

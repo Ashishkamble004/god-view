@@ -1,0 +1,36 @@
+# Local-environment compose overrides for hermetic development and kind integration.
+# When booted via `make local-up`, kyc-model-armor-svc and underwriting-los-svc run inside
+# the local `kind` cluster (NodePorts 30081/30082 -> host 18081/18082 per local-env/kind/cluster.yaml),
+# and loan-orchestrator-api routes to them via host.docker.internal:18081 / :18082.
+services:
+  god-view-sovereign:
+    environment:
+      GODVIEW_ENV: local
+      GODVIEW_CHAT_ENABLED: "false"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  loan-orchestrator-api:
+    environment:
+      GODVIEW_ENV: local
+      KYC_SVC_URL: ${KYC_SVC_URL:-http://host.docker.internal:18081}
+      UNDERWRITING_SVC_URL: ${UNDERWRITING_SVC_URL:-http://host.docker.internal:18082}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      commercial-fleet-credit-svc:
+        condition: service_started
+      motor-insurance-svc:
+        condition: service_started
+      core-banking-cibil-vm:
+        condition: service_started
+
+  kyc-model-armor-svc:
+    profiles:
+      - compose-only
+
+  underwriting-los-svc:
+    profiles:
+      - compose-only

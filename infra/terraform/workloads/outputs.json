@@ -1,0 +1,97 @@
+{
+  "deployments": {
+    "sensitive": false,
+    "type": [
+      "object",
+      {
+        "kyc-model-armor-svc": [
+          "object",
+          {
+            "image": "string",
+            "name": "string",
+            "replicas": "string"
+          }
+        ],
+        "underwriting-los-svc": [
+          "object",
+          {
+            "image": "string",
+            "name": "string",
+            "replicas": "string"
+          }
+        ]
+      }
+    ],
+    "value": {
+      "kyc-model-armor-svc": {
+        "image": "us-central1-docker.pkg.dev/general-ak/god-view-containers/kyc-model-armor-svc@sha256:c893ff0b124f0b88e8c8986ce71a24a3c7a7c386368727234465dc77364b6558",
+        "name": "kyc-model-armor-svc",
+        "replicas": "1"
+      },
+      "underwriting-los-svc": {
+        "image": "us-central1-docker.pkg.dev/general-ak/god-view-containers/underwriting-los-svc@sha256:1d1631827cdabe691117f12ef8ebeb98c712a7c212a731f5aac047ef7b938355",
+        "name": "underwriting-los-svc",
+        "replicas": "1"
+      }
+    }
+  },
+  "namespace": {
+    "sensitive": false,
+    "type": "string",
+    "value": "cymbal"
+  },
+  "service_accounts": {
+    "sensitive": false,
+    "type": [
+      "object",
+      {
+        "kyc": "string",
+        "los": "string"
+      }
+    ],
+    "value": {
+      "kyc": "kyc-model-armor-svc",
+      "los": "underwriting-los-svc"
+    }
+  },
+  "services": {
+    "sensitive": false,
+    "type": [
+      "object",
+      {
+        "kyc-model-armor-svc": [
+          "object",
+          {
+            "ilb_address_name": "string",
+            "ilb_ip": "string",
+            "name": "string",
+            "type": "string"
+          }
+        ],
+        "underwriting-los-svc": [
+          "object",
+          {
+            "ilb_address_name": "string",
+            "ilb_ip": "string",
+            "name": "string",
+            "type": "string"
+          }
+        ]
+      }
+    ],
+    "value": {
+      "kyc-model-armor-svc": {
+        "ilb_address_name": "god-view-kyc-ilb-ip",
+        "ilb_ip": "10.10.0.3",
+        "name": "kyc-model-armor-svc",
+        "type": "LoadBalancer"
+      },
+      "underwriting-los-svc": {
+        "ilb_address_name": "god-view-los-ilb-ip",
+        "ilb_ip": "10.10.0.2",
+        "name": "underwriting-los-svc",
+        "type": "LoadBalancer"
+      }
+    }
+  }
+}

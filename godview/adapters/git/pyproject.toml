@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "godview-adapter-git"
+version = "4.0.0"
+description = "God-View v4 Git & GitHub Sense Adapter (generic Git, GitHub webhook HMAC verification, contract reading, 5-call rollback PR recipe)"
+requires-python = ">=3.13"
+dependencies = [
+    "godview-shared",
+    "httpx>=0.27.0",
+    "pydantic>=2.7.0",
+    "pyyaml>=6.0.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]

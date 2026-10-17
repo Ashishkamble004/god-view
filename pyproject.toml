@@ -1,0 +1,61 @@
+[project]
+name = "god-view"
+version = "4.0.0"
+description = "God-View v4 — The Sovereign SRE Organism & Proving Ground"
+requires-python = ">=3.13"
+
+[tool.uv.workspace]
+members = [
+    "shared",
+    "godview/sovereign",
+]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+asyncio_mode = "auto"
+pythonpath = [
+    "shared",
+    "godview/sovereign",
+    ".",
+]
+markers = [
+    "unit: L1 hermetic unit tests (fakes only, no network or cloud SDK calls)",
+    "contract: L2 schema, OpenAPI, CloudEvents and A2A contract tests",
+    "local_e2e: L3 local docker-compose and kind end-to-end tests",
+    "gcp: L4 live GCP end-to-end tests against deployed endpoints",
+    "drill: L5 opt-in chaos drill verification tests",
+]
+
+[tool.importlinter]
+root_packages = [
+    "godview_shared",
+    "godview",
+]
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Environment-neutral core and shared must not import vendor SDKs directly (I-03)"
+type = "forbidden"
+source_modules = [
+    "godview_shared",
+    "godview",
+]
+forbidden_modules = [
+    "google",
+    "kubernetes",
+    "psycopg",
+    "psycopg2",
+    "github",
+]
+ignore_imports = [
+    "godview.adapters.** -> psycopg",
+]
+unmatched_ignore_imports_alerting = "error"
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]

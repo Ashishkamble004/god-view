@@ -1,0 +1,14 @@
+[
+  {"name": "window_start", "type": "TIMESTAMP", "mode": "REQUIRED"},
+  {"name": "window_end", "type": "TIMESTAMP", "mode": "REQUIRED"},
+  {"name": "env_id", "type": "STRING", "mode": "REQUIRED"},
+  {"name": "journey_name", "type": "STRING", "mode": "REQUIRED"},
+  {"name": "kpi", "type": "STRING", "mode": "REQUIRED"},
+  {"name": "segment", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "value", "type": "NUMERIC", "mode": "NULLABLE"},
+  {"name": "baseline_value", "type": "NUMERIC", "mode": "NULLABLE"},
+  {"name": "zscore", "type": "NUMERIC", "mode": "NULLABLE"},
+  {"name": "cusum", "type": "NUMERIC", "mode": "NULLABLE"},
+  {"name": "sample_n", "type": "INT64", "mode": "NULLABLE"},
+  {"name": "breach", "type": "BOOL", "mode": "NULLABLE"}
+]

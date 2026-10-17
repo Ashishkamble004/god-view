@@ -1,0 +1,679 @@
+{
+  "project_id": "proj-alpha-771",
+  "project_number": "418293056112",
+  "region": "us-central1",
+  "zone": "us-central1-a",
+  "cloud_asset": {
+    "readTime": "2026-10-16T17:19:40.000000000Z",
+    "assets": [
+      {
+        "name": "//run.googleapis.com/projects/proj-alpha-771/locations/us-central1/services/svc-origination-901",
+        "assetType": "run.googleapis.com/Service",
+        "ancestors": ["projects/418293056112", "organizations/301928475610"],
+        "updateTime": "2026-10-16T09:21:05Z",
+        "resource": {
+          "data": {
+            "labels": {
+              "godview_managed": "true",
+              "tf_module": "04-tenant-compute",
+              "tenant": "tenant-alpha"
+            },
+            "uri": "https://svc-origination-901-418293056112.us-central1.run.app"
+          }
+        }
+      },
+      {
+        "name": "//run.googleapis.com/projects/proj-alpha-771/locations/us-central1/services/god-view-sovereign",
+        "assetType": "run.googleapis.com/Service",
+        "ancestors": ["projects/418293056112"],
+        "updateTime": "2026-10-16T09:21:05Z",
+        "resource": {
+          "data": {
+            "labels": {
+              "godview_managed": "true",
+              "godview_role": "observer",
+              "tf_module": "05-godview"
+            }
+          }
+        }
+      },
+      {
+        "name": "//storage.googleapis.com/proj-alpha-771-god-view-tfstate",
+        "assetType": "storage.googleapis.com/Bucket",
+        "ancestors": ["projects/418293056112"],
+        "updateTime": "2026-10-16T09:00:00Z",
+        "resource": {
+          "data": {
+            "labels": {
+              "godview_managed": "true",
+              "tf_module": "03-data"
+            }
+          }
+        }
+      },
+      {
+        "name": "//run.googleapis.com/projects/proj-alpha-771/locations/us-central1/services/svc-external-regulator-web",
+        "assetType": "run.googleapis.com/Service",
+        "ancestors": ["projects/418293056112"],
+        "updateTime": "2026-10-16T08:53:57Z",
+        "resource": {
+          "data": {
+            "labels": {
+              "owner": "external-team"
+            },
+            "uri": "https://svc-external-regulator-web-418293056112.us-central1.run.app"
+          }
+        }
+      }
+    ]
+  },
+  "cloud_run_v2": {
+    "services": [
+      {
+        "name": "projects/proj-alpha-771/locations/us-central1/services/svc-origination-901",
+        "uid": "a1000001-1111-4222-8333-444444444001",
+        "generation": "3",
+        "createTime": "2026-10-16T08:53:57.000000Z",
+        "updateTime": "2026-10-16T09:21:05.000000Z",
+        "ingress": "INGRESS_TRAFFIC_ALL",
+        "labels": {
+          "godview_managed": "true",
+          "tf_module": "04-tenant-compute",
+          "tenant": "tenant-alpha"
+        },
+        "template": {
+          "scaling": {
+            "minInstanceCount": 0,
+            "maxInstanceCount": 3
+          },
+          "timeout": "300s",
+          "serviceAccount": "godview-runtime-sa@proj-alpha-771.iam.gserviceaccount.com",
+          "maxInstanceRequestConcurrency": 80,
+          "vpcAccess": {
+            "networkInterfaces": [
+              {
+                "network": "god-view-vpc",
+                "subnetwork": "god-view-subnet"
+              }
+            ],
+            "egress": "PRIVATE_RANGES_ONLY"
+          },
+          "containers": [
+            {
+              "image": "us-central1-docker.pkg.dev/proj-alpha-771/god-view-containers/svc-origination-901:sha-a1b2c3d",
+              "env": [
+                {"name": "PROJECT_ID", "value": "proj-alpha-771"},
+                {"name": "LOCATION", "value": "us-central1"}
+              ],
+              "resources": {
+                "limits": {"cpu": "1", "memory": "512Mi"},
+                "cpuIdle": true
+              },
+              "ports": [{"name": "http1", "containerPort": 8080}]
+            }
+          ]
+        },
+        "uri": "https://svc-origination-901-x9k2m4p8qr-uc.a.run.app",
+        "urls": [
+          "https://svc-origination-901-418293056112.us-central1.run.app",
+          "https://svc-origination-901-x9k2m4p8qr-uc.a.run.app"
+        ],
+        "latestReadyRevision": "projects/proj-alpha-771/locations/us-central1/services/svc-origination-901/revisions/svc-origination-901-00003-r01",
+        "terminalCondition": {
+          "type": "Ready",
+          "state": "CONDITION_SUCCEEDED"
+        }
+      },
+      {
+        "name": "projects/proj-alpha-771/locations/us-central1/services/god-view-sovereign",
+        "uid": "a1000002-1111-4222-8333-444444444002",
+        "generation": "1",
+        "ingress": "INGRESS_TRAFFIC_ALL",
+        "labels": {
+          "godview_managed": "true",
+          "godview_role": "observer",
+          "tf_module": "05-godview"
+        },
+        "template": {
+          "scaling": {"minInstanceCount": 1, "maxInstanceCount": 1},
+          "serviceAccount": "godview-sense-sa@proj-alpha-771.iam.gserviceaccount.com",
+          "maxInstanceRequestConcurrency": 80,
+          "containers": [
+            {
+              "image": "us-central1-docker.pkg.dev/proj-alpha-771/god-view-containers/god-view-sovereign:sha-a1b2c3d",
+              "resources": {"limits": {"cpu": "1", "memory": "1Gi"}, "cpuIdle": false}
+            }
+          ]
+        },
+        "uri": "https://god-view-sovereign-x9k2m4p8qr-uc.a.run.app"
+      },
+      {
+        "name": "projects/proj-alpha-771/locations/us-central1/services/svc-unrelated-demo-88",
+        "uid": "a1000003-1111-4222-8333-444444444003",
+        "generation": "11",
+        "ingress": "INGRESS_TRAFFIC_ALL",
+        "labels": {"team": "research"},
+        "template": {
+          "scaling": {"minInstanceCount": 1, "maxInstanceCount": 2},
+          "serviceAccount": "demo-run@proj-alpha-771.iam.gserviceaccount.com",
+          "maxInstanceRequestConcurrency": 160,
+          "containers": [
+            {
+              "image": "us-central1-docker.pkg.dev/proj-alpha-771/cloud-run-source-deploy/svc-unrelated-demo-88:v9",
+              "resources": {"limits": {"cpu": "2", "memory": "2Gi"}}
+            }
+          ]
+        },
+        "uri": "https://svc-unrelated-demo-88-x9k2m4p8qr-uc.a.run.app"
+      }
+    ]
+  },
+  "gke": {
+    "clusters": [
+      {
+        "name": "god-view-gke-cluster",
+        "location": "us-central1",
+        "status": "RUNNING",
+        "endpoint": "gke-dns-endpoint.us-central1.gke.goog",
+        "autopilot": {"enabled": true},
+        "privateClusterConfig": {
+          "enablePrivateNodes": true,
+          "enablePrivateEndpoint": false,
+          "masterIpv4CidrBlock": "172.16.0.0/28"
+        },
+        "releaseChannel": {"channel": "REGULAR"},
+        "resourceLabels": {
+          "godview_managed": "true",
+          "tf_module": "04-tenant-compute",
+          "tenant": "tenant-alpha"
+        }
+      }
+    ]
+  },
+  "compute": {
+    "kind": "compute#instanceList",
+    "id": "projects/proj-alpha-771/zones/us-central1-a/instances",
+    "items": [
+      {
+        "id": "9012345678901",
+        "name": "vm-worker-505",
+        "zone": "https://www.googleapis.com/compute/v1/projects/proj-alpha-771/zones/us-central1-a",
+        "machineType": "https://www.googleapis.com/compute/v1/projects/proj-alpha-771/zones/us-central1-a/machineTypes/e2-micro",
+        "status": "RUNNING",
+        "labels": {
+          "godview_managed": "true",
+          "tf_module": "04-tenant-compute",
+          "tenant": "tenant-alpha"
+        },
+        "networkInterfaces": [
+          {
+            "network": "https://www.googleapis.com/compute/v1/projects/proj-alpha-771/global/networks/god-view-vpc",
+            "subnetwork": "https://www.googleapis.com/compute/v1/projects/proj-alpha-771/regions/us-central1/subnetworks/god-view-subnet",
+            "networkIP": "10.10.0.15"
+          }
+        ],
+        "serviceAccounts": [
+          {
+            "email": "godview-runtime-sa@proj-alpha-771.iam.gserviceaccount.com",
+            "scopes": ["https://www.googleapis.com/auth/cloud-platform"]
+          }
+        ],
+        "metadata": {
+          "items": [
+            {"key": "startup-script", "value": "#!/bin/bash\nsystemctl start worker-daemon.service"}
+          ]
+        }
+      }
+    ]
+  },
+  "sql_admin": {
+    "kind": "sql#instancesList",
+    "items": [
+      {
+        "kind": "sql#instance",
+        "name": "god-view-pg",
+        "project": "proj-alpha-771",
+        "databaseVersion": "POSTGRES_16",
+        "region": "us-central1",
+        "state": "RUNNABLE",
+        "ipAddresses": [
+          {"type": "PRIVATE", "ipAddress": "10.22.0.3"}
+        ],
+        "settings": {
+          "tier": "db-g1-small",
+          "availabilityType": "ZONAL",
+          "activationPolicy": "ALWAYS",
+          "dataDiskSizeGb": "10",
+          "dataDiskType": "PD_SSD",
+          "userLabels": {
+            "godview_managed": "true",
+            "tf_module": "03-data",
+            "tenant": "tenant-alpha"
+          },
+          "ipConfiguration": {
+            "ipv4Enabled": false,
+            "privateNetwork": "projects/proj-alpha-771/global/networks/god-view-vpc"
+          },
+          "backupConfiguration": {
+            "enabled": true,
+            "pointInTimeRecoveryEnabled": false
+          },
+          "databaseFlags": [
+            {"name": "cloudsql.logical_decoding", "value": "on"},
+            {"name": "cloudsql.enable_pg_stat_statements", "value": "on"}
+          ]
+        }
+      }
+    ]
+  },
+  "monitoring": {
+    "alertPolicies": [
+      {
+        "name": "projects/proj-alpha-771/alertPolicies/9182736450192837465",
+        "displayName": "Sovereign Heartbeat Watcher",
+        "combiner": "OR",
+        "enabled": true,
+        "conditions": [
+          {
+            "displayName": "Sovereign uptime check failure",
+            "name": "projects/proj-alpha-771/alertPolicies/9182736450192837465/conditions/1"
+          }
+        ]
+      }
+    ],
+    "totalSize": 1
+  },
+  "trace": {
+    "traces": [
+      {
+        "projectId": "proj-alpha-771",
+        "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+        "spans": [
+          {
+            "spanId": "1001",
+            "name": "POST /v1/orders/create",
+            "startTime": "2026-10-16T09:15:00.000Z",
+            "endTime": "2026-10-16T09:15:00.420Z",
+            "labels": {
+              "service.name": "svc-origination-901",
+              "journey.id": "jrn-001",
+              "customer.id": "cust-001"
+            }
+          },
+          {
+            "spanId": "1002",
+            "parentSpanId": "1001",
+            "name": "POST /internal/validator/check",
+            "startTime": "2026-10-16T09:15:00.050Z",
+            "endTime": "2026-10-16T09:15:00.280Z",
+            "labels": {
+              "service.name": "svc-decision-402",
+              "journey.id": "jrn-001",
+              "decision": "APPROVED",
+              "latency_budget_ms": "250",
+              "quota_tier": "standard"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "logging_sinks": {
+    "sinks": [
+      {
+        "name": "godview-audit-to-nervous-system",
+        "destination": "pubsub.googleapis.com/projects/proj-alpha-771/topics/godview-nervous-system",
+        "filter": "LOG_ID(\"cloudaudit.googleapis.com/activity\")",
+        "resourceName": "projects/proj-alpha-771/sinks/godview-audit-to-nervous-system"
+      },
+      {
+        "name": "_Default",
+        "destination": "logging.googleapis.com/projects/proj-alpha-771/locations/global/buckets/_Default",
+        "filter": "NOT LOG_ID(\"cloudaudit.googleapis.com/activity\")",
+        "resourceName": "projects/proj-alpha-771/sinks/_Default"
+      }
+    ]
+  },
+  "pubsub": {
+    "topics": [
+      {"name": "projects/proj-alpha-771/topics/godview-nervous-system"},
+      {"name": "projects/proj-alpha-771/topics/godview-nervous-system-dlq"}
+    ]
+  },
+  "bigquery": {
+    "kind": "bigquery#datasetList",
+    "datasets": [
+      {
+        "kind": "bigquery#dataset",
+        "id": "proj-alpha-771:godview_ledger",
+        "datasetReference": {
+          "datasetId": "godview_ledger",
+          "projectId": "proj-alpha-771"
+        },
+        "location": "us-central1",
+        "labels": {"godview_managed": "true", "tf_module": "03-data"}
+      }
+    ],
+    "query_rows": [
+      {"service": "svc-origination-901", "cost_usd": 1.25}
+    ]
+  },
+  "datastream": {
+    "error": {
+      "code": 403,
+      "message": "Datastream API has not been used in project proj-alpha-771 before or it is disabled.",
+      "status": "PERMISSION_DENIED"
+    }
+  },
+  "firestore": {
+    "databases": [
+      {
+        "name": "projects/proj-alpha-771/databases/(default)",
+        "uid": "b2000001-2222-4333-8444-555555555001",
+        "locationId": "asia-south1",
+        "type": "DATASTORE_MODE"
+      },
+      {
+        "name": "projects/proj-alpha-771/databases/god-view-memory-db",
+        "uid": "b2000002-2222-4333-8444-555555555002",
+        "locationId": "us-central1",
+        "type": "FIRESTORE_NATIVE",
+        "deleteProtectionState": "DELETE_PROTECTION_ENABLED"
+      }
+    ]
+  },
+  "agent_engine": {
+    "reasoningEngines": [
+      {
+        "name": "projects/418293056112/locations/us-central1/reasoningEngines/5019283746501928371",
+        "displayName": "application__svc-decision-402",
+        "description": "God-View Application Agent for svc-decision-402",
+        "createTime": "2026-10-16T09:02:38.000000Z",
+        "updateTime": "2026-10-16T09:20:19.000000Z",
+        "spec": {
+          "packageSpec": {
+            "pythonVersion": "3.13"
+          },
+          "deploymentSpec": {
+            "minInstances": 0,
+            "maxInstances": 1,
+            "resourceLimits": {"cpu": "1", "memory": "2Gi"},
+            "containerConcurrency": 4,
+            "env": [
+              {"name": "GODVIEW_AGENT_ID", "value": "application__svc-decision-402"},
+              {"name": "GOOGLE_CLOUD_LOCATION", "value": "global"}
+            ]
+          },
+          "effectiveIdentity": "service-418293056112@gcp-sa-aiplatform-re.iam.gserviceaccount.com"
+        },
+        "contextSpec": {
+          "memoryBankConfig": {"generationConfig": {}}
+        }
+      },
+      {
+        "name": "projects/418293056112/locations/us-central1/reasoningEngines/6029384756102938472",
+        "displayName": "legacy-idle-research-agent",
+        "description": "Unrelated idle reasoning engine running at default 4 vCPU / 4 GiB with minInstances=1",
+        "createTime": "2026-06-04T16:04:49.000000Z",
+        "updateTime": "2026-06-04T16:41:08.000000Z",
+        "spec": {
+          "packageSpec": {"pythonVersion": "3.13"},
+          "deploymentSpec": {
+            "minInstances": 1,
+            "maxInstances": 10,
+            "resourceLimits": {"cpu": "4", "memory": "4Gi"},
+            "containerConcurrency": 9
+          }
+        }
+      }
+    ]
+  },
+  "agent_registry": {
+    "agents": [
+      {
+        "name": "projects/proj-alpha-771/locations/us-central1/agents/agentregistry-c3000001-3333-4444-8555-666666666001",
+        "agentId": "urn:agent:projects-418293056112:projects:418293056112:locations:us-central1:aiplatform:reasoningEngines:5019283746501928371",
+        "location": "us-central1",
+        "displayName": "application__svc-decision-402",
+        "description": "God-View Application Agent for svc-decision-402",
+        "protocols": [
+          {
+            "type": "CUSTOM",
+            "interfaces": [
+              {
+                "url": "https://us-central1-aiplatform.googleapis.com/v1/projects/418293056112/locations/us-central1/reasoningEngines/5019283746501928371:query",
+                "protocolBinding": "HTTP_JSON"
+              }
+            ]
+          }
+        ],
+        "attributes": {
+          "agentregistry.googleapis.com/system/RuntimeReference": {
+            "uri": "//aiplatform.googleapis.com/projects/418293056112/locations/us-central1/reasoningEngines/5019283746501928371"
+          },
+          "agentregistry.googleapis.com/system/Framework": {
+            "framework": "google-adk"
+          }
+        }
+      }
+    ],
+    "services": [
+      {
+        "name": "projects/proj-alpha-771/locations/global/services/market-intel-svc",
+        "displayName": "market-intel-svc"
+      }
+    ]
+  },
+  "model_armor": {
+    "templates": [
+      {
+        "name": "projects/proj-alpha-771/locations/us-central1/templates/tenant-text-guard",
+        "filterConfig": {
+          "piAndJailbreakFilterSettings": {
+            "filterEnforcement": "ENABLED",
+            "confidenceLevel": "MEDIUM_AND_ABOVE"
+          },
+          "sdpSettings": {
+            "basicConfig": {"filterEnforcement": "ENABLED"}
+          }
+        },
+        "labels": {"godview_managed": "true", "tf_module": "04-tenant-compute"}
+      }
+    ]
+  },
+  "iam": {
+    "accounts": [
+      {
+        "name": "projects/proj-alpha-771/serviceAccounts/godview-sense-sa@proj-alpha-771.iam.gserviceaccount.com",
+        "projectId": "proj-alpha-771",
+        "email": "godview-sense-sa@proj-alpha-771.iam.gserviceaccount.com",
+        "displayName": "God-View Sense Service Account"
+      },
+      {
+        "name": "projects/proj-alpha-771/serviceAccounts/godview-act-sa@proj-alpha-771.iam.gserviceaccount.com",
+        "projectId": "proj-alpha-771",
+        "email": "godview-act-sa@proj-alpha-771.iam.gserviceaccount.com",
+        "displayName": "God-View Act Service Account"
+      },
+      {
+        "name": "projects/proj-alpha-771/serviceAccounts/godview-runtime-sa@proj-alpha-771.iam.gserviceaccount.com",
+        "projectId": "proj-alpha-771",
+        "email": "godview-runtime-sa@proj-alpha-771.iam.gserviceaccount.com",
+        "displayName": "God-View Tenant Runtime Service Account"
+      }
+    ],
+    "permissions": [
+      "resourcemanager.projects.get",
+      "run.services.list",
+      "cloudasset.assets.listResource",
+      "monitoring.timeSeries.list",
+      "cloudtrace.traces.get",
+      "logging.logEntries.list",
+      "iam.serviceAccounts.getAccessToken"
+    ],
+    "impersonated_access_token": "ya29.c.b0Aaekm1K-recorded-fixture-act-sa-token"
+  },
+  "tfstate": {
+    "object_meta": {
+      "kind": "storage#object",
+      "name": "platform/default.tfstate",
+      "bucket": "proj-alpha-771-god-view-tfstate",
+      "generation": "1684001122334455",
+      "updated": "2026-10-16T17:15:30.000Z"
+    },
+    "state": {
+      "version": 4,
+      "terraform_version": "1.16.6",
+      "serial": 12,
+      "lineage": "d4e5f601-4412-4091-81a9-1029384756ab",
+      "resources": [
+        {
+          "module": "module.tenant_compute",
+          "mode": "managed",
+          "type": "google_cloud_run_v2_service",
+          "name": "origination",
+          "provider": "provider[\"registry.terraform.io/hashicorp/google\"]",
+          "instances": [
+            {
+              "schema_version": 0,
+              "attributes": {
+                "name": "svc-origination-901",
+                "location": "us-central1",
+                "ingress": "INGRESS_TRAFFIC_ALL",
+                "labels": {
+                  "godview_managed": "true",
+                  "tf_module": "04-tenant-compute",
+                  "tenant": "tenant-alpha"
+                },
+                "template": [
+                  {
+                    "service_account": "godview-runtime-sa@proj-alpha-771.iam.gserviceaccount.com",
+                    "max_instance_request_concurrency": 80,
+                    "scaling": [
+                      {
+                        "min_instance_count": 0,
+                        "max_instance_count": 3
+                      }
+                    ],
+                    "containers": [
+                      {
+                        "image": "us-central1-docker.pkg.dev/proj-alpha-771/god-view-containers/svc-origination-901:sha-a1b2c3d",
+                        "resources": [
+                          {
+                            "limits": {
+                              "cpu": "1",
+                              "memory": "512Mi"
+                            }
+                          }
+                        ],
+                        "env": [
+                          {"name": "PROJECT_ID", "value": "proj-alpha-771"},
+                          {"name": "LOCATION", "value": "us-central1"}
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "module": "module.tenant_compute",
+          "mode": "managed",
+          "type": "google_compute_instance",
+          "name": "worker_vm",
+          "provider": "provider[\"registry.terraform.io/hashicorp/google\"]",
+          "instances": [
+            {
+              "schema_version": 6,
+              "attributes": {
+                "name": "vm-worker-505",
+                "zone": "us-central1-a",
+                "machine_type": "e2-micro",
+                "desired_status": "RUNNING",
+                "labels": {
+                  "godview_managed": "true",
+                  "tf_module": "04-tenant-compute",
+                  "tenant": "tenant-alpha"
+                },
+                "network_interface": [
+                  {
+                    "network": "god-view-vpc",
+                    "subnetwork": "god-view-subnet",
+                    "access_config": []
+                  }
+                ],
+                "service_account": [
+                  {
+                    "email": "godview-runtime-sa@proj-alpha-771.iam.gserviceaccount.com"
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "module": "module.data",
+          "mode": "managed",
+          "type": "google_sql_database_instance",
+          "name": "god_view_pg",
+          "provider": "provider[\"registry.terraform.io/hashicorp/google\"]",
+          "instances": [
+            {
+              "schema_version": 0,
+              "attributes": {
+                "name": "god-view-pg",
+                "database_version": "POSTGRES_16",
+                "region": "us-central1",
+                "settings": [
+                  {
+                    "tier": "db-g1-small",
+                    "availability_type": "ZONAL",
+                    "activation_policy": "ALWAYS",
+                    "user_labels": {
+                      "godview_managed": "true",
+                      "tf_module": "03-data",
+                      "tenant": "tenant-alpha"
+                    },
+                    "ip_configuration": [
+                      {
+                        "ipv4_enabled": false
+                      }
+                    ],
+                    "backup_configuration": [
+                      {
+                        "enabled": true
+                      }
+                    ],
+                    "database_flags": [
+                      {"name": "cloudsql.logical_decoding", "value": "on"},
+                      {"name": "cloudsql.enable_pg_stat_statements", "value": "on"}
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "module": "module.project_iam",
+          "mode": "managed",
+          "type": "google_cloud_run_v2_service_iam_member",
+          "name": "origination_apigw_invoker",
+          "provider": "provider[\"registry.terraform.io/hashicorp/google\"]",
+          "instances": [
+            {
+              "schema_version": 0,
+              "attributes": {
+                "name": "svc-origination-901",
+                "role": "roles/run.invoker",
+                "member": "serviceAccount:godview-apigw-sa@proj-alpha-771.iam.gserviceaccount.com"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

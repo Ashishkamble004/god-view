@@ -1,0 +1,71 @@
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+  external_labels:
+    env_id: local-compose
+    godview_managed: "true"
+
+scrape_configs:
+  - job_name: "loan-orchestrator-api"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["loan-orchestrator-api:8080"]
+        labels:
+          service: "loan-orchestrator-api"
+          tenant: "cymbal"
+
+  - job_name: "kyc-model-armor-svc"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["kyc-model-armor-svc:8080"]
+        labels:
+          service: "kyc-model-armor-svc"
+          tenant: "cymbal"
+
+  - job_name: "underwriting-los-svc"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["underwriting-los-svc:8080"]
+        labels:
+          service: "underwriting-los-svc"
+          tenant: "cymbal"
+
+  - job_name: "commercial-fleet-credit-svc"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["commercial-fleet-credit-svc:8080"]
+        labels:
+          service: "commercial-fleet-credit-svc"
+          tenant: "cymbal"
+
+  - job_name: "motor-insurance-svc"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["motor-insurance-svc:8080"]
+        labels:
+          service: "motor-insurance-svc"
+          tenant: "cymbal"
+
+  - job_name: "core-banking-cibil-vm"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["core-banking-cibil-vm:8085"]
+        labels:
+          service: "core-banking-cibil-vm"
+          tenant: "cymbal"
+
+  - job_name: "ai-customer-simulator"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["ai-customer-simulator:8080"]
+        labels:
+          service: "ai-customer-simulator"
+          tenant: "cymbal"
+
+  - job_name: "god-view-sovereign"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["god-view-sovereign:8080"]
+        labels:
+          service: "god-view-sovereign"
+          tenant: "godview"

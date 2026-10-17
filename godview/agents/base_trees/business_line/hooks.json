@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "obs.*",
+        "commands": [
+          "python3 scripts/check_dlq_saga_stall.py"
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "commands": [
+          "python3 scripts/check_dlq_saga_stall.py"
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "*",
+        "commands": [
+          "python3 scripts/check_dlq_saga_stall.py"
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,433 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: god-view-pg
+    command:
+      - "postgres"
+      - "-c"
+      - "wal_level=logical"
+      - "-c"
+      - "max_replication_slots=5"
+      - "-c"
+      - "max_wal_senders=5"
+      - "-c"
+      - "shared_preload_libraries=pg_stat_statements"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-godview_lms}
+      POSTGRES_USER: ${POSTGRES_USER:-app_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local_dev_password_only}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./local-env/seed:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-app_user} -d $${POSTGRES_DB:-godview_lms}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - godview-net
+    labels:
+      godview_managed: "true"
+      tenant: "cymbal"
+      godview_kind: "cloud_sql"
+      godview_datastore: "postgres"
+
+  core-banking-cibil-vm:
+    build:
+      context: ./cymbal/services/core-banking-cibil-vm
+      dockerfile: Dockerfile
+    container_name: core-banking-cibil-vm
+    environment:
+      GODVIEW_ENV: ${GODVIEW_ENV:-local}
+      SERVICE_NAME: core-banking-cibil-vm
+      PORT: "8085"
+      DATABASE_URL: postgresql://${POSTGRES_USER:-app_user}:${POSTGRES_PASSWORD:-local_dev_password_only}@postgres:5432/${POSTGRES_DB:-godview_lms}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://god-view-sovereign:8080/v1/traces
+    ports:
+      - "8085:8085"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8085/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - godview-net
+    labels:
+      godview_managed: "true"
+      tenant: "cymbal"
+      godview_kind: "gce_vm"
+      metrics_port: "8085"
+      metrics_path: "/metrics"
+
+  kyc-model-armor-svc:
+    build:
+      context: ./cymbal/services/kyc-model-armor-svc
+      dockerfile: Dockerfile
+    container_name: kyc-model-armor-svc
+    environment:
+      GODVIEW_ENV: ${GODVIEW_ENV:-local}
+      SERVICE_NAME: kyc-model-armor-svc
+      PORT: "8080"
+      DATABASE_URL: postgresql://${POSTGRES_USER:-app_user}:${POSTGRES_PASSWORD:-local_dev_password_only}@postgres:5432/${POSTGRES_DB:-godview_lms}
+      MODEL_ARMOR_TEMPLATE_ID: projects/general-ak/locations/us-central1/templates/cymbal-text-guard
+      KYC_VAULT_BUCKET: general-ak-god-view-kyc-vault
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://god-view-sovereign:8080/v1/traces
+    ports:
+      - "8081:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - godview-net
+    labels:
+      godview_managed: "true"
+      tenant: "cymbal"
+      godview_kind: "gke_workload"
+      metrics_port: "8080"
+      metrics_path: "/metrics"
+
+  underwriting-los-svc:
+    build:
+      context: ./cymbal/services/underwriting-los-svc
+      dockerfile: Dockerfile
+    container_name: underwriting-los-svc
+    environment:
+      GODVIEW_ENV: ${GODVIEW_ENV:-local}
+      SERVICE_NAME: underwriting-los-svc
+      PORT: "8080"
+      DATABASE_URL: postgresql://${POSTGRES_USER:-app_user}:${POSTGRES_PASSWORD:-local_dev_password_only}@postgres:5432/${POSTGRES_DB:-godview_lms}
+      CBS_VM_URL: http://core-banking-cibil-vm:8085
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://god-view-sovereign:8080/v1/traces
+    ports:
+      - "8082:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      core-banking-cibil-vm:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - godview-net
+    labels:
+      godview_managed: "true"
+      tenant: "cymbal"
+      godview_kind: "gke_workload"
+      metrics_port: "8080"
+      metrics_path: "/metrics"
+
+  commercial-fleet-credit-svc:
+    build:
+      context: ./cymbal/services/commercial-fleet-credit-svc
+      dockerfile: Dockerfile
+    container_name: commercial-fleet-credit-svc
+    environment:
+      GODVIEW_ENV: ${GODVIEW_ENV:-local}
+      SERVICE_NAME: commercial-fleet-credit-svc
+      PORT: "8080"
+      DATABASE_URL: postgresql://${POSTGRES_USER:-app_user}:${POSTGRES_PASSWORD:-local_dev_password_only}@postgres:5432/${POSTGRES_DB:-godview_lms}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://god-view-sovereign:8080/v1/traces
+    ports:
+      - "8083:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - godview-net
+    labels:
+      godview_managed: "true"
+      tenant: "cymbal"
+      godview_kind: "cloud_run"
+      metrics_port: "8080"
+      metrics_path: "/metrics"
+
+  motor-insurance-svc:
+    build:
+      context: ./cymbal/services/motor-insurance-svc
+      dockerfile: Dockerfile
+    container_name: motor-insurance-svc
+    environment:
+      GODVIEW_ENV: ${GODVIEW_ENV:-local}
+      SERVICE_NAME: motor-insurance-svc
+      PORT: "8080"
+      DATABASE_URL: postgresql://${POSTGRES_USER:-app_user}:${POSTGRES_PASSWORD:-local_dev_password_only}@postgres:5432/${POSTGRES_DB:-godview_lms}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://god-view-sovereign:8080/v1/traces
+    ports:
+      - "8084:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - godview-net
+    labels:
+      godview_managed: "true"
+      tenant: "cymbal"
+      godview_kind: "cloud_run"
+      metrics_port: "8080"
+      metrics_path: "/metrics"
+
+  loan-orchestrator-api:
+    build:
+      context: ./cymbal/services/loan-orchestrator-api
+      dockerfile: Dockerfile
+    container_name: loan-orchestrator-api
+    environment:
+      GODVIEW_ENV: ${GODVIEW_ENV:-local}
+      SERVICE_NAME: loan-orchestrator-api
+      PORT: "8080"
+      DATABASE_URL: postgresql://${POSTGRES_USER:-app_user}:${POSTGRES_PASSWORD:-local_dev_password_only}@postgres:5432/${POSTGRES_DB:-godview_lms}
+      KYC_SVC_URL: http://kyc-model-armor-svc:8080
+      UNDERWRITING_SVC_URL: http://underwriting-los-svc:8080
+      FLEET_CREDIT_SVC_URL: http://commercial-fleet-credit-svc:8080
+      INSURANCE_SVC_URL: http://motor-insurance-svc:8080
+      CBS_VM_URL: http://core-banking-cibil-vm:8085
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://god-view-sovereign:8080/v1/traces
+    ports:
+      - "8000:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kyc-model-armor-svc:
+        condition: service_started
+      underwriting-los-svc:
+        condition: service_started
+      commercial-fleet-credit-svc:
+        condition: service_started
+      motor-insurance-svc:
+        condition: service_started
+      core-banking-cibil-vm:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - godview-net
+    labels:
+      godview_managed: "true"
+      tenant: "cymbal"
+      godview_kind: "cloud_run"
+      metrics_port: "8080"
+      metrics_path: "/metrics"
+
+  ai-customer-simulator:
+    build:
+      context: ./cymbal/services/ai-customer-simulator
+      dockerfile: Dockerfile
+    container_name: ai-customer-simulator
+    environment:
+      GODVIEW_ENV: ${GODVIEW_ENV:-local}
+      SERVICE_NAME: ai-customer-simulator
+      PORT: "8080"
+      ORCHESTRATOR_URL: http://loan-orchestrator-api:8080
+      GEMINI_LOCATION: global
+      KYC_VAULT_BUCKET: general-ak-god-view-kyc-vault
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://god-view-sovereign:8080/v1/traces
+    ports:
+      - "8086:8080"
+    depends_on:
+      loan-orchestrator-api:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+    networks:
+      - godview-net
+    labels:
+      godview_managed: "true"
+      tenant: "cymbal"
+      godview_kind: "cloud_run"
+      metrics_port: "8080"
+      metrics_path: "/metrics"
+
+  customer-loan-portal-web:
+    build:
+      context: ./cymbal/frontends/customer-loan-portal-web
+      dockerfile: Dockerfile
+    container_name: customer-loan-portal-web
+    ports:
+      - "3001:8080"
+    depends_on:
+      loan-orchestrator-api:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+    networks:
+      - godview-net
+    labels:
+      godview_managed: "true"
+      tenant: "cymbal"
+      godview_kind: "cloud_run"
+
+  internal-bank-los-web:
+    build:
+      context: ./cymbal/frontends/internal-bank-los-web
+      dockerfile: Dockerfile
+    container_name: internal-bank-los-web
+    ports:
+      - "3002:8080"
+    depends_on:
+      loan-orchestrator-api:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+    networks:
+      - godview-net
+    labels:
+      godview_managed: "true"
+      tenant: "cymbal"
+      godview_kind: "cloud_run"
+
+  god-view-sovereign:
+    build:
+      context: .
+      dockerfile: godview/sovereign/Dockerfile
+    container_name: god-view-sovereign
+    environment:
+      GODVIEW_ENV: ${GODVIEW_ENV:-local}
+      PORT: "8080"
+      SENTINEL_INTERVAL_SECONDS: "10"
+      GEMINI_LOCATION: global
+      EMBEDDING_LOCATION: us-central1
+      GODVIEW_CHAT_ENABLED: "false"
+      GODVIEW_COURT_MAX_AGENTS: "40"
+      GODVIEW_COURT_DAILY_CEILING_USD: "6.00"
+      GODVIEW_BUDGET_APPLICATION_USD: "0.75"
+      GODVIEW_BUDGET_BUSINESS_LINE_USD: "0.75"
+      GODVIEW_BUDGET_CHANGE_USD: "0.75"
+      GODVIEW_BUDGET_DATA_USD: "0.50"
+      GODVIEW_BUDGET_PLATFORM_USD: "0.50"
+      GODVIEW_BUDGET_SOVEREIGN_USD: "1.50"
+      GODVIEW_HINT_EXCLUDE: general-ak-god-view-tfstate,god-view-sovereign,god-view-sre-web,general-ak-god-view-agent-staging
+      CHAT_WEBHOOK_URL: http://chat-mock:8080/v1/spaces/god-view/messages
+      PROMETHEUS_URL: http://prometheus:9090
+    ports:
+      - "8090:8080"
+    volumes:
+      - ./local-env/git/repos:/var/lib/godview/git-repos:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      prometheus:
+        condition: service_started
+      chat-mock:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/public/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - godview-net
+    labels:
+      godview_managed: "true"
+      tenant: "godview"
+      godview_role: "observer"
+      godview_kind: "cloud_run"
+      metrics_port: "8080"
+      metrics_path: "/metrics"
+
+  god-view-sre-web:
+    build:
+      context: ./godview/god-view-sre-web
+      dockerfile: Dockerfile
+    container_name: god-view-sre-web
+    ports:
+      - "3003:8080"
+    depends_on:
+      god-view-sovereign:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+    networks:
+      - godview-net
+    labels:
+      godview_managed: "true"
+      tenant: "godview"
+      godview_role: "observer"
+      godview_kind: "cloud_run"
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: god-view-prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./local-env/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - promdata:/prometheus
+    networks:
+      - godview-net
+    labels:
+      godview_managed: "true"
+      tenant: "godview"
+      godview_role: "observer"
+
+  chat-mock:
+    build:
+      context: ./local-env/chat-mock
+      dockerfile: Dockerfile
+    container_name: god-view-chat-mock
+    environment:
+      PORT: "8080"
+      SOVEREIGN_URL: http://god-view-sovereign:8080
+    ports:
+      - "8095:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -m urllib.request http://127.0.0.1:8080/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - godview-net
+    labels:
+      godview_managed: "true"
+      tenant: "godview"
+      godview_role: "observer"
+
+networks:
+  godview-net:
+    name: godview-net
+    driver: bridge
+
+volumes:
+  pgdata:
+  promdata:

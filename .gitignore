@@ -1,0 +1,45 @@
+# Python virtual environments and caches
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+*.egg-info/
+dist/
+build/
+
+# Node / Frontend build artifacts
+node_modules/
+*/dist/
+*/*/dist/
+*/*/*/dist/
+.vite/
+
+# Terraform caches, plans, and state files
+.terraform/
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfstate*
+tfplan
+*.tfplan
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Local environment secrets (keep example and platform outputs.json)
+.env
+.env.local
+local-env/.env.local
+!local-env/.env.example
+!**/outputs.json
+
+# Local runtime data (git bare repo / coverage / logs)
+local-env/git/repos/
+*.log

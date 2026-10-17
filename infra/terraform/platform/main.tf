@@ -1,0 +1,122 @@
+module "project_iam" {
+  source            = "./modules/01-project-iam"
+  project_id        = var.project_id
+  region            = var.region
+  github_repository = var.github_repository
+}
+
+module "network_edge" {
+  source = "./modules/02-network-edge"
+  providers = {
+    google      = google
+    google-beta = google-beta
+  }
+  project_id              = var.project_id
+  region                  = var.region
+  runtime_sa_email        = module.project_iam.runtime_sa_email
+  operator_email          = var.operator_email
+  dns_zone_name           = var.dns_zone_name
+  lookup_dns_zone         = var.lookup_dns_zone
+  cdn_assets_bucket_name  = module.data.bucket_names.cdn_assets
+  portal_web_service_name = module.tenant_compute.portal_web_service_name
+  los_web_service_name    = module.tenant_compute.los_web_service_name
+  api_gateway_id          = module.tenant_compute.api_gateway_id
+  sovereign_service_name  = module.godview.sovereign_service_name
+  sre_web_service_name    = module.godview.sre_web_service_name
+}
+
+module "data" {
+  source                = "./modules/03-data"
+  project_id            = var.project_id
+  region                = var.region
+  network_id            = module.network_edge.network_id
+  psa_connection_id     = module.network_edge.psa_connection_id
+  sql_tier              = var.sql_tier
+  sql_disk_gb           = var.sql_disk_gb
+  sql_availability_type = var.sql_availability_type
+  hibernate             = var.hibernate
+  enable_datastream     = var.enable_datastream
+  sense_sa_email        = module.project_iam.sense_sa_email
+  runtime_sa_email      = module.project_iam.runtime_sa_email
+}
+
+module "tenant_compute" {
+  source = "./modules/04-tenant-compute"
+  providers = {
+    google      = google
+    google-beta = google-beta
+  }
+  project_id              = var.project_id
+  project_number          = var.project_number
+  region                  = var.region
+  zone                    = var.zone
+  network_id              = module.network_edge.network_id
+  subnet_id               = module.network_edge.subnet_id
+  runtime_sa_name         = module.project_iam.runtime_sa_name
+  runtime_sa_email        = module.project_iam.runtime_sa_email
+  sense_sa_email          = module.project_iam.sense_sa_email
+  act_sa_email            = module.project_iam.act_sa_email
+  apigw_sa_email          = module.project_iam.apigw_sa_email
+  cloud_run_cpu           = var.cloud_run_cpu
+  cloud_run_memory        = var.cloud_run_memory
+  cloud_run_min_instances = var.cloud_run_min_instances
+  cloud_run_max_instances = var.cloud_run_max_instances
+  cloud_run_concurrency   = var.cloud_run_concurrency
+  vm_machine_type         = var.vm_machine_type
+  vm_disk_gb              = var.vm_disk_gb
+  hibernate               = var.hibernate
+  images                  = var.images
+  sql_private_ip          = module.data.sql_private_ip
+  sql_database_name       = module.data.sql_database_name
+  pg_password_secret_id   = module.data.secret_ids.cymbal_pg_app_password
+  kyc_ilb_ip              = module.network_edge.kyc_ilb_ip
+  los_ilb_ip              = module.network_edge.los_ilb_ip
+  kyc_vault_bucket        = module.data.bucket_names.kyc_vault
+  cdn_assets_bucket       = module.data.bucket_names.cdn_assets
+  ledger_dataset_id       = module.data.ledger_dataset_id
+  sovereign_service_url   = module.godview.sovereign_service_url
+}
+
+module "godview" {
+  source                               = "./modules/05-godview"
+  project_id                           = var.project_id
+  project_number                       = var.project_number
+  region                               = var.region
+  network_id                           = module.network_edge.network_id
+  subnet_id                            = module.network_edge.subnet_id
+  sense_sa_email                       = module.project_iam.sense_sa_email
+  act_sa_email                         = module.project_iam.act_sa_email
+  runtime_sa_email                     = module.project_iam.runtime_sa_email
+  operator_email                       = var.operator_email
+  billing_account_id                   = var.billing_account_id
+  create_budget                        = var.create_budget
+  sovereign_cpu                        = var.sovereign_cpu
+  sovereign_memory                     = var.sovereign_memory
+  sovereign_min_instances              = var.sovereign_min_instances
+  sovereign_max_instances              = var.sovereign_max_instances
+  cloud_run_cpu                        = var.cloud_run_cpu
+  cloud_run_memory                     = var.cloud_run_memory
+  cloud_run_min_instances              = var.cloud_run_min_instances
+  cockpit_max_instances                = var.cockpit_max_instances
+  cloud_run_concurrency                = var.cloud_run_concurrency
+  hibernate                            = var.hibernate
+  images                               = var.images
+  firestore_db_name                    = module.data.firestore_db_name
+  ledger_dataset_id                    = module.data.ledger_dataset_id
+  agent_skills_bucket                  = module.data.bucket_names.agent_skills
+  agent_staging_bucket                 = module.data.bucket_names.agent_staging
+  tfstate_bucket                       = module.data.bucket_names.tfstate
+  simulator_service_url                = module.tenant_compute.simulator_service_url
+  godview_court_max_agents             = var.godview_court_max_agents
+  godview_hint_exclude                 = var.godview_hint_exclude
+  token_budget_daily_application_usd   = var.token_budget_daily_application_usd
+  token_budget_daily_business_line_usd = var.token_budget_daily_business_line_usd
+  token_budget_daily_change_usd        = var.token_budget_daily_change_usd
+  token_budget_daily_data_usd          = var.token_budget_daily_data_usd
+  token_budget_daily_platform_usd      = var.token_budget_daily_platform_usd
+  token_budget_daily_sovereign_usd     = var.token_budget_daily_sovereign_usd
+  token_budget_daily_fleet_ceiling_usd = var.token_budget_daily_fleet_ceiling_usd
+  token_budget_argon_reserve_pct       = var.token_budget_argon_reserve_pct
+  sql_private_ip                       = module.data.sql_private_ip
+  sql_readonly_password                = module.data.sql_readonly_password
+}

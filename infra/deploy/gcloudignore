@@ -1,0 +1,34 @@
+# God-View Cloud Build ignore rules
+# Exclude local virtualenvs, node_modules, build artifacts, Terraform state/providers, and caches.
+.git/
+.gitignore
+.venv/
+**/.venv/
+venv/
+**/venv/
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+build/
+**/build/
+.terraform/
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+**/.pytest_cache/
+.ruff_cache/
+**/.ruff_cache/
+.mypy_cache/
+**/.mypy_cache/
+.coverage
+htmlcov/
+*.egg-info/
+**/*.egg-info/

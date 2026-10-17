@@ -1,0 +1,22 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '--network=cloudbuild'
+      - '-f'
+      - '${_DOCKERFILE}'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/${PROJECT_ID}/god-view-containers/${_SERVICE}:${_SHA}'
+      - '-t'
+      - 'us-central1-docker.pkg.dev/${PROJECT_ID}/god-view-containers/${_SERVICE}:latest'
+      - '${_CONTEXT}'
+images:
+  - 'us-central1-docker.pkg.dev/${PROJECT_ID}/god-view-containers/${_SERVICE}:${_SHA}'
+  - 'us-central1-docker.pkg.dev/${PROJECT_ID}/god-view-containers/${_SERVICE}:latest'
+substitutions:
+  _SERVICE: 'god-view-hibernate-job'
+  _SHA: 'latest'
+  _DOCKERFILE: 'godview/sovereign/Dockerfile'
+  _CONTEXT: '.'
+options:
+  logging: CLOUD_LOGGING_ONLY

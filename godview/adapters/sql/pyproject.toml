@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "godview-adapter-sql"
+version = "4.0.0"
+description = "God-View v4 PostgreSQL Sense Adapter (information_schema, pg_stat_statements, pg_locks blocking tree, logical decoding readiness, MCP Toolbox + psycopg 3)"
+requires-python = ">=3.13"
+dependencies = [
+    "godview-shared",
+    "psycopg[binary]>=3.1.0",
+    "pydantic>=2.7.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
