@@ -32,6 +32,7 @@ class ProbeRunRequest(BaseModel):
     """Optional payload when manually triggering a probe/sentinel run."""
 
     source: str = Field(default="service_call", description="Triggering caller identity")
+    action: str | None = Field(default=None, description="Optional action name")
     sentinel_id: str | None = Field(default=None, description="Optional target sentinel ID")
 
 
@@ -169,10 +170,43 @@ def build_router(ctx: Any) -> APIRouter:
         """Trigger an immediate evaluation cycle across registered sentinels and probes."""
         now_iso = datetime.now(tz=UTC).isoformat()
         req_source = body.source if body else "service_call"
+        req_action = (body.action if body and body.action else None) or "probe_run"
+
+        docs_store = getattr(ctx, "docs", None)
+        op_state = None
+        if docs_store is not None:
+            try:
+                op_state = docs_store.get("operator_state", "current")
+            except Exception:
+                pass
+        if not op_state and hasattr(ctx, "operator_state"):
+            op_state = ctx.operator_state
+        trust_gate = getattr(ctx, "trust_gate", None)
+        is_paused = (
+            (
+                op_state
+                and (
+                    op_state.get("tenant_paused")
+                    or op_state.get("kill_switch_enabled")
+                    or op_state.get("hibernate_enabled")
+                )
+            )
+            or (trust_gate and getattr(trust_gate, "global_kill_switch", False))
+        )
+        if is_paused:
+            return {
+                "status": "skipped",
+                "action": req_action,
+                "reason": "paused_or_hibernating",
+                "sentinels_evaluated": 0,
+                "wakes_triggered": 0,
+                "checked_at": now_iso,
+            }
+
         tick = await engine.evaluate_tick()
         return {
             "status": "ok",
-            "action": "probe_run",
+            "action": req_action,
             "source": req_source,
             "sentinels_evaluated": tick.evaluated_count,
             "wakes_triggered": len(tick.wakes_sent),

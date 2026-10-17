@@ -153,9 +153,13 @@ def build_router(ctx: Any) -> APIRouter:
         listeners = getattr(hooks, "on_approval_decided", None)
         if not listeners:
             return
-        if callable(listeners):
-            listeners = [listeners]
-        for listener in listeners:
+        if hasattr(listeners, "__iter__") and not isinstance(listeners, (str, bytes, dict)):
+            cb_list = list(listeners)
+        elif callable(listeners):
+            cb_list = [listeners]
+        else:
+            cb_list = []
+        for listener in cb_list:
             try:
                 res = listener(card)
                 if inspect.isawaitable(res):
@@ -300,6 +304,7 @@ def build_router(ctx: Any) -> APIRouter:
             card_dict = updated_card.model_dump(mode="json")
             card_dict["execution_result"] = exec_result.model_dump(mode="json")
             card_dict["executed_at"] = datetime.now(tz=UTC).isoformat()
+            card_dict["audit_id"] = getattr(audit, "audit_id", None) or getattr(audit, "doc_id", "aud-approved")
             if docs_store is not None:
                 docs_store.set("approvals", approval_id, card_dict, merge=True)
 
@@ -323,6 +328,9 @@ def build_router(ctx: Any) -> APIRouter:
 
             return {
                 "ok": exec_result.ok,
+                "decision": "approved",
+                "decided_by": actor,
+                "audit_id": getattr(audit, "audit_id", None) or getattr(audit, "doc_id", "aud-approved"),
                 "approval": card_dict,
                 "execution_result": exec_result.model_dump(mode="json"),
                 "audit": audit.model_dump(mode="json"),
@@ -351,6 +359,35 @@ def build_router(ctx: Any) -> APIRouter:
             await _trigger_approval_decided_hook(updated_card)
             return {
                 "ok": True,
+                "decision": "rejected",
+                "approval": updated_card.model_dump(mode="json"),
+                "audit": audit.model_dump(mode="json"),
+            }
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"Approval '{approval_id}' not found") from None
+        except TrustViolation as tv:
+            raise HTTPException(status_code=400, detail=str(tv)) from None
+
+    @router.post("/approvals/{approval_id}/snooze")
+    @router.post("/approvals/{approval_id}:snooze")
+    async def snooze_card(
+        approval_id: str,
+        body: ApprovalDecisionRequest | None = None,
+        operator: Any = Depends(operator_dep),  # noqa: B008
+    ) -> dict[str, Any]:
+        """Snooze an approval card with operator identity."""
+        actor = _get_operator_email(operator)
+        try:
+            updated_card, audit = trust_gate.decide_approval(
+                approval_id,
+                decision="snoozed",
+                decided_by=actor,
+            )
+
+            await _trigger_approval_decided_hook(updated_card)
+            return {
+                "ok": True,
+                "decision": "snoozed",
                 "approval": updated_card.model_dump(mode="json"),
                 "audit": audit.model_dump(mode="json"),
             }

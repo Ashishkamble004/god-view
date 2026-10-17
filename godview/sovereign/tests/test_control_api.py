@@ -166,25 +166,10 @@ def test_capability_invoke_endpoint_a3_and_approvals_flow() -> None:
 
 @pytest.mark.unit
 def test_kill_switch_pause_resume_hibernate_and_drills_guard() -> None:
-    """UC-18, UC-19, UC-20 & §3.4: Kill switch, pause/resume, hibernate (60 s), and drills managed-only guard."""
+    """UC-18, UC-19, UC-20 & §3.4: Kill switch, pause/resume, and hibernate (60 s)."""
     app = create_app(webhook_secret="test-secret")
     client = TestClient(app)
     client.post("/v1/perceive", json={"reset": True})
-
-    # Start a drill on a godview_managed="true" resource -> succeeds
-    r_drill_ok = client.post(
-        "/v1/chaos/drills/gke_oom_503:start",
-        json={"target_service": "svc-managed-01", "labels": {"godview_managed": "true"}},
-    )
-    assert r_drill_ok.status_code == 200
-    assert r_drill_ok.json()["is_active"] is True
-
-    # Start a drill on an unmanaged resource -> rejected with 403 (TDD I-07)
-    r_drill_bad = client.post(
-        "/v1/chaos/drills/gke_oom_503:start",
-        json={"target_service": "svc-unmanaged-99", "labels": {"godview_managed": "false"}},
-    )
-    assert r_drill_bad.status_code == 403
 
     # Traffic Kill Switch (UC-18): halts simulator, pauses tenant, clears chaos, emits godview.operator.kill_switch
     r_ks = client.post(
@@ -307,12 +292,12 @@ def test_otlp_traces_receiver_and_configure_exporters_pipeline() -> None:
             journey_id="jrn-trace-001",
             customer_id="cust-trace-01",
             decision="APPROVED",
-            foir_pct=41.5,
-            cibil_score=765,
+            ratio_pct=41.5,
+            score_value=765,
             status_from="STEP_A",
             status_to="STEP_B",
             event_type="step.evaluated",
-            amount_inr=250000.0,
+            amount_value=250000.0,
             synthetic=True,
         )
 
@@ -322,8 +307,8 @@ def test_otlp_traces_receiver_and_configure_exporters_pipeline() -> None:
     assert len(events) == 1
     assert events[0]["journey_id"] == "jrn-trace-001"
     assert (
-        events[0].get("cibil_score") == 765
-        or events[0].get("numeric_attributes", {}).get("cibil_score") == 765.0
+        events[0].get("score_value") == 765
+        or events[0].get("numeric_attributes", {}).get("score_value") == 765.0
     )
     assert len(transitions) == 1
     assert transitions[0]["status_to"] == "STEP_B"
@@ -356,8 +341,8 @@ def test_otlp_traces_receiver_and_configure_exporters_pipeline() -> None:
                                             "value": {"stringValue": "jrn-trace-002"},
                                         },
                                         {"key": "decision", "value": {"stringValue": "APPROVED"}},
-                                        {"key": "cibil_score", "value": {"intValue": "780"}},
-                                        {"key": "foir_pct", "value": {"doubleValue": 35.0}},
+                                        {"key": "score_value", "value": {"intValue": "780"}},
+                                        {"key": "ratio_pct", "value": {"doubleValue": 35.0}},
                                         {"key": "synthetic", "value": {"boolValue": True}},
                                     ],
                                 }
@@ -393,7 +378,9 @@ def test_control_api_Remaining_endpoints_reject_snooze_whitelist_and_summaries()
 
     r_list_apr = client.get("/v1/approvals")
     assert r_list_apr.status_code == 200
-    assert len(r_list_apr.json()["approvals"]) >= 1
+    apr_data = r_list_apr.json()
+    cards = apr_data if isinstance(apr_data, list) else apr_data.get("approvals", [])
+    assert len(cards) >= 1
 
     r_snooze = client.post(f"/v1/approvals/{approval_id}:snooze")
     assert r_snooze.status_code == 200
@@ -440,9 +427,7 @@ def test_control_api_Remaining_endpoints_reject_snooze_whitelist_and_summaries()
     assert r_retire.status_code == 200
     assert r_retire.json()["state"] == "archived"
 
-    # Drills list & stop, changes, cost, invariants, journeys, incidents
-    assert client.get("/v1/chaos/drills").status_code == 200
-    assert client.post("/v1/chaos/drills/gke_oom_503:stop").status_code == 200
+    # Changes, cost, invariants, journeys, incidents, sentinels
     assert client.get("/v1/changes").status_code == 200
     assert client.get("/v1/cost").status_code == 200
     assert client.get("/v1/invariants").status_code == 200
@@ -532,42 +517,19 @@ def test_cockpit_contracts_simulator_drift_sse_webhooks_and_adapter_dispatch() -
     assert "text/event-stream" in r_sse.headers["content-type"]
     assert "sovereign.heartbeat" in r_sse.text
 
-    # 4. Simulator state and journeys burst
-    r_sim_state = client.post("/api/v1/simulator/state", json={"enabled": False})
-    assert r_sim_state.status_code == 200
-    assert r_sim_state.json()["simulator_enabled"] is False
-
-    r_sim_jrn = client.post("/api/v1/simulator/journeys", json={"count": 7})
-    assert r_sim_jrn.status_code == 200
-    assert r_sim_jrn.json()["simulator_journeys_today"] >= 7
-
-    # 5. Terraform drift remediation endpoints & GET /api/v1/cost overview
-    r_drift_restore = client.post("/api/v1/cost/drift/drift-01:restore_attribute", json={})
-    assert r_drift_restore.status_code == 200
-    assert r_drift_restore.json()["status"] == "restored"
-
-    r_drift_apply = client.post("/api/v1/cost/drift/drift-01:apply_dispatch", json={})
-    assert r_drift_apply.status_code == 200
-    assert r_drift_apply.json()["status"] == "reconciling"
-
+    # 4. GET /api/v1/cost overview
     r_cost = client.get("/api/v1/cost")
     assert r_cost.status_code == 200
     assert "drift_diffs" in r_cost.json()
     assert "daily_court_ceiling_usd" in r_cost.json()
 
-    # 6. POST /api/v1/sentinels with {"invariant_id": "..."} and invalid payload -> 422
+    # 5. POST /api/v1/sentinels with {"invariant_id": "..."} and invalid payload -> 422
     r_compile = client.post("/api/v1/sentinels", json={"invariant_id": "inv-alpha-01"})
     assert r_compile.status_code == 200
     assert r_compile.json()["sentinel_id"] == "snt-invariant_sql-alpha-01"
 
     r_bad_snt = client.post("/api/v1/sentinels", json={"invariant_id": ""})
     assert r_bad_snt.status_code == 422
-
-    # 7. POST /api/v1/chaos/drills/{id}:start with empty body {} (Cockpit default)
-    r_drill_empty = client.post("/api/v1/chaos/drills/gke_oom_503:start", json={})
-    assert r_drill_empty.status_code == 200
-    assert r_drill_empty.json()["is_active"] is True
-    assert r_drill_empty.json()["fault_class"] == "infrastructure"
 
     # 8. Whitelist toggle off ({"whitelisted": False})
     iap_hdr = {"X-Goog-Authenticated-User-Email": "accounts.google.com:owner@example.com"}

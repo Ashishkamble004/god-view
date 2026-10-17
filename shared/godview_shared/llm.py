@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import logging
 import math
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any
+from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
@@ -18,6 +20,10 @@ from godview_shared.config import (
     MODEL_TABLE,
     GodViewSettings,
 )
+
+logger = logging.getLogger("godview.llm")
+
+T = TypeVar("T", bound=BaseModel)
 
 
 @dataclass
@@ -121,7 +127,6 @@ class LlmClient:
                 try:
                     parsed_obj = response_schema()
                 except Exception:
-                    # Provide default values for required fields if needed
                     parsed_obj = None
 
             return LlmResponse(
@@ -141,14 +146,18 @@ class LlmClient:
 
                 from google.genai import types
 
+                extra_kwargs: dict[str, Any] = {}
+                if response_schema is not None:
+                    extra_kwargs["response_mime_type"] = "application/json"
+
                 config = types.GenerateContentConfig(
                     response_schema=response_schema,
                     tools=tools,
                     system_instruction=system_instruction,
+                    **extra_kwargs,
                     **kwargs,
                 )
 
-                # Use asyncio to execute generate_content without blocking
                 import asyncio
 
                 res = await asyncio.to_thread(
@@ -160,15 +169,16 @@ class LlmClient:
 
                 prompt_tokens = 0
                 comp_tokens = 0
+                thoughts_tokens = 0
                 if hasattr(res, "usage_metadata") and res.usage_metadata:
                     prompt_tokens = getattr(res.usage_metadata, "prompt_token_count", 0) or 0
                     comp_tokens = getattr(res.usage_metadata, "candidates_token_count", 0) or 0
+                    thoughts_tokens = getattr(res.usage_metadata, "thoughts_token_count", 0) or 0
 
-                total_tokens = prompt_tokens + comp_tokens
+                total_tokens = prompt_tokens + comp_tokens + thoughts_tokens
 
                 # Meter tokens if token_governor is available
                 if self.token_governor is not None and total_tokens > 0:
-                    # Rough cost estimate
                     usd_cost = Decimal(str(total_tokens)) * Decimal("0.000002")
                     await self.token_governor.record_usage(
                         agent_id=agent_id,
@@ -196,12 +206,60 @@ class LlmClient:
                 )
             except Exception as exc:
                 last_exc = exc
-                # Try next fallback model candidate on 429, 503, or rate limits
+                err_str = str(exc).lower()
+                # Catch only retryable exceptions for Flash fallback; re-raise 400 immediately
+                is_retryable = any(
+                    marker in err_str
+                    for marker in (
+                        "429",
+                        "503",
+                        "resource_exhausted",
+                        "resourceexhausted",
+                        "quota",
+                        "rate limit",
+                        "temporarily unavailable",
+                        "unavailable",
+                    )
+                )
+                if not is_retryable:
+                    logger.warning("Non-retryable LLM error on %s: %s", model_id, exc)
+                    raise
+                logger.info("Retryable LLM error on %s (%s), trying fallback candidate...", model_id, exc)
                 continue
 
         if last_exc is not None:
             raise last_exc
         raise RuntimeError("No LLM model candidate succeeded")
+
+    async def generate_structured(
+        self,
+        role: str,
+        prompt: str,
+        schema: type[T],
+        *,
+        agent_id: str = "sovereign",
+        system_instruction: str | None = None,
+        **kwargs: Any,
+    ) -> T:
+        """Generate structured output strictly validated against a Pydantic schema."""
+        resp = await self.generate(
+            role=role,
+            contents=prompt,
+            response_schema=schema,
+            agent_id=agent_id,
+            system_instruction=system_instruction,
+            **kwargs,
+        )
+        if resp.parsed is not None and isinstance(resp.parsed, schema):
+            return resp.parsed
+        if resp.text:
+            try:
+                data = json.loads(resp.text)
+                if isinstance(data, dict):
+                    return schema.model_validate(data)
+            except Exception:
+                pass
+        raise RuntimeError(f"Failed to generate structured response matching schema {schema.__name__}")
 
     async def embed(self, texts: Sequence[str]) -> list[list[float]]:
         """Compute embeddings for a sequence of texts using text-embedding-005."""
@@ -211,23 +269,47 @@ class LlmClient:
         if self.settings.env_mode == "hermetic":
             return [_deterministic_embedding(t) for t in texts]
 
+        emb_cfg = MODEL_TABLE.get("embedding")
+        emb_model = emb_cfg.model_id if emb_cfg else "text-embedding-005"
+        emb_loc = emb_cfg.location if emb_cfg else "us-central1"
+
         try:
             import asyncio
 
-            client = self._get_genai_client("us-central1")
-            res = await asyncio.to_thread(
-                client.models.embed_content,
-                model="text-embedding-005",
-                contents=list(texts),
-            )
-            embeddings = []
-            if hasattr(res, "embeddings") and res.embeddings:
-                for emb in res.embeddings:
-                    embeddings.append(list(emb.values))
-                return embeddings
-            if hasattr(res, "embedding") and res.embedding:
-                return [list(res.embedding.values)]
-            return [_deterministic_embedding(t) for t in texts]
+            from google.genai import types
+
+            client = self._get_genai_client(emb_loc)
+            if client is None:
+                if self.settings.env_mode == "local":
+                    return [_deterministic_embedding(t) for t in texts]
+                raise RuntimeError(f"Vertex Client unavailable for embedding at {emb_loc}")
+
+            BATCH_SIZE = 250
+            text_list = list(texts)
+            all_embeddings: list[list[float]] = []
+
+            for i in range(0, len(text_list), BATCH_SIZE):
+                batch = text_list[i : i + BATCH_SIZE]
+                config = types.EmbedContentConfig(output_dimensionality=768)
+                res = await asyncio.to_thread(
+                    client.models.embed_content,
+                    model=emb_model,
+                    contents=batch,
+                    config=config,
+                )
+                batch_embs: list[list[float]] = []
+                if hasattr(res, "embeddings") and res.embeddings:
+                    for emb in res.embeddings:
+                        batch_embs.append(list(emb.values))
+                elif hasattr(res, "embedding") and res.embedding:
+                    batch_embs.append(list(res.embedding.values))
+                else:
+                    if self.settings.env_mode == "gcp":
+                        raise RuntimeError("Vertex embed_content returned no embeddings in GCP mode")
+                    batch_embs = [_deterministic_embedding(t) for t in batch]
+                all_embeddings.extend(batch_embs)
+
+            return all_embeddings
         except Exception:
             if self.settings.env_mode == "local":
                 return [_deterministic_embedding(t) for t in texts]

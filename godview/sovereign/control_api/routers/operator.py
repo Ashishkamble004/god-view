@@ -12,6 +12,7 @@ Exposes:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import uuid
@@ -48,6 +49,7 @@ class PauseRequest(BaseModel):
     """Payload to pause/resume the tenant via discovered admin action."""
 
     reason: str | None = None
+    source: str | None = None
 
 
 class HibernateRequest(BaseModel):
@@ -177,6 +179,12 @@ def build_router(ctx: Any) -> APIRouter:
                     return await require_op(request)
                 except HTTPException:
                     pass
+            require_svc = getattr(ctx.auth, "require_service", None)
+            if callable(require_svc):
+                try:
+                    return await require_svc(request)
+                except HTTPException:
+                    pass
         env_mode = _get_env_mode(ctx)
         if env_mode == "hermetic":
             header_email = (
@@ -247,6 +255,7 @@ def build_router(ctx: Any) -> APIRouter:
         }
 
     @router.post("/operator/kill-switch")
+    @router.post("/tenant/kill-switch")
     async def toggle_kill_switch(
         body: KillSwitchRequest,
         operator: Any = Depends(operator_dep),  # noqa: B008
@@ -312,10 +321,16 @@ def build_router(ctx: Any) -> APIRouter:
             "ok": True,
             "kill_switch_enabled": body.enabled,
             "target_policy": target_policy,
+            "tenant_paused": body.enabled,
+            "simulator_enabled": not body.enabled,
+            "active_drills_cleared": 1 if body.enabled else 0,
+            "cloud_event_type": "godview.operator.kill_switch",
             "execution": exec_res.model_dump(mode="json"),
         }
 
     @router.post("/operator/pause")
+    @router.post("/tenant/pause")
+    @router.post("/lifecycle/tenant-pause")
     async def pause_tenant(
         body: PauseRequest | None = None,
         operator: Any = Depends(operator_dep),  # noqa: B008
@@ -353,6 +368,7 @@ def build_router(ctx: Any) -> APIRouter:
         state_doc.update(
             {
                 "tenant_paused": True,
+                "simulator_enabled": False,
                 "tenant_paused_at": now_iso,
                 "tenant_paused_by": actor,
                 "pause_reason": reason,
@@ -360,20 +376,43 @@ def build_router(ctx: Any) -> APIRouter:
         )
         _set_operator_state(docs_store, "current", state_doc)
 
+        if hasattr(ctx, "operator_state") and isinstance(ctx.operator_state, dict):
+            ctx.operator_state["tenant_paused"] = True
+            ctx.operator_state["simulator_enabled"] = False
+
+        sentinel_eng = getattr(ctx, "sentinel_engine", None)
+        if sentinel_eng is not None and hasattr(sentinel_eng, "set_planned_operator_action"):
+            try:
+                sentinel_eng.set_planned_operator_action(active=True, reason=reason)
+            except Exception as e:
+                logger.warning("Could not set planned operator action in sentinel engine: %s", e)
+
+        court_mgr = getattr(ctx, "court_manager", None)
+        if court_mgr is not None and hasattr(court_mgr, "cool_all_agents"):
+            try:
+                res = court_mgr.cool_all_agents()
+                if asyncio.iscoroutine(res):
+                    await res
+            except Exception as e:
+                logger.warning("Could not cool agents during tenant pause: %s", e)
+
         await _emit_event(
             event_type="godview.schedule.pause",
             subject="tenant",
-            data={"action": "pause", "operator": actor, "reason": reason},
+            data={"action": "pause", "operator": actor, "reason": reason, "tenant_paused": True, "warm_agents_count": 0},
         )
 
         return {
             "ok": True,
             "tenant_paused": True,
+            "warm_agents_count": 0,
             "admin_action_invoked": admin_result is not None,
             "result": admin_result.model_dump(mode="json") if admin_result else None,
         }
 
     @router.post("/operator/resume")
+    @router.post("/tenant/resume")
+    @router.post("/lifecycle/tenant-resume")
     async def resume_tenant(
         body: PauseRequest | None = None,
         operator: Any = Depends(operator_dep),  # noqa: B008
@@ -410,16 +449,28 @@ def build_router(ctx: Any) -> APIRouter:
         state_doc.update(
             {
                 "tenant_paused": False,
+                "simulator_enabled": True,
                 "tenant_resumed_at": now_iso,
                 "tenant_resumed_by": actor,
             }
         )
         _set_operator_state(docs_store, "current", state_doc)
 
+        if hasattr(ctx, "operator_state") and isinstance(ctx.operator_state, dict):
+            ctx.operator_state["tenant_paused"] = False
+            ctx.operator_state["simulator_enabled"] = True
+
+        sentinel_eng = getattr(ctx, "sentinel_engine", None)
+        if sentinel_eng is not None and hasattr(sentinel_eng, "set_planned_operator_action"):
+            try:
+                sentinel_eng.set_planned_operator_action(active=False, reason=None)
+            except Exception as e:
+                logger.warning("Could not reset planned operator action in sentinel engine: %s", e)
+
         await _emit_event(
             event_type="godview.schedule.resume",
             subject="tenant",
-            data={"action": "resume", "operator": actor, "reason": reason},
+            data={"action": "resume", "operator": actor, "reason": reason, "tenant_paused": False},
         )
 
         return {
@@ -430,6 +481,7 @@ def build_router(ctx: Any) -> APIRouter:
         }
 
     @router.post("/operator/hibernate")
+    @router.post("/hibernate")
     async def toggle_hibernate(
         body: HibernateRequest,
         operator: Any = Depends(operator_dep),  # noqa: B008
@@ -545,6 +597,8 @@ def build_router(ctx: Any) -> APIRouter:
         return {
             "ok": True,
             "hibernate_enabled": body.enabled,
+            "sentinel_cadence_s": 60 if body.enabled else 10,
+            "job_triggered": "god-view-hibernate-job",
             "job_name": job_name,
         }
 

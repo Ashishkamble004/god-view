@@ -583,7 +583,7 @@ class TrustGate:
         self,
         approval_id: str,
         *,
-        decision: Literal["approved", "rejected"],
+        decision: Literal["approved", "rejected", "snoozed"],
         decided_by: str,
     ) -> tuple[ApprovalCard, AuditRecord]:
         """Record a human IAP decision on an approval card and write an immutable AuditRecord."""

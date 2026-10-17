@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any
 
 from godview_shared.contracts import NervousSystemEvent
@@ -65,22 +66,27 @@ class PubSubBus:
             else target_topic
         )
 
-        # CloudEvents 1.0 attributes
+        # Full CloudEvents 1.0 binary mode attributes
+        now_iso = datetime.now(tz=UTC).isoformat()
         attrs = {
             "ce-specversion": "1.0",
-            "ce-type": validated.type,
-            "ce-source": validated.source,
-            "ce-id": validated.id,
+            "ce-type": str(validated.type),
+            "ce-source": str(validated.source),
+            "ce-id": str(validated.id),
+            "ce-time": str(getattr(validated, "time", None) or now_iso),
+            "datacontenttype": "application/json",
         }
         if validated.subject:
-            attrs["ce-subject"] = validated.subject
+            attrs["ce-subject"] = str(validated.subject)
 
-        # Run publish async
+        # Run publish async with timeout
         future = publisher.publish(topic_path, payload_bytes, **attrs)
-        msg_id = await asyncio.to_thread(future.result)
+        msg_id = await asyncio.to_thread(future.result, 10.0)
 
-        # Also trigger in-process subscribers if any
-        if target_topic in self._subscribers:
+        # In GCP mode, events are delivered via Cloud Pub/Sub push subscription (/nervous-system/push).
+        # Triggering in-process subscribers in GCP mode would cause duplicate processing.
+        is_gcp = os.environ.get("GODVIEW_ENV") == "gcp" or bool(os.environ.get("K_SERVICE"))
+        if not is_gcp and target_topic in self._subscribers:
             data_dict = validated.model_dump(mode="json")
             for handler in self._subscribers[target_topic]:
                 try:
@@ -90,7 +96,7 @@ class PubSubBus:
                 except Exception as exc:
                     logger.warning("PubSub subscriber handler error: %s", exc)
 
-        return msg_id or validated.id
+        return str(msg_id or validated.id)
 
     def subscribe(
         self,

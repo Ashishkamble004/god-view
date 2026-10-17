@@ -222,7 +222,9 @@ def build_router(ctx: Any) -> APIRouter:
 
     @router.post("/memory/reflect", dependencies=[Depends(auth_dependency)])
     async def memory_reflect(payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        src = (payload or {}).get("source", "nightly")
+        body = payload or {}
+        src = body.get("source", "nightly")
+        action = body.get("action", "reflect")
         results = []
         for dom in ("application", "data", "business_line", "change", "platform"):
             aid = f"{dom}__specialist"
@@ -247,6 +249,6 @@ def build_router(ctx: Any) -> APIRouter:
             except Exception as exc:
                 logger.warning("RSI reflection skipped for %s: %s", aid, exc)
                 results.append({"agent_id": aid, "domain": dom, "error": str(exc)})
-        return {"status": "completed", "results": results}
+        return {"status": "ok", "state": "completed", "action": action, "results": results}
 
     return router

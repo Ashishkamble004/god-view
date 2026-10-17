@@ -7,6 +7,39 @@ import os
 from collections.abc import Callable, Sequence
 from typing import Any
 
+from godview_shared.fakes.firestore import ALL_FIRESTORE_COLLECTIONS
+
+
+def _wrap_vectors(data: dict[str, Any]) -> dict[str, Any]:
+    """Wrap 768-dimensional float lists in Firestore Vector objects."""
+    try:
+        from google.cloud.firestore_v1.vector import Vector
+    except ImportError:
+        return data
+
+    out: dict[str, Any] = {}
+    for k, v in data.items():
+        if isinstance(v, (list, tuple)) and len(v) == 768 and all(isinstance(x, (int, float)) for x in v):
+            out[k] = Vector(list(v))
+        elif isinstance(v, dict):
+            out[k] = _wrap_vectors(v)
+        else:
+            out[k] = v
+    return out
+
+
+def _unwrap_vectors(data: dict[str, Any]) -> dict[str, Any]:
+    """Convert Firestore Vector objects back to standard Python float lists."""
+    out: dict[str, Any] = {}
+    for k, v in data.items():
+        if hasattr(v, "__class__") and v.__class__.__name__ == "Vector":
+            out[k] = list(v)
+        elif isinstance(v, dict):
+            out[k] = _unwrap_vectors(v)
+        else:
+            out[k] = v
+    return out
+
 
 class FirestoreStore:
     """Production Firestore Native DocumentStore."""
@@ -40,6 +73,14 @@ class FirestoreStore:
             )
         return self._client
 
+    def _validate_collection(self, collection: str) -> None:
+        if collection not in ALL_FIRESTORE_COLLECTIONS:
+            # Allow known subcollections or dynamic extensions
+            if not collection.startswith("test_") and collection not in ALL_FIRESTORE_COLLECTIONS:
+                raise ValueError(
+                    f"Unknown Firestore collection '{collection}' (allowed: {ALL_FIRESTORE_COLLECTIONS})"
+                )
+
     def set(
         self,
         collection: str,
@@ -48,15 +89,18 @@ class FirestoreStore:
         merge: bool = False,
     ) -> dict[str, Any]:
         """Create or update a document in a top-level collection."""
+        self._validate_collection(collection)
         client = self._get_client()
         stored = copy.deepcopy(data)
         stored["_id"] = doc_id
         ref = client.collection(collection).document(doc_id)
-        ref.set(stored, merge=merge)
+        firestore_data = _wrap_vectors(stored)
+        ref.set(firestore_data, merge=merge)
         return copy.deepcopy(stored)
 
     def get(self, collection: str, doc_id: str) -> dict[str, Any] | None:
         """Fetch a single document by ID, or None if not found."""
+        self._validate_collection(collection)
         client = self._get_client()
         ref = client.collection(collection).document(doc_id)
         snap = ref.get()
@@ -64,10 +108,12 @@ class FirestoreStore:
             return None
         data = snap.to_dict() or {}
         data["_id"] = doc_id
-        return copy.deepcopy(data)
+        unwrapped = _unwrap_vectors(data)
+        return copy.deepcopy(unwrapped)
 
     def delete(self, collection: str, doc_id: str) -> bool:
         """Delete a document by ID."""
+        self._validate_collection(collection)
         client = self._get_client()
         ref = client.collection(collection).document(doc_id)
         snap = ref.get()
@@ -85,6 +131,7 @@ class FirestoreStore:
         cursor: str | None = None,
     ) -> list[dict[str, Any]]:
         """List documents in a collection with optional filters and pagination."""
+        self._validate_collection(collection)
         client = self._get_client()
         from google.cloud.firestore_v1.base_query import FieldFilter
 
@@ -101,15 +148,19 @@ class FirestoreStore:
             if cursor_snap.exists:
                 query = query.start_after(cursor_snap)
 
-        if limit is not None:
+        # If predicate is NOT provided, we can push down limit to Firestore directly
+        if predicate is None and limit is not None:
             query = query.limit(limit)
 
         results: list[dict[str, Any]] = []
         for snap in query.stream():
             d = snap.to_dict() or {}
             d["_id"] = snap.id
-            if predicate is None or predicate(d):
-                results.append(copy.deepcopy(d))
+            unwrapped = _unwrap_vectors(d)
+            if predicate is None or predicate(unwrapped):
+                results.append(copy.deepcopy(unwrapped))
+                if limit is not None and len(results) >= limit:
+                    break
         return results
 
     def set_subdoc(
@@ -121,6 +172,7 @@ class FirestoreStore:
         data: dict[str, Any],
     ) -> dict[str, Any]:
         """Create or update a subcollection document."""
+        self._validate_collection(collection)
         client = self._get_client()
         stored = copy.deepcopy(data)
         stored["_id"] = sub_id
@@ -130,7 +182,8 @@ class FirestoreStore:
             .collection(subcollection)
             .document(sub_id)
         )
-        ref.set(stored)
+        firestore_data = _wrap_vectors(stored)
+        ref.set(firestore_data)
         return copy.deepcopy(stored)
 
     def get_subdoc(
@@ -141,6 +194,7 @@ class FirestoreStore:
         sub_id: str,
     ) -> dict[str, Any] | None:
         """Fetch a subcollection document by ID, or None if not found."""
+        self._validate_collection(collection)
         client = self._get_client()
         ref = (
             client.collection(collection)
@@ -153,7 +207,8 @@ class FirestoreStore:
             return None
         data = snap.to_dict() or {}
         data["_id"] = sub_id
-        return copy.deepcopy(data)
+        unwrapped = _unwrap_vectors(data)
+        return copy.deepcopy(unwrapped)
 
     def list_subdocs(
         self,
@@ -162,6 +217,7 @@ class FirestoreStore:
         subcollection: str,
     ) -> list[dict[str, Any]]:
         """List all documents in a subcollection."""
+        self._validate_collection(collection)
         client = self._get_client()
         query = (
             client.collection(collection)
@@ -172,7 +228,8 @@ class FirestoreStore:
         for snap in query.stream():
             d = snap.to_dict() or {}
             d["_id"] = snap.id
-            results.append(copy.deepcopy(d))
+            unwrapped = _unwrap_vectors(d)
+            results.append(copy.deepcopy(unwrapped))
         return results
 
     def find_nearest(
@@ -184,6 +241,12 @@ class FirestoreStore:
         min_similarity: float = 0.0,
     ) -> list[tuple[dict[str, Any], float]]:
         """Execute vector KNN search on indexed vector fields."""
+        self._validate_collection(collection)
+        if len(query_vector) != 768:
+            raise ValueError(
+                f"Query vector must be 768 dimensions (got {len(query_vector)})"
+            )
+
         client = self._get_client()
         from google.cloud.firestore_v1.base_vector_query import DistanceMeasure
         from google.cloud.firestore_v1.vector import Vector
@@ -194,15 +257,16 @@ class FirestoreStore:
             query_vector=Vector(list(query_vector)),
             distance_measure=DistanceMeasure.COSINE,
             limit=limit,
-            distance_result_field="_vector_distance",
+            distance_result_field="vector_distance",
         )
         scored: list[tuple[dict[str, Any], float]] = []
         for snap in query.stream():
             d = snap.to_dict() or {}
             d["_id"] = snap.id
-            dist = float(d.pop("_vector_distance", 0.0))
+            dist = float(d.pop("vector_distance", d.pop("_vector_distance", 0.0)))
             sim = 1.0 - dist
             if sim >= min_similarity:
-                scored.append((copy.deepcopy(d), sim))
+                unwrapped = _unwrap_vectors(d)
+                scored.append((copy.deepcopy(unwrapped), sim))
         scored.sort(key=lambda pair: pair[1], reverse=True)
         return scored[:limit]

@@ -299,6 +299,7 @@ class AuthService:
             audience
             or os.environ.get("GODVIEW_SOVEREIGN_URL")
             or os.environ.get("SERVICE_URL")
+            or getattr(self.settings, "service_url", "")
         )
 
         if self.settings.env_mode in ("hermetic", "local"):
@@ -329,7 +330,15 @@ class AuthService:
         if not token:
             return None
 
-        if not effective_audience:
+        candidate_audiences: list[str] = []
+        if effective_audience:
+            candidate_audiences.append(effective_audience.rstrip("/"))
+        if isinstance(request_or_token, Request):
+            req_base = str(request_or_token.base_url).rstrip("/")
+            if req_base and req_base not in candidate_audiences:
+                candidate_audiences.append(req_base)
+
+        if not candidate_audiences:
             logger.error("OIDC verification failed: audience is required")
             return None
 
@@ -337,37 +346,74 @@ class AuthService:
             from google.oauth2 import id_token
 
             req = self._get_auth_request()
-            claims = id_token.verify_oauth2_token(
-                token, req, audience=effective_audience
-            )
+            claims = None
+            verified_aud = ""
+            for aud in candidate_audiences:
+                try:
+                    claims = id_token.verify_oauth2_token(
+                        token, req, audience=aud
+                    )
+                    verified_aud = aud
+                    break
+                except Exception:
+                    continue
+
+            if not claims:
+                return None
 
             iss = claims.get("iss", "")
             if iss not in (GOOGLE_OIDC_ISSUER, "accounts.google.com"):
                 return None
 
             email = claims.get("email", "")
-            # Verify against allowed service accounts
+            current_project = (
+                getattr(self.settings, "gcp_project_id", "")
+                or os.environ.get("GOOGLE_CLOUD_PROJECT")
+                or os.environ.get("GCP_PROJECT_ID")
+                or ""
+            )
+
+            # Strict project-qualified service principal allowlist (Decision #89/#91/#95)
             if self._allowed_service_principals:
                 if email not in self._allowed_service_principals:
-                    # Also permit standard naming pattern: godview-*-sa@*.iam.gserviceaccount.com
+                    if current_project:
+                        expected_suffix = f"@{current_project}.iam.gserviceaccount.com"
+                        if not (
+                            email.startswith("godview-")
+                            and email.endswith(expected_suffix)
+                        ):
+                            logger.warning(
+                                "OIDC rejected: foreign or unlisted service account %s (expected %s)",
+                                email, expected_suffix
+                            )
+                            return None
+                    else:
+                        logger.warning("OIDC rejected: email %s not in allowed principals", email)
+                        return None
+            else:
+                if current_project:
+                    expected_suffix = f"@{current_project}.iam.gserviceaccount.com"
+                    if not (
+                        email.startswith("godview-")
+                        and email.endswith(expected_suffix)
+                    ):
+                        logger.warning(
+                            "OIDC rejected: %s does not match project domain %s",
+                            email, expected_suffix
+                        )
+                        return None
+                else:
                     if not (
                         email.startswith("godview-")
                         and email.endswith(".iam.gserviceaccount.com")
                     ):
-                        logger.warning("OIDC rejected: email %s not in allowed principals", email)
+                        logger.warning(
+                            "OIDC rejected: email %s does not match service principal pattern", email
+                        )
                         return None
-            else:
-                if not (
-                    email.startswith("godview-")
-                    and email.endswith(".iam.gserviceaccount.com")
-                ):
-                    logger.warning(
-                        "OIDC rejected: email %s does not match service principal pattern", email
-                    )
-                    return None
 
             sub = claims.get("sub", "")
-            aud = claims.get("aud", effective_audience)
+            aud = claims.get("aud", verified_aud)
             return Principal(
                 email=email,
                 subject=sub,

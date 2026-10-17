@@ -108,6 +108,12 @@ def build_context(env: Mapping[str, str] | None = None) -> SovereignContext:
         bus: EventBus = InMemoryPubSub()
         agents: AgentRuntime = InMemoryAgentEngine()
         adapters: list[SenseAdapter] = []
+        try:
+            from godview.adapters.local.adapter import LocalEnvironmentSenseAdapter
+
+            adapters = [LocalEnvironmentSenseAdapter()]
+        except Exception:
+            adapters = []
 
         return SovereignContext(
             settings=settings,
@@ -159,14 +165,43 @@ def build_context(env: Mapping[str, str] | None = None) -> SovereignContext:
             from godview.adapters.gcp import build_all_gcp_adapters
 
             regions = [r.strip() for r in env_source.get("GODVIEW_REGIONS", "us-central1").split(",") if r.strip()]
-            adapters = list(build_all_gcp_adapters(project_id, regions=regions, auth=auth))
+            adapters = list(build_all_gcp_adapters(project_id=project_id, regions=regions, auth=auth))
         except Exception as exc:
             logger.warning("Could not auto-load GCP adapters: %s", exc)
 
-        healthy_adapters = [
-            a for a in adapters
-            if getattr(a, "healthy", True) and (not callable(getattr(a, "healthy", None)) or a.healthy())
-        ]
+        # Health check on adapters (evaluating await adapter.health())
+        import asyncio
+
+        async def _check_health(adapter_list: list[Any]) -> list[Any]:
+            healthy = []
+            for a in adapter_list:
+                try:
+                    if hasattr(a, "health") and callable(a.health):
+                        h = a.health()
+                        if asyncio.iscoroutine(h):
+                            h_res = await asyncio.wait_for(h, timeout=2.0)
+                        else:
+                            h_res = h
+                        st = getattr(h_res, "state", "available")
+                        if st in ("available", "partial"):
+                            healthy.append(a)
+                    elif getattr(a, "healthy", True):
+                        healthy.append(a)
+                except Exception as ex:
+                    logger.warning("Adapter %s health check failed: %s", getattr(a, "name", a), ex)
+            return healthy
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is not None and loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                healthy_adapters = pool.submit(lambda: asyncio.run(_check_health(adapters))).result(timeout=10.0)
+        else:
+            healthy_adapters = asyncio.run(_check_health(adapters))
 
         # STARTUP ASSERTION (Binding: §0, §3.1)
         # GODVIEW_ENV=gcp must exit(1) if any InMemory* store or zero adapters healthy
@@ -205,9 +240,9 @@ def build_context(env: Mapping[str, str] | None = None) -> SovereignContext:
 
     local_adapters: list[SenseAdapter] = []
     try:
-        from godview.adapters.local import build_hermetic_local_adapters
+        from godview.adapters.local.adapter import LocalEnvironmentSenseAdapter
 
-        local_adapters = list(build_hermetic_local_adapters())
+        local_adapters = [LocalEnvironmentSenseAdapter()]
     except Exception as exc:
         logger.warning("Could not auto-load local adapters: %s", exc)
 
