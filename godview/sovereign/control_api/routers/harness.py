@@ -1,19 +1,23 @@
 # Copyright 2026 Google LLC
 # SPDX-License-Identifier: Apache-2.0
-"""Control API router for Harness² capability trees and RSI evolution (`/harness`).
+"""Harness² inspection, reflection, and evolution routes for Sovereign Control API.
 
-Spec alignment:
-- §3.5: GET /harness/{agent}/tree, POST /harness/{agent}:evolve
-- Backward-compatible inspection endpoints: /agents/{id}/harness, /agents/{id}/experience, /sovereign/reflect, /memory/reflect
+Exposes:
+- GET /harness/{agent_id}/tree: returns full HarnessTree components and living_model_version
+- POST /harness/{agent_id}:evolve: triggers RSI evolution loop non-blocking
+- GET /agents/{agent_id}/harness & /experience (backward compatibility)
+- POST /sovereign/reflect & /memory/reflect: triggers batch reflection
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from godview_shared.config import DEFAULT_AGENT_MODEL_ID
 from pydantic import BaseModel, Field
 
@@ -26,44 +30,69 @@ logger = logging.getLogger("godview.control_api.routers.harness")
 
 
 class EvolvePayload(BaseModel):
-    """Payload to trigger recursive evolution on a specialist's HarnessTree."""
+    """Payload to trigger an RSI evolution run."""
 
-    trigger: str = Field(default="manual", description="Trigger source: incident_closed, approval_decided, false_positive, nightly_reflection, manual")
-    task_id: str | None = Field(default=None, description="Task ID or incident identifier")
-    evidence_pack: dict[str, Any] = Field(default_factory=dict, description="Archived evidence pack or incident telemetry")
-    mode: Literal["parallel", "sequential"] = Field(default="parallel", description="Harness² search mode")
-    k: int = Field(default=1, description="Number of candidate branches")
+    trigger: str = Field(default="manual")
+    task_id: str | None = None
+    evidence_pack: dict[str, Any] | None = None
+    mode: Literal["parallel", "sequential"] = "parallel"
+    k: int = Field(default=1, ge=1, le=4)
 
 
 class ReflectPayload(BaseModel):
-    """Payload for /sovereign/reflect and /memory/reflect."""
+    """Payload for sovereign reflection."""
 
-    agent_id: str | None = Field(default=None, description="Target court agent")
-    task_id: str | None = Field(default=None, description="Task or incident identifier")
-    source: str = Field(default="manual", description="Trigger source")
-    mode: Literal["parallel", "sequential"] = Field(default="parallel", description="Search mode")
-    k: int = Field(default=1, description="Branch fan-out")
+    agent_id: str | None = None
+    source: str = "operator_manual"
+    task_id: str | None = None
+    mode: Literal["parallel", "sequential"] = "parallel"
+    k: int = Field(default=1, ge=1, le=4)
 
 
 EvolvePayload.model_rebuild()
 ReflectPayload.model_rebuild()
 
 
-def _get_agent_tree(agent_id: str) -> tuple[str, HarnessTree]:
-    """Resolve domain and load HarnessTree for an agent."""
+async def _require_auth(request: Request, ctx: Any) -> Any:
+    auth = getattr(ctx, "auth", None)
+    if auth is None:
+        return None
+    p = auth.verify_iap_jwt(request)
+    if p:
+        return p
+    p = auth.verify_google_oidc(request)
+    if p:
+        return p
+    raise HTTPException(
+        status_code=401,
+        detail="Unauthorized: operator (IAP) or service (OIDC) identity required",
+    )
+
+
+def _get_agent_tree(agent_id: str, ctx: Any | None = None) -> tuple[str, HarnessTree, int]:
     domain = resolve_domain(agent_id)
+    version = 1
+    adopted_tree_path: Path | None = None
+
+    if ctx is not None and hasattr(ctx, "docs") and ctx.docs is not None:
+        doc = ctx.docs.get("court_agents", agent_id) or ctx.docs.get("court_agents", domain)
+        if doc:
+            if "living_model_version" in doc:
+                version = int(doc["living_model_version"])
+            if "adopted_path" in doc and doc["adopted_path"]:
+                cand = Path(doc["adopted_path"])
+                if cand.is_dir():
+                    adopted_tree_path = cand
+
+    if adopted_tree_path is not None:
+        return domain, HarnessTree(root=adopted_tree_path, surface=GODVIEW_SURFACE), version
+
     substrate = GodViewSubstrate(domain=domain)
     base_dir = substrate.base_tree()
-    if not base_dir.is_dir():
-        raise HTTPException(
-            status_code=404,
-            detail=f"Base HarnessTree not found for domain '{domain}' (agent '{agent_id}')",
-        )
-    return domain, HarnessTree(base_dir, GODVIEW_SURFACE)
+    return domain, HarnessTree(root=base_dir, surface=GODVIEW_SURFACE), version
 
 
-def _serialize_tree(agent_id: str, domain: str, tree: HarnessTree) -> dict[str, Any]:
-    """Serialize HarnessTree inspection payload."""
+def _serialize_tree(agent_id: str, domain: str, tree: HarnessTree, version: int = 1) -> dict[str, Any]:
     report = validate(tree)
     root = tree.root
 
@@ -72,10 +101,11 @@ def _serialize_tree(agent_id: str, domain: str, tree: HarnessTree) -> dict[str, 
     c3_path = root / "guardrails.md"
     c4_path = root / "LongTermMEMORY.md"
 
-    hooks_dict = {}
-    if tree.hooks_path().is_file():
+    hooks_path = root / "hooks.json"
+    hooks_dict: dict[str, Any] = {}
+    if hooks_path.is_file():
         try:
-            hooks_dict = json.loads(tree.hooks_path().read_text(encoding="utf-8"))
+            hooks_dict = json.loads(hooks_path.read_text(encoding="utf-8"))
         except Exception:
             hooks_dict = {}
 
@@ -83,6 +113,7 @@ def _serialize_tree(agent_id: str, domain: str, tree: HarnessTree) -> dict[str, 
         "agent_id": agent_id,
         "domain": domain,
         "surface": "godview",
+        "living_model_version": version,
         "validation": {
             "ok": report.ok,
             "always_on_tokens": report.always_on_tokens,
@@ -109,14 +140,18 @@ def build_router(ctx: Any) -> APIRouter:
     """Build and return FastAPI router for `/harness` and agent reflection."""
     router = APIRouter(tags=["harness"])
 
+    async def auth_dependency(request: Request) -> Any:
+        return await _require_auth(request, ctx)
+
     @router.get("/harness/{agent_id}/tree")
     async def get_harness_tree(agent_id: str) -> dict[str, Any]:
-        domain, tree = _get_agent_tree(agent_id)
-        return _serialize_tree(agent_id, domain, tree)
+        domain, tree, version = _get_agent_tree(agent_id, ctx=ctx)
+        return _serialize_tree(agent_id, domain, tree, version=version)
 
-    @router.post("/harness/{agent_id}:evolve")
+    @router.post("/harness/{agent_id}:evolve", dependencies=[Depends(auth_dependency)])
     async def evolve_agent_tree(agent_id: str, payload: EvolvePayload) -> dict[str, Any]:
-        res: EvolutionResult = evolve_specialist(
+        res: EvolutionResult = await asyncio.to_thread(
+            evolve_specialist,
             agent_id=agent_id,
             trigger=payload.trigger,
             ctx=ctx,
@@ -143,8 +178,8 @@ def build_router(ctx: Any) -> APIRouter:
     # Backward-compatible routes matching existing test assertions and UI
     @router.get("/agents/{agent_id}/harness")
     async def get_agent_harness(agent_id: str) -> dict[str, Any]:
-        domain, tree = _get_agent_tree(agent_id)
-        return _serialize_tree(agent_id, domain, tree)
+        domain, tree, version = _get_agent_tree(agent_id, ctx=ctx)
+        return _serialize_tree(agent_id, domain, tree, version=version)
 
     @router.get("/agents/{agent_id}/experience")
     async def get_agent_experience(agent_id: str) -> dict[str, Any]:
@@ -159,10 +194,11 @@ def build_router(ctx: Any) -> APIRouter:
             "experience_markdown": content,
         }
 
-    @router.post("/sovereign/reflect")
+    @router.post("/sovereign/reflect", dependencies=[Depends(auth_dependency)])
     async def sovereign_reflect(payload: ReflectPayload) -> dict[str, Any]:
         aid = payload.agent_id or "application__specialist"
-        res: EvolutionResult = evolve_specialist(
+        res: EvolutionResult = await asyncio.to_thread(
+            evolve_specialist,
             agent_id=aid,
             trigger=payload.source,
             ctx=ctx,
@@ -180,14 +216,15 @@ def build_router(ctx: Any) -> APIRouter:
             "adopted_path": res.adopted_path,
         }
 
-    @router.post("/memory/reflect")
+    @router.post("/memory/reflect", dependencies=[Depends(auth_dependency)])
     async def memory_reflect(payload: dict[str, Any] | None = None) -> dict[str, Any]:
         src = (payload or {}).get("source", "nightly")
         results = []
         for dom in ("application", "data", "business_line", "change", "platform"):
             aid = f"{dom}__specialist"
             try:
-                res = evolve_specialist(
+                res = await asyncio.to_thread(
+                    evolve_specialist,
                     agent_id=aid,
                     trigger=f"memory_reflect:{src}",
                     ctx=ctx,

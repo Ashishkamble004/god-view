@@ -13,7 +13,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from godview_shared.contracts import CourtAgentDoc, Diagnosis
 from pydantic import BaseModel, Field
 
@@ -21,6 +21,22 @@ from godview.agents.adk.court import CourtOrchestrator
 from godview.sovereign.court_manager import CourtManager
 
 logger = logging.getLogger("godview.control_api.routers.court")
+
+
+async def _require_auth(request: Request, ctx: Any) -> Any:
+    auth = getattr(ctx, "auth", None)
+    if auth is None:
+        return None
+    p = auth.verify_iap_jwt(request)
+    if p:
+        return p
+    p = auth.verify_google_oidc(request)
+    if p:
+        return p
+    raise HTTPException(
+        status_code=401,
+        detail="Unauthorized: operator (IAP) or service (OIDC) identity required",
+    )
 
 
 class CourtConveneRequest(BaseModel):
@@ -97,6 +113,9 @@ def build_router(ctx: Any) -> APIRouter:
     """Build and return FastAPI router for `/court`."""
     router = APIRouter(tags=["court"])
 
+    async def auth_dependency(request: Request) -> Any:
+        return await _require_auth(request, ctx)
+
     @router.get("/court")
     async def list_court() -> dict[str, Any]:
         cm = _get_court_manager(ctx)
@@ -104,7 +123,7 @@ def build_router(ctx: Any) -> APIRouter:
         daily_ceiling = (
             str(cm.token_governor.court_daily_ceiling_usd)
             if hasattr(cm, "token_governor") and hasattr(cm.token_governor, "court_daily_ceiling_usd")
-            else "50.00"
+            else None
         )
         return {
             "agents": agents,
@@ -124,7 +143,7 @@ def build_router(ctx: Any) -> APIRouter:
             "agent": enriched,
         }
 
-    @router.post("/court/{agent_id}:wake")
+    @router.post("/court/{agent_id}:wake", dependencies=[Depends(auth_dependency)])
     async def wake_court_agent(agent_id: str) -> dict[str, Any]:
         cm = _get_court_manager(ctx)
         doc = cm.get_agent(agent_id)
@@ -160,7 +179,7 @@ def build_router(ctx: Any) -> APIRouter:
                 await pub_res
         return _enrich_court_agent(updated, ctx)
 
-    @router.post("/court/{agent_id}:warm")
+    @router.post("/court/{agent_id}:warm", dependencies=[Depends(auth_dependency)])
     async def warm_court_agent(agent_id: str) -> dict[str, Any]:
         cm = _get_court_manager(ctx)
         try:
@@ -169,7 +188,7 @@ def build_router(ctx: Any) -> APIRouter:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return _enrich_court_agent(updated, ctx)
 
-    @router.post("/court/{agent_id}:cool")
+    @router.post("/court/{agent_id}:cool", dependencies=[Depends(auth_dependency)])
     async def cool_court_agent(agent_id: str) -> dict[str, Any]:
         cm = _get_court_manager(ctx)
         try:
@@ -178,7 +197,7 @@ def build_router(ctx: Any) -> APIRouter:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return _enrich_court_agent(updated, ctx)
 
-    @router.post("/court/{agent_id}:retire")
+    @router.post("/court/{agent_id}:retire", dependencies=[Depends(auth_dependency)])
     async def retire_court_agent(agent_id: str) -> dict[str, Any]:
         cm = _get_court_manager(ctx)
         try:
@@ -187,7 +206,7 @@ def build_router(ctx: Any) -> APIRouter:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return _enrich_court_agent(updated, ctx)
 
-    @router.post("/court/convene")
+    @router.post("/court/convene", dependencies=[Depends(auth_dependency)])
     async def convene_court(payload: CourtConveneRequest) -> dict[str, Any]:
         orchestrator = getattr(ctx, "court_orchestrator", None)
         if orchestrator is None:

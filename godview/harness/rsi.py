@@ -18,7 +18,9 @@ Persistence:
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -78,22 +80,14 @@ def _collect_archived_evidence(ctx: Any, domain: str) -> list[dict[str, Any]]:
                         "domain": domain,
                         "description": inc.get("summary") or f"Archived incident in {domain}",
                         "outcome": inc.get("status"),
+                        "root_cause_category": inc.get("root_cause_category") or inc.get("category"),
+                        "remediation_capability": inc.get("remediation_capability") or inc.get("capability_id"),
                         **ep,
                     }
                 )
         except Exception as exc:
             logger.debug("Failed to fetch archived incidents from docs store: %s", exc)
 
-    if not scenarios:
-        # Fallback to standard deterministic baseline scenario for the domain
-        scenarios.append(
-            {
-                "task_id": f"baseline_{domain}_replay",
-                "domain": domain,
-                "description": f"Baseline archived telemetry replay for {domain} specialist",
-                "outcome": "resolved",
-            }
-        )
     return scenarios
 
 
@@ -128,7 +122,7 @@ def evolve_specialist(
         root_dir = work_dir
 
     try:
-        adapter = GodViewCourtAdapter(default_domain=domain)
+        adapter = GodViewCourtAdapter(default_domain=domain, ctx=ctx)
 
         # 1. Register archived evidence packs as fitness replay scenarios
         archived_cases = _collect_archived_evidence(ctx, domain)
@@ -136,13 +130,34 @@ def evolve_specialist(
             adapter.register_scenario(case["task_id"], case)
 
         if evidence_pack:
-            adapter.register_scenario(
-                t_id,
-                {
-                    "domain": domain,
-                    "description": f"Trigger `{trigger}` telemetry pack for {agent_id}",
-                    **evidence_pack,
-                },
+            scenario_entry = {
+                "task_id": t_id,
+                "domain": domain,
+                "description": f"Trigger `{trigger}` telemetry pack for {agent_id}",
+                "outcome": "resolved",
+                **evidence_pack,
+            }
+            adapter.register_scenario(t_id, scenario_entry)
+            archived_cases.append(scenario_entry)
+
+        # If no archived cases with known outcomes exist, skip evolution
+        if not archived_cases:
+            logger.info("No archived incidents with known outcomes found for domain %s; skipping evolution", domain)
+            current_version = 1
+            if ctx is not None and hasattr(ctx, "docs") and ctx.docs is not None:
+                doc = ctx.docs.get("court_agents", agent_id)
+                if doc and "living_model_version" in doc:
+                    current_version = int(doc["living_model_version"])
+            return EvolutionResult(
+                agent_id=agent_id,
+                domain=domain,
+                trigger=trigger,
+                task_id=t_id,
+                passed=False,
+                score=0.0,
+                living_model_version=current_version,
+                winning_tag="none",
+                notes="Skipped evolution: no archived cases with known outcomes available.",
             )
 
         # 2. Build proposer using ctx.llm via ADC
@@ -152,7 +167,20 @@ def evolve_specialist(
         # 3. Build CloudSyncedLibrary with GCS & Firestore sync
         docs_store = getattr(ctx, "docs", None)
         auth_service = getattr(ctx, "auth", None)
-        gcs_client = storage_client or getattr(ctx, "storage", None)
+        gcs_client = storage_client
+        if gcs_client is None:
+            bucket_name = (
+                getattr(getattr(ctx, "settings", None), "agent_skills_bucket", None)
+                or os.environ.get("AGENT_SKILLS_BUCKET")
+            )
+            if bucket_name:
+                try:
+                    from godview.invariants.skills import GcsSkillsStorageClient
+
+                    gcs_client = GcsSkillsStorageClient(bucket=bucket_name, auth=auth_service)
+                except Exception as gcs_exc:
+                    logger.debug("Could not initialize GcsSkillsStorageClient: %s", gcs_exc)
+
         library = CloudSyncedLibrary(
             root=root_dir / "library",
             storage_client=gcs_client,
@@ -259,6 +287,37 @@ def evolve_specialist(
                 pass
 
 
+class HookDispatcher:
+    """Callable wrapper that allows hooks to be called as functions or iterated as lists."""
+
+    def __init__(self, existing: Any = None) -> None:
+        self._callbacks: list[Any] = []
+        if callable(existing):
+            self._callbacks.append(existing)
+        elif isinstance(existing, (list, tuple)):
+            self._callbacks.extend(existing)
+
+    def append(self, cb: Any) -> None:
+        if cb not in self._callbacks:
+            self._callbacks.append(cb)
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        results = []
+        for cb in list(self._callbacks):
+            try:
+                res = cb(*args, **kwargs)
+                results.append(res)
+            except Exception as exc:
+                logger.warning("Hook callback failed: %s", exc)
+        return results
+
+    def __iter__(self) -> Any:
+        return iter(self._callbacks)
+
+    def __len__(self) -> int:
+        return len(self._callbacks)
+
+
 def register_rsi_hooks(ctx: Any) -> None:
     """Attach RSI self-improvement triggers onto SovereignContext hooks.
 
@@ -282,13 +341,26 @@ def register_rsi_hooks(ctx: Any) -> None:
         ep = data.get("evidence_pack") or {}
         domain = str(data.get("domain") or "application")
         agent_id = f"{domain}__specialist"
-        evolve_specialist(
-            agent_id=agent_id,
-            trigger=f"incident_closed:{status}",
-            ctx=ctx,
-            task_id=inc_id,
-            evidence_pack=ep,
-        )
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(
+                asyncio.to_thread(
+                    evolve_specialist,
+                    agent_id=agent_id,
+                    trigger=f"incident_closed:{status}",
+                    ctx=ctx,
+                    task_id=inc_id,
+                    evidence_pack=ep,
+                )
+            )
+        except RuntimeError:
+            evolve_specialist(
+                agent_id=agent_id,
+                trigger=f"incident_closed:{status}",
+                ctx=ctx,
+                task_id=inc_id,
+                evidence_pack=ep,
+            )
 
     async def _on_approval_decided(approval_doc: Any) -> None:
         data = (
@@ -299,21 +371,36 @@ def register_rsi_hooks(ctx: Any) -> None:
         state = str(data.get("state") or "approved")
         app_id = str(data.get("approval_id") or data.get("doc_id") or "appr-decided")
         agent_id = str(data.get("agent_id") or "application__specialist")
-        evolve_specialist(
-            agent_id=agent_id,
-            trigger=f"approval_decided:{state}",
-            ctx=ctx,
-            task_id=app_id,
-            evidence_pack=data.get("args") or {},
-        )
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(
+                asyncio.to_thread(
+                    evolve_specialist,
+                    agent_id=agent_id,
+                    trigger=f"approval_decided:{state}",
+                    ctx=ctx,
+                    task_id=app_id,
+                    evidence_pack=data.get("args") or {},
+                )
+            )
+        except RuntimeError:
+            evolve_specialist(
+                agent_id=agent_id,
+                trigger=f"approval_decided:{state}",
+                ctx=ctx,
+                task_id=app_id,
+                evidence_pack=data.get("args") or {},
+            )
 
-    # Register on hooks
+    # Register on hooks using HookDispatcher
     for hook_name, callback in (
         ("on_incident_closed", _on_incident_closed),
         ("on_approval_decided", _on_approval_decided),
     ):
-        if not hasattr(hooks, hook_name):
-            setattr(hooks, hook_name, [])
-        hook_list = getattr(hooks, hook_name)
-        if isinstance(hook_list, list):
-            hook_list.append(callback)
+        existing = getattr(hooks, hook_name, None)
+        if isinstance(existing, HookDispatcher):
+            existing.append(callback)
+        else:
+            dispatcher = HookDispatcher(existing)
+            dispatcher.append(callback)
+            setattr(hooks, hook_name, dispatcher)

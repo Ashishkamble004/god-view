@@ -106,19 +106,49 @@ class VertexGeminiProposer(Proposer):
         # Check if ctx.llm is available first
         if self.ctx is not None and hasattr(self.ctx, "llm") and self.ctx.llm is not None:
             try:
-                llm_res = self.ctx.llm.generate(
-                    role="reasoning",
-                    contents=[{"role": "user", "parts": [{"text": prompt}]}],
+                import inspect
+
+                def _call_llm_generate() -> Any:
+                    return self.ctx.llm.generate(
+                        role="reasoning",
+                        contents=[{"role": "user", "parts": [{"text": prompt}]}],
+                    )
+
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+
+                if loop is not None and loop.is_running():
+                    import concurrent.futures
+
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                        future = pool.submit(lambda: asyncio.run(_call_llm_generate()))
+                        llm_res = future.result(timeout=60)
+                else:
+                    res = _call_llm_generate()
+                    if inspect.isawaitable(res):
+                        llm_res = asyncio.run(res)
+                    else:
+                        llm_res = res
+
+                raw_output = (
+                    llm_res.text
+                    if hasattr(llm_res, "text")
+                    else str(llm_res.get("text", "") if isinstance(llm_res, dict) else llm_res)
                 )
-                raw_output = str(llm_res.get("text", "") if isinstance(llm_res, dict) else llm_res)
                 self.last_model_used = active_model
-                ok = True
+                ok = bool(raw_output and not raw_output.startswith("<coroutine"))
             except Exception as exc:
-                logger.warning("ctx.llm failed in proposer: %s, falling back to synthesis", exc)
-                raw_output = self._run_hermetic_synthesis(
-                    work_dir=work_dir, prompt=prompt, active_model=active_model
-                )
-                ok = True
+                logger.error("ctx.llm failed in proposer: %s", exc)
+                if env_mode == "hermetic":
+                    raw_output = self._run_hermetic_synthesis(
+                        work_dir=work_dir, prompt=prompt, active_model=active_model
+                    )
+                    ok = True
+                else:
+                    raw_output = ""
+                    ok = False
         elif env_mode != "hermetic":
             # Use ADC credentials if available
             raw_output, used_model, ok = self._call_vertex_with_adc(
@@ -186,8 +216,6 @@ class VertexGeminiProposer(Proposer):
         token = ""
         if self.ctx is not None and hasattr(self.ctx, "auth") and hasattr(self.ctx.auth, "access_token"):
             token = self.ctx.auth.access_token()
-        elif os.environ.get("VERTEX_ACCESS_TOKEN"):
-            token = os.environ["VERTEX_ACCESS_TOKEN"]
         else:
             try:
                 import google.auth
@@ -251,11 +279,13 @@ class VertexGeminiProposer(Proposer):
                 logger.error("Vertex API request failed: %s", exc)
                 break
 
-        return (
-            self._run_hermetic_synthesis(work_dir, prompt, primary_model),
-            primary_model,
-            True,
-        )
+        if os.environ.get("GODVIEW_ENV", "hermetic").lower() == "hermetic":
+            return (
+                self._run_hermetic_synthesis(work_dir, prompt, primary_model),
+                primary_model,
+                True,
+            )
+        return ("", primary_model, False)
 
     def _run_hermetic_synthesis(self, work_dir: Path, prompt: str, active_model: str) -> str:
         ctx_dir = work_dir / "context"
@@ -410,175 +440,12 @@ class VertexGeminiProposer(Proposer):
 
     @staticmethod
     def _extract_task_meta(task_md: str) -> dict[str, str]:
-        """Extract generic task metadata and synthesized assets without tenant nouns."""
-        lower = task_md.lower()
-        if any(k in lower for k in ("offset", "segment", "parser", "schema")):
-            script_name = "check_payload_schema.py"
-            skill_slug = "payload-schema-guard"
-            autotrigger_val = "when payload schema fields shift or parser misalignment occurs"
-            summary = "Detect unexpected payload schema and field boundary offset shifts."
-            script_code = '''# Copyright 2026 Google LLC
-# SPDX-License-Identifier: Apache-2.0
-"""Deterministic validator for payload schema and field bounds."""
-
-from __future__ import annotations
-
-import json
-import sys
-
-
-def verify_payload(payload: dict) -> dict:
-    context = payload.get("context", {})
-    expected_offset = int(context.get("expected_score_offset", 108))
-    actual_offset = int(context.get("actual_score_offset", 228))
-    shift_bytes = actual_offset - expected_offset
-    return {
-        "ok": True,
-        "shift_bytes": shift_bytes,
-        "offset_shift_detected": shift_bytes != 0,
-        "recommended_offset": actual_offset,
-    }
-
-
-if __name__ == "__main__":
-    raw = sys.stdin.read().strip()
-    data = json.loads(raw) if raw else {}
-    print(json.dumps(verify_payload(data)))
-'''
-        elif any(k in lower for k in ("cusum", "drift", "statistical")):
-            script_name = "check_distribution_shift.py"
-            skill_slug = "distribution-shift-guard"
-            autotrigger_val = "when statistical drift metric exceeds threshold or distribution shifts"
-            summary = "Compute statistical metric drift across monitored service telemetry."
-            script_code = '''# Copyright 2026 Google LLC
-# SPDX-License-Identifier: Apache-2.0
-"""Deterministic validator for statistical metric distribution drift."""
-
-from __future__ import annotations
-
-import json
-import sys
-
-
-def verify_drift(payload: dict) -> dict:
-    context = payload.get("context", {})
-    score = float(context.get("cusum_score", context.get("drift_statistic", 5.4)))
-    threshold = float(context.get("cusum_threshold", context.get("drift_threshold", 4.0)))
-    drift_detected = score > threshold
-    return {
-        "ok": True,
-        "drift_score": round(score, 3),
-        "threshold": threshold,
-        "drift_detected": drift_detected,
-    }
-
-
-if __name__ == "__main__":
-    raw = sys.stdin.read().strip()
-    data = json.loads(raw) if raw else {}
-    print(json.dumps(verify_drift(data)))
-'''
-        elif any(k in lower for k in ("oom", "crash", "exit_code", "pod")):
-            script_name = "check_container_restart.py"
-            skill_slug = "container-crash-guard"
-            autotrigger_val = "when container terminates with non-zero exit code or OOM occurs"
-            summary = "Correlate container termination exit code 137 with resource limit saturation."
-            script_code = '''# Copyright 2026 Google LLC
-# SPDX-License-Identifier: Apache-2.0
-"""Deterministic validator for container restarts and exit codes."""
-
-from __future__ import annotations
-
-import json
-import sys
-
-
-def verify_container(payload: dict) -> dict:
-    context = payload.get("context", {})
-    exit_code = int(context.get("container_exit_code", context.get("exit_code", 137)))
-    backlog = int(context.get("dlq_backlog_depth", context.get("backlog_depth", 42)))
-    oom_detected = exit_code == 137
-    return {
-        "ok": True,
-        "oom_exit_137": oom_detected,
-        "backlog_depth": backlog,
-        "queue_stalled": backlog > 0,
-    }
-
-
-if __name__ == "__main__":
-    raw = sys.stdin.read().strip()
-    data = json.loads(raw) if raw else {}
-    print(json.dumps(verify_container(data)))
-'''
-        elif any(k in lower for k in ("queue", "backlog", "dlq", "message")):
-            script_name = "check_queue_backlog.py"
-            skill_slug = "queue-backlog-guard"
-            autotrigger_val = "when queue backlog exceeds threshold or message delivery stalls"
-            summary = "Monitor message processing backlog and dead-letter queue depth."
-            script_code = '''# Copyright 2026 Google LLC
-# SPDX-License-Identifier: Apache-2.0
-"""Deterministic validator for queue backlog depth."""
-
-from __future__ import annotations
-
-import json
-import sys
-
-
-def verify_backlog(payload: dict) -> dict:
-    context = payload.get("context", {})
-    depth = int(context.get("backlog_depth", context.get("dlq_backlog_depth", 25)))
-    threshold = int(context.get("backlog_threshold", 10))
-    return {
-        "ok": True,
-        "backlog_depth": depth,
-        "threshold": threshold,
-        "stalled": depth > threshold,
-    }
-
-
-if __name__ == "__main__":
-    raw = sys.stdin.read().strip()
-    data = json.loads(raw) if raw else {}
-    print(json.dumps(verify_backlog(data)))
-'''
-        elif any(k in lower for k in ("commit", "deploy", "git", "change")):
-            script_name = "check_commit_regression.py"
-            skill_slug = "commit-regression-guard"
-            autotrigger_val = "when deployment incident occurs or commit regression is detected"
-            summary = "Correlate service anomalies with recent deployment revisions and code commits."
-            script_code = '''# Copyright 2026 Google LLC
-# SPDX-License-Identifier: Apache-2.0
-"""Deterministic validator for commit regression timing."""
-
-from __future__ import annotations
-
-import json
-import sys
-
-
-def verify_commits(payload: dict) -> dict:
-    context = payload.get("context", {})
-    commits = context.get("recent_commits", ["sha1"])
-    return {
-        "ok": True,
-        "correlated": bool(commits),
-        "commit_count": len(commits),
-    }
-
-
-if __name__ == "__main__":
-    raw = sys.stdin.read().strip()
-    data = json.loads(raw) if raw else {}
-    print(json.dumps(verify_commits(data)))
-'''
-        else:
-            script_name = "check_error_rate.py"
-            skill_slug = "error-rate-guard"
-            autotrigger_val = "when service error rate exceeds threshold or HTTP 5xx responses spike"
-            summary = "Monitor service error rates against baseline thresholds."
-            script_code = '''# Copyright 2026 Google LLC
+        """Extract generic task metadata and synthesized assets without canned numbers."""
+        script_name = "check_error_rate.py"
+        skill_slug = "error-rate-guard"
+        autotrigger_val = "when service error rate exceeds threshold or HTTP 5xx responses spike"
+        summary = "Monitor service error rates against baseline thresholds."
+        script_code = '''# Copyright 2026 Google LLC
 # SPDX-License-Identifier: Apache-2.0
 """Deterministic validator for service error rate thresholds."""
 
@@ -591,7 +458,7 @@ import sys
 def verify_errors(payload: dict) -> dict:
     context = payload.get("context", {})
     total = int(context.get("total_requests", 100))
-    errors = int(context.get("error_count", 10))
+    errors = int(context.get("error_count", 0))
     rate = errors / max(1, total)
     return {
         "ok": True,

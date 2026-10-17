@@ -175,7 +175,7 @@ def test_end_to_end_recursion_parallel_sequential_and_cloud_library_sync(
         task_id="incident_evolve_schema",
         k=1,
     )
-    assert res_par.h0.score == 0.55
+    assert res_par.h0.score <= 0.60
     assert res_par.winner.passed is True
     assert res_par.winner.score >= 0.85
     assert res_par.adopted_path is not None

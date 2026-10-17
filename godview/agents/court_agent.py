@@ -217,106 +217,6 @@ class CourtAgent:
             "tree_root": str(self.tree.root),
         }
 
-    def _analyze_evidence_telemetry(
-        self, incident_id: str, telemetry: dict[str, Any]
-    ) -> dict[str, Any]:
-        """Evidence-based diagnostic classification without hardcoded tenant nouns."""
-        combined = f"{incident_id} {telemetry}".lower()
-
-        # Check for WAF / security policy blocks
-        if any(k in combined for k in ("preconfiguredexprids", "denied_by_security_policy", "waf", "security_policy", "403")):
-            return {
-                "category": "edge_security_policy_waf_restriction",
-                "hypothesis": (
-                    "Edge security policy rejected legitimate request payloads due to strict "
-                    "preconfigured rule sensitivity; recommend tuning sensitivity to 1 in preview."
-                ),
-                "confidence": 0.95 if self.domain in ("platform", "application") else 0.88,
-                "citations": [
-                    "edge.security_policy:denied_by_security_policy",
-                    "jsonPayload.enforcedSecurityPolicy",
-                ],
-                "recommended_capability": "armor.set_waf_sensitivity",
-                "context_defaults": {
-                    "sensitivity": 1,
-                    "preview": True,
-                },
-            }
-
-        # Check for container OOM / crash terminations
-        if any(k in combined for k in ("137", "oom", "oomkilled", "sigkill", "crash")):
-            return {
-                "category": "container_oom_killed_exit_137",
-                "hypothesis": (
-                    "Container workload terminated with exit code 137 (OOMKilled) under memory limit saturation, "
-                    "causing message delivery stalls and backlog accumulation."
-                ),
-                "confidence": 0.95 if self.domain in ("platform", "business_line") else 0.88,
-                "citations": [
-                    "container.status:exit_code_137",
-                    "resource:memory_limit",
-                ],
-                "recommended_capability": "gke.patch_probe",
-                "context_defaults": {
-                    "container_exit_code": 137,
-                    "dlq_backlog_depth": 42,
-                    "backlog_depth": 42,
-                },
-            }
-
-        # Check for offset or payload schema shifts
-        if any(k in combined for k in ("offset", "schema", "field_shift", "field_bounds", "segment")):
-            return {
-                "category": "payload_schema_offset_shift",
-                "hypothesis": (
-                    "Payload format shifted unexpectedly causing parser misalignment and "
-                    "fallback value selection."
-                ),
-                "confidence": 0.92 if self.domain in ("application", "data", "change") else 0.85,
-                "citations": [
-                    "payload.parser:offset_shift",
-                ],
-                "recommended_capability": "git.create_pull_request",
-                "context_defaults": {
-                    "expected_score_offset": 108,
-                    "actual_score_offset": 228,
-                },
-            }
-
-        # Check for statistical drift or cusum shift
-        if any(k in combined for k in ("cusum", "drift", "changepoint")):
-            return {
-                "category": "statistical_metric_drift",
-                "hypothesis": (
-                    "Two-sided statistical drift metric exceeded detection threshold across "
-                    "monitored service requests, indicating potential model or payload drift."
-                ),
-                "confidence": 0.93 if self.domain in ("data", "application") else 0.86,
-                "citations": [
-                    "metric:drift_statistic",
-                    "baseline:statistical_threshold",
-                ],
-                "recommended_capability": "git.create_pull_request",
-                "context_defaults": {
-                    "cusum_score": 5.4,
-                    "cusum_threshold": 4.0,
-                    "drift_statistic": 5.4,
-                    "drift_threshold": 4.0,
-                },
-            }
-
-        # Default generic operational hypothesis
-        return {
-            "category": "operational_anomaly_observed",
-            "hypothesis": (
-                f"Operational telemetry anomaly observed for incident {incident_id}."
-            ),
-            "confidence": 0.86,
-            "citations": [f"incident:{incident_id}"],
-            "recommended_capability": "git.create_pull_request",
-            "context_defaults": {},
-        }
-
     def diagnose_incident(
         self,
         incident_id: str,
@@ -328,8 +228,6 @@ class CourtAgent:
         """Execute a diagnostic pass over evidence and c7/c8 hooks."""
         active_model = self.resolve_active_model(quota_or_429_fallback=quota_or_429_fallback)
         ctx = dict(telemetry or {})
-        analysis = self._analyze_evidence_telemetry(incident_id, ctx)
-        ctx.update(analysis.get("context_defaults", {}))
 
         runner = HookRunner(self.tree)
         script_verifications: list[dict[str, Any]] = []
@@ -371,21 +269,16 @@ class CourtAgent:
         )
         self._meter_usage(tokens_used, active_model)
 
-        base_conf = analysis["confidence"]
-        if force_low_confidence:
-            base_conf = 0.52
-        elif active_model == "gemini-4-argon" and script_verifications:
-            base_conf = max(base_conf, 0.92)
-
+        # Without live LLM generation, return zero confidence and never fabricate a story
         return CourtHypothesis(
             agent_id=self.agent_id,
             domain=self.domain,
             incident_id=incident_id,
-            hypothesis=analysis["hypothesis"],
-            root_cause_category=analysis["category"],
-            confidence=round(base_conf, 3),
-            evidence_citations=analysis["citations"],
-            recommended_capability=analysis["recommended_capability"],
+            hypothesis="not diagnosed: model unavailable",
+            root_cause_category="model_unavailable",
+            confidence=0.0,
+            evidence_citations=[f"incident:{incident_id}"],
+            recommended_capability="",
             script_verifications=script_verifications,
             triggered_skills=triggered_skills,
             model_used=active_model,

@@ -118,12 +118,16 @@ def build_a2a_card(
     agent_type: str,
     subject_key: str,
     endpoint_url: str | None = None,
+    project_id: str | None = None,
+    location: str | None = None,
 ) -> dict[str, Any]:
     """Construct the A2A AgentCard JSON."""
     if agent_type not in VALID_AGENT_TYPES:
         raise ValueError(f"Unsupported agent_type '{agent_type}'. Must be one of {VALID_AGENT_TYPES}")
     agent_id = f"{agent_type}__{subject_key}"
-    url = endpoint_url or f"https://agent-engine.internal/a2a/{agent_id}/card.json"
+    proj = project_id or DEFAULT_PROJECT_ID or "god-view"
+    loc = location or DEFAULT_LOCATION or "us-central1"
+    url = endpoint_url or f"https://{loc}-aiplatform.googleapis.com/v1beta1/projects/{proj}/locations/{loc}/reasoningEngines/godview-{agent_type.replace('_', '-')}-{subject_key}:query"
     return {
         "name": agent_id,
         "version": "5.0.0",
@@ -158,9 +162,21 @@ def build_agent_payload(
     loc = location or DEFAULT_LOCATION or "us-central1"
     bucket = staging_bucket or DEFAULT_STAGING_BUCKET or f"gs://{proj}-god-view-agent-staging"
     sa = service_account or DEFAULT_SENSE_SA
+    if not sa and proj != "hermetic":
+        sa = f"godview-sense-sa@{proj}.iam.gserviceaccount.com"
 
     if not bucket.startswith("gs://"):
         raise ValueError(f"staging_bucket must start with gs://, got '{bucket}'")
+
+    from godview_shared.config import MODEL_TABLE
+
+    reasoning_cfg = MODEL_TABLE.get("reasoning", MODEL_TABLE["reasoning"])
+    primary_model = reasoning_cfg.model_id
+    fallback_model = (
+        reasoning_cfg.fallbacks[0].model_id if reasoning_cfg.fallbacks else primary_model
+    )
+    embedding_cfg = MODEL_TABLE.get("embedding", MODEL_TABLE.get("embeddings"))
+    embedding_model = embedding_cfg.model_id if embedding_cfg else "text-embedding-005"
 
     agent_id = f"{agent_type}__{subject_key}"
     env_vars = {
@@ -169,10 +185,10 @@ def build_agent_payload(
         "GODVIEW_SUBJECT_KEY": subject_key,
         "GOOGLE_CLOUD_LOCATION": "global",
         "GODVIEW_MODEL_LOCATION": "global",
-        "GODVIEW_REASONING_MODEL": "gemini-4-argon",
-        "GODVIEW_FALLBACK_MODEL": "gemini-3.8-flash",
-        "GODVIEW_ESCALATION_MODEL": "gemini-4-argon",
-        "GODVIEW_EMBEDDING_MODEL": "text-embedding-005",
+        "GODVIEW_REASONING_MODEL": primary_model,
+        "GODVIEW_FALLBACK_MODEL": fallback_model,
+        "GODVIEW_ESCALATION_MODEL": primary_model,
+        "GODVIEW_EMBEDDING_MODEL": embedding_model,
         "GODVIEW_EMBEDDING_LOCATION": loc,
         "GODVIEW_SOVEREIGN_URL": sovereign_url.rstrip("/"),
         "GODVIEW_CAPABILITY_INVOKE_PATH": "/v1/capabilities/{capability_id}:invoke",
@@ -201,7 +217,7 @@ def build_agent_payload(
         staging_bucket=bucket,
         service_account=sa,
         deployment_spec=spec,
-        a2a_card=build_a2a_card(agent_type, subject_key),
+        a2a_card=build_a2a_card(agent_type, subject_key, project_id=proj, location=loc),
         labels=labels,
     )
 
@@ -245,11 +261,15 @@ class HermeticAgentEngineBackend:
             env_vars=dict(payload.deployment_spec.env_vars),
         )
         self._labels_by_agent[payload.agent_id] = dict(payload.labels)
+        a2a_url = f"https://{payload.location}-aiplatform.googleapis.com/v1beta1/projects/{payload.project_id}/locations/{payload.location}/reasoningEngines/{payload.agent_id}:query"
         record["name"] = record.get("reasoning_engine", payload.agent_id)
         record["display_name"] = payload.display_name
         record["subject_key"] = payload.subject_key
         record["labels"] = dict(payload.labels)
-        record["a2a_card"] = record.get("card")
+        record["a2a_card_url"] = a2a_url
+        card = dict(payload.a2a_card)
+        card["url"] = a2a_url
+        record["a2a_card"] = card
         if "deployment_spec" in record:
             record["deployment_spec"]["env_vars"] = dict(payload.deployment_spec.env_vars)
         return record
@@ -325,37 +345,82 @@ class VertexAgentEngineBackend:
                 aid: str,
                 atype: str,
                 skey: str,
+                card_data: dict[str, Any] | None = None,
             ) -> None:
                 self.sovereign_url = sov_url
                 self.agent_id = aid
                 self.agent_type = atype
                 self.subject_key = skey
+                self.card_data = card_data or {}
                 self._agent: Any = None
-                self._executor: Any = None
+                self._llm: Any = None
 
             def set_up(self) -> None:
                 try:
+                    from godview_shared.config import GodViewSettings
+                    from godview_shared.llm import LlmClient
+
+                    settings = GodViewSettings(
+                        env_mode="gcp",
+                        sovereign_url=self.sovereign_url,
+                    )
+                    self._llm = LlmClient(settings=settings)
+                except Exception as exc:
+                    logger.warning("Could not initialize LlmClient in set_up: %s", exc)
+                    self._llm = None
+
+                try:
+                    from types import SimpleNamespace
+
                     from godview.agents.adk.specialist import create_specialist_agent
 
+                    ctx = SimpleNamespace(
+                        llm=self._llm,
+                        sovereign_url=self.sovereign_url,
+                        auth=None,
+                        docs=None,
+                        ledger=None,
+                    )
                     self._agent = create_specialist_agent(
                         archetype=self.agent_type,
                         subject_ref=self.subject_key,
+                        ctx=ctx,
                         sovereign_url=self.sovereign_url,
                     )
-                except Exception:
+                except Exception as exc:
+                    logger.warning("Could not initialize specialist agent in set_up: %s", exc)
                     self._agent = None
-                try:
-                    from godview.agents.server import AgentExecutor
 
-                    self._executor = AgentExecutor(base_url=self.sovereign_url)
-                except Exception:
-                    self._executor = None
+            def agent_card(self) -> dict[str, Any]:
+                """Return the A2A AgentCard for this deployed specialist."""
+                if self.card_data:
+                    return dict(self.card_data)
+                return build_a2a_card(self.agent_type, self.subject_key)
 
             def query(self, **kwargs: Any) -> dict[str, Any]:
-                if self._agent is not None and hasattr(self._agent, "diagnose_evidence"):
-                    incident_id = str(kwargs.get("incident_id") or "adhoc")
-                    evidence = kwargs.get("evidence_pack") or kwargs.get("evidence") or {}
-                    diag = self._agent.diagnose_evidence(incident_id, evidence)
+                if kwargs.get("action") == "card" or kwargs.get("get_card"):
+                    return self.agent_card()
+
+                incident_id = str(kwargs.get("incident_id") or "adhoc")
+                evidence = kwargs.get("evidence_pack") or kwargs.get("evidence") or {}
+                if self._agent is not None and hasattr(self._agent, "diagnose"):
+                    import asyncio
+
+                    try:
+                        loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        loop = None
+
+                    if loop is not None and loop.is_running():
+                        import concurrent.futures
+
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                            diag = pool.submit(
+                                lambda: asyncio.run(self._agent.diagnose(incident_id, evidence))
+                            ).result(timeout=60)
+                    else:
+                        diag = asyncio.run(self._agent.diagnose(incident_id, evidence))
+
                     return {
                         "agent_id": self.agent_id,
                         "agent_type": self.agent_type,
@@ -368,8 +433,8 @@ class VertexAgentEngineBackend:
                     "agent_type": self.agent_type,
                     "subject_key": self.subject_key,
                     "sovereign_url": self.sovereign_url,
-                    "status": "ok",
-                    "input": kwargs,
+                    "status": "error",
+                    "error": "Agent not initialized",
                 }
 
         app_instance = CourtAgentWrapper(
@@ -377,6 +442,7 @@ class VertexAgentEngineBackend:
             aid=agent_id,
             atype=agent_type,
             skey=subject_key,
+            card_data=payload.a2a_card,
         )
 
         extra_packages = [
@@ -418,7 +484,7 @@ class VertexAgentEngineBackend:
             update_mask=update_mask,
         ).result()
 
-        a2a_url = f"https://{payload.location}-aiplatform.googleapis.com/v1beta1/{resource_name}:a2a"
+        a2a_url = f"https://{payload.location}-aiplatform.googleapis.com/v1beta1/{resource_name}:query"
         card = dict(payload.a2a_card)
         card["url"] = a2a_url
         return {
@@ -494,8 +560,20 @@ def fetch_spawn_plan(sovereign_url: str, token: str | None = None) -> list[tuple
     import httpx
 
     headers = {}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+    auth_token = token
+    if not auth_token:
+        try:
+            import google.auth.transport.requests
+            import google.oauth2.id_token
+
+            auth_req = google.auth.transport.requests.Request()
+            auth_token = google.oauth2.id_token.fetch_id_token(auth_req, sovereign_url)
+        except Exception as exc:
+            logger.debug("Could not mint ID token for sovereign perceive at %s: %s", sovereign_url, exc)
+
+    if auth_token:
+        headers["Authorization"] = f"Bearer {auth_token}"
+
     url = f"{sovereign_url.rstrip('/')}/api/v1/perceive"
     try:
         resp = httpx.get(url, headers=headers, timeout=15.0)
@@ -579,8 +657,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.hermetic:
         backend = HermeticAgentEngineBackend()
     else:
+        if not args.sovereign_url or "placeholder" in args.sovereign_url:
+            parser.error("--sovereign-url is required for live Vertex AI deployment")
         if not args.project_id:
-            parser.error("project_id required for live Vertex AI deployment")
+            parser.error("--project-id is required for live Vertex AI deployment")
+        if not args.staging_bucket:
+            parser.error("--staging-bucket is required for live Vertex AI deployment")
+        if not args.service_account:
+            parser.error("--service-account is required for live Vertex AI deployment (e.g. godview-sense-sa@<project>.iam.gserviceaccount.com)")
         backend = VertexAgentEngineBackend(
             project_id=args.project_id,
             location=args.location,

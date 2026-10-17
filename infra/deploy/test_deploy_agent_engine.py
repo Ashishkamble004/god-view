@@ -45,11 +45,11 @@ def test_extract_workload_vars_helpers(tmp_path: Path) -> None:
 
     raw = {
         "gke_dns_endpoint": {"value": "10.0.0.1", "type": "string"},
-        "subnet_cidr": "10.10.0.0/20",
+        "subnet_cidr": "172.16.0.0/20",
     }
     assert unwrap_outputs(raw) == {
         "gke_dns_endpoint": "10.0.0.1",
-        "subnet_cidr": "10.10.0.0/20",
+        "subnet_cidr": "172.16.0.0/20",
     }
 
 
@@ -118,7 +118,7 @@ def test_hermetic_deploy_and_earned_warmth_toggle() -> None:
     deployed = deploy_court_agent(backend, payload)
     assert deployed["agent_id"] == "data__analytics-db"
     assert deployed["deployment_spec"]["min_instances"] == 0
-    assert deployed["a2a_card_url"].endswith("/card.json")
+    assert deployed["a2a_card_url"].endswith(":query")
     assert shared_fake.get_agent("data__analytics-db")["state"] == "ACTIVE"
 
     # Warm to 1 (09:00-17:00 IST earned warmth) and cool back to 0
@@ -212,8 +212,74 @@ def test_fetch_spawn_plan_from_perceive() -> None:
     mock_resp.raise_for_status = MagicMock()
 
     with patch("httpx.get", return_value=mock_resp):
-        roster = fetch_spawn_plan("https://sovereign.run.app")
+        roster = fetch_spawn_plan("https://sovereign.run.app", token="test-token")
         assert roster == [("application", "gateway-api"), ("data", "telemetry-store")]
+
+
+def test_fetch_spawn_plan_mints_id_token() -> None:
+    mock_resp = MagicMock()
+    mock_resp.json.return_value = {"court_roster": [["platform", "cluster-1"]]}
+    mock_resp.raise_for_status = MagicMock()
+
+    with patch("google.oauth2.id_token.fetch_id_token", return_value="minted-id-token") as mock_fetch:
+        with patch("httpx.get", return_value=mock_resp) as mock_get:
+            roster = fetch_spawn_plan("https://god-view-sovereign-xyz.a.run.app")
+            assert roster == [("platform", "cluster-1")]
+            mock_fetch.assert_called_once()
+            called_headers = mock_get.call_args[1].get("headers", {})
+            assert called_headers.get("Authorization") == "Bearer minted-id-token"
+
+
+def test_service_account_defaults_to_sense_sa() -> None:
+    payload = build_agent_payload(
+        agent_type="application",
+        subject_key="orders-svc",
+        sovereign_url="https://sovereign.run.app",
+        project_id="my-proj",
+        staging_bucket="gs://my-bucket",
+    )
+    assert payload.service_account == "godview-sense-sa@my-proj.iam.gserviceaccount.com"
+
+
+def test_live_deploy_validates_required_args() -> None:
+    # Missing sovereign-url placeholder
+    with pytest.raises(SystemExit):
+        main([
+            "--targets", "application:orders-svc",
+            "--project-id", "test-proj",
+            "--staging-bucket", "gs://b",
+            "--service-account", "godview-sense-sa@test-proj.iam.gserviceaccount.com",
+        ])
+
+    # Missing project-id
+    with pytest.raises(SystemExit):
+        main([
+            "--targets", "application:orders-svc",
+            "--sovereign-url", "https://sovereign.run.app",
+            "--staging-bucket", "gs://b",
+            "--service-account", "godview-sense-sa@test-proj.iam.gserviceaccount.com",
+            "--project-id", "",
+        ])
+
+    # Missing staging-bucket
+    with pytest.raises(SystemExit):
+        main([
+            "--targets", "application:orders-svc",
+            "--sovereign-url", "https://sovereign.run.app",
+            "--project-id", "test-proj",
+            "--service-account", "godview-sense-sa@test-proj.iam.gserviceaccount.com",
+            "--staging-bucket", "",
+        ])
+
+    # Missing service-account
+    with pytest.raises(SystemExit):
+        main([
+            "--targets", "application:orders-svc",
+            "--sovereign-url", "https://sovereign.run.app",
+            "--project-id", "test-proj",
+            "--staging-bucket", "gs://b",
+            "--service-account", "",
+        ])
 
 
 def test_pin_image_round_trip(tmp_path: Path) -> None:

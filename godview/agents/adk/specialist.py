@@ -1,61 +1,83 @@
 # Copyright 2026 Google LLC
 # SPDX-License-Identifier: Apache-2.0
-"""Generic Court Specialist Agents built on Google ADK LlmAgent."""
+"""Specialist Court LlmAgents on Google ADK for God-View.
+
+Five archetype specialist agents:
+1. application: microservice runtime, HTTP status codes, latency, payload schema, dependencies
+2. data: persistence tiers, query latency, schema drift, replication, distribution shifts
+3. business_line: end-to-end journey conformance, queue backlog, step ordering, KPI shifts
+4. change: deployment regressions, git commit correlation, config drift, revision diffs
+5. platform: container lifecycle, memory/CPU saturation, ingress/WAF, cloud infrastructure
+
+All instructions are generic. All situational knowledge comes at runtime from
+the evidence pack and BusinessContext. Tools provide Sovereign capability invocation
+(reads execute freely; mutating actions require operator approval).
+"""
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
+import re
 from collections.abc import Callable
 from typing import Any
 
+from godview_shared.capabilities import get_capability
 from godview_shared.config import (
     DEFAULT_AGENT_FALLBACK_MODEL_ID,
-    DEFAULT_AGENT_MODEL_ID,
     DEFAULT_AGENT_MODEL_LOCATION,
+    MODEL_TABLE,
 )
-from godview_shared.contracts import Diagnosis, ProposedAction
-
-from godview.agents.adk.compat import LlmAgent
+from godview_shared.contracts import (
+    Diagnosis,
+    ProposedAction,
+)
+from google.adk.agents import LlmAgent
+from google.adk.tools import FunctionTool
 
 logger = logging.getLogger("godview.agents.adk.specialist")
 
-# Generic specialist archetype instructions (zero hardcoded tenant domain knowledge)
 ARCHETYPE_GENERIC_INSTRUCTIONS: dict[str, str] = {
     "application": (
-        "You are an Application Court Specialist Agent. You analyze service runtime health, "
-        "HTTP/gRPC status codes, latency percentiles, payload serialization/offset issues, "
-        "and service dependency graphs. All situational context must come strictly from "
-        "the provided evidence pack and runtime BusinessContext. Cite specific log entries, "
-        "HTTP status details, and configuration snapshots. Only propose actions from the capability registry."
+        "You are the Application Specialist in the God-View Sovereign Court. "
+        "Analyze service-tier telemetry, HTTP response status codes, route latency, "
+        "payload schema contracts, and downstream dependency errors. "
+        "Rely strictly on provided runtime evidence and discovered BusinessContext; "
+        "never assume tenant domain vocabulary. Formulate a precise hypothesis, "
+        "grounded citations, confidence score (0.0 to 1.0), and proposed remediation actions."
     ),
     "data": (
-        "You are a Data Court Specialist Agent. You analyze database connectivity, query execution "
-        "times, lock contention, active transactions, schema migrations, and statistical distribution shifts. "
-        "All situational context must come strictly from the provided evidence pack and runtime BusinessContext. "
-        "Ground your findings in query traces, transaction states, and schema definitions. Only propose actions "
-        "from the capability registry."
+        "You are the Data Specialist in the God-View Sovereign Court. "
+        "Analyze database and storage-tier telemetry, query execution latency, lock contention, "
+        "schema evolution, and statistical distribution shifts across data entities. "
+        "Rely strictly on provided runtime evidence and discovered BusinessContext; "
+        "never assume tenant domain vocabulary. Formulate a precise hypothesis, "
+        "grounded citations, confidence score (0.0 to 1.0), and proposed remediation actions."
     ),
     "business_line": (
-        "You are a Business-Line Court Specialist Agent. You monitor end-to-end service journey "
-        "conformance, asynchronous message processing, queue depth, dead-letter message backlogs, "
-        "step sequence invariants, and journey-level metrics. All situational context must come strictly "
-        "from the provided evidence pack and runtime BusinessContext. Formulate hypotheses based on message flow "
-        "and transaction boundaries. Only propose actions from the capability registry."
+        "You are the Business-Line Specialist in the God-View Sovereign Court. "
+        "Analyze cross-service journey progression, queue message backlog, step sequencing, "
+        "and business KPI invariants derived from OTel spans and ledger events. "
+        "Rely strictly on provided runtime evidence and discovered BusinessContext; "
+        "never assume tenant domain vocabulary. Formulate a precise hypothesis, "
+        "grounded citations, confidence score (0.0 to 1.0), and proposed remediation actions."
     ),
     "change": (
-        "You are a Change Court Specialist Agent. You correlate system anomalies with recent deployment "
-        "events, container image updates, source code repository commits, configuration edits, and "
-        "infrastructure drift diffs. All situational context must come strictly from the provided evidence "
-        "pack and runtime BusinessContext. Cross-reference change timestamps with incident onset. "
-        "Only propose actions from the capability registry."
+        "You are the Change Specialist in the God-View Sovereign Court. "
+        "Analyze deployment revision timelines, git commit diffs, configuration drift, "
+        "infrastructure posture mutations, and rollout timing relative to incident onset. "
+        "Rely strictly on provided runtime evidence and discovered BusinessContext; "
+        "never assume tenant domain vocabulary. Formulate a precise hypothesis, "
+        "grounded citations, confidence score (0.0 to 1.0), and proposed remediation actions."
     ),
     "platform": (
-        "You are a Platform Court Specialist Agent. You analyze infrastructure resources, container "
-        "lifecycles, exit codes (such as OOM / exit code 137), CPU and memory saturation, load balancer "
-        "posture, ingress/invoker rules, and edge security/WAF policy rules. All situational context must "
-        "come strictly from the provided evidence pack and runtime BusinessContext. Cite specific resource metrics, "
-        "security policy rule numbers, and posture drift. Only propose actions from the capability registry."
+        "You are the Platform Specialist in the God-View Sovereign Court. "
+        "Analyze container lifecycle events, crash terminations, OOMKilled restarts, "
+        "compute resource limits, edge load balancer routing, and WAF security policies. "
+        "Rely strictly on provided runtime evidence and discovered BusinessContext; "
+        "never assume tenant domain vocabulary. Formulate a precise hypothesis, "
+        "grounded citations, confidence score (0.0 to 1.0), and proposed remediation actions."
     ),
 }
 
@@ -75,8 +97,6 @@ MUTATING_CAPABILITY_PREFIXES = (
 def is_mutating_capability(capability_id: str) -> bool:
     """Determine whether a capability requires operator approval before execution."""
     try:
-        from godview_shared.capabilities import get_capability
-
         spec = get_capability(capability_id)
         return bool(spec.mutating)
     except Exception:
@@ -119,7 +139,6 @@ class SpecialistTools:
             if executor is not None:
                 return executor(**arg_dict)
 
-        # Fallback for read capability execution
         return {
             "status": "ok",
             "capability_id": capability_id,
@@ -152,31 +171,55 @@ class SpecialistTools:
             doc = self.ctx.docs.get("incidents", incident_id)
             if doc:
                 return doc
-        return {"incident_id": incident_id, "evidence_pack": {}}
+        return {"incident_id": incident_id, "status": "incident_not_found"}
 
     def propose_remediation(
         self,
         capability_id: str,
         args: dict[str, Any] | None = None,
         rationale: str = "",
-        confidence: float = 0.8,
+        confidence: float = 0.9,
     ) -> dict[str, Any]:
-        """Record a proposed remediation action for this incident."""
+        """Queue a proposed remediation action for TrustGate evaluation and operator approval."""
+        arg_dict = args or {}
         action = ProposedAction(
             capability_id=capability_id,
-            args=args or {},
+            args=arg_dict,
             rationale=rationale,
-            confidence=max(0.0, min(1.0, confidence)),
+            confidence=confidence,
         )
         self.proposed_actions.append(action)
         return {
             "status": "proposed",
             "action": action.model_dump(mode="json"),
+            "approval_required": is_mutating_capability(capability_id),
         }
 
+    def build_tool_callables(self) -> list[Callable[..., Any]]:
+        """Return the list of tool functions."""
+        return [
+            self.invoke_capability,
+            self.get_business_context,
+            self.query_ledger,
+            self.get_incident,
+            self.propose_remediation,
+        ]
 
-class SpecialistAgent(LlmAgent):
-    """An archetype-specific specialist LlmAgent reasoning over evidence."""
+    def build_adk_tools(self) -> list[FunctionTool]:
+        """Wrap each tool function in an ADK FunctionTool."""
+        return [FunctionTool(func=f) for f in self.build_tool_callables()]
+
+
+def _clean_adk_identifier(name: str) -> str:
+    """Ensure a string is a valid Python identifier for ADK Node name."""
+    cleaned = re.sub(r"[^a-zA-Z0-9_]", "_", name)
+    if not cleaned or (not cleaned[0].isalpha() and cleaned[0] != "_"):
+        cleaned = f"agent_{cleaned}"
+    return cleaned
+
+
+class SpecialistAgent:
+    """God-View Court Specialist LlmAgent built on Google ADK."""
 
     def __init__(
         self,
@@ -186,57 +229,40 @@ class SpecialistAgent(LlmAgent):
         ctx: Any | None = None,
         sovereign_url: str | None = None,
         llm_runner: Any | None = None,
-        model: str | None = None,
-        fallback_model: str | None = None,
-        location: str | None = None,
     ) -> None:
-        if archetype not in ARCHETYPE_GENERIC_INSTRUCTIONS:
-            valid = list(ARCHETYPE_GENERIC_INSTRUCTIONS.keys())
-            raise ValueError(f"Unknown archetype '{archetype}'. Must be one of {valid}")
-
-        agent_id = f"{archetype}__{subject_ref}"
-        instruction = ARCHETYPE_GENERIC_INSTRUCTIONS[archetype]
         self.archetype = archetype
         self.subject_ref = subject_ref
         self.ctx = ctx
-        self.tools_helper = SpecialistTools(ctx=ctx, sovereign_url=sovereign_url)
-        self.specialist_tools = self.tools_helper
-
-        tools: list[Callable[..., Any]] = [
-            self.tools_helper.invoke_capability,
-            self.tools_helper.get_business_context,
-            self.tools_helper.query_ledger,
-            self.tools_helper.get_incident,
-            self.tools_helper.propose_remediation,
-        ]
-
-        # Model configuration using shared config MODEL_TABLE
-        chosen_model = model or DEFAULT_AGENT_MODEL_ID
-        chosen_fallback = fallback_model or DEFAULT_AGENT_FALLBACK_MODEL_ID
-        chosen_loc = location or DEFAULT_AGENT_MODEL_LOCATION
-
-        super().__init__(
-            name=agent_id,
-            model=chosen_model,
-            fallback_model=chosen_fallback,
-            location=chosen_loc,
-            instruction=instruction,
-            tools=tools,
-            description=f"God-View {archetype.title()} Specialist for {subject_ref}",
-            llm_runner=llm_runner,
+        self.sovereign_url = sovereign_url.rstrip("/") if sovereign_url else ""
+        self.tools_helper = SpecialistTools(ctx=ctx, sovereign_url=self.sovereign_url)
+        self.name = f"{archetype}__{subject_ref}"
+        self.instruction = ARCHETYPE_GENERIC_INSTRUCTIONS.get(
+            archetype,
+            f"Analyze operational incidents affecting {subject_ref} using available evidence.",
         )
+        self.primary_model_id = MODEL_TABLE.get("reasoning", MODEL_TABLE["reasoning"]).model_id
+        self.fallback_model_id = DEFAULT_AGENT_FALLBACK_MODEL_ID
+        self.model_location = DEFAULT_AGENT_MODEL_LOCATION
 
-    def diagnose_evidence(
+        adk_tools = self.tools_helper.build_adk_tools()
+        adk_node_name = _clean_adk_identifier(self.name)
+        self.adk_agent = LlmAgent(
+            name=adk_node_name,
+            model=llm_runner if hasattr(llm_runner, "generate_content_async") else self.primary_model_id,
+            instruction=self.instruction,
+            tools=adk_tools,
+            description=f"God-View {archetype} specialist agent for {subject_ref}",
+        )
+        self.llm_runner = llm_runner
+
+    async def diagnose(
         self,
         incident_id: str,
         evidence_pack: dict[str, Any] | None = None,
     ) -> Diagnosis:
-        """Perform diagnostic analysis over an incident evidence pack."""
+        """Asynchronously analyze evidence and formulate a grounded Diagnosis."""
         ep = evidence_pack or {}
-        # Fetch business context if available
         biz_ctx = self.tools_helper.get_business_context(self.subject_ref)
-
-        # Build prompt content from evidence pack without domain nouns
         prompt_data = {
             "incident_id": incident_id,
             "subject_ref": self.subject_ref,
@@ -245,91 +271,106 @@ class SpecialistAgent(LlmAgent):
             "business_context": biz_ctx,
         }
 
-        # Check if ctx.llm is available
+        user_content = (
+            f"Instruction:\n{self.instruction}\n\n"
+            f"Analyze the following evidence pack for incident {incident_id} on {self.subject_ref}.\n"
+            f"Evidence: {json.dumps(prompt_data, default=str)}\n"
+            "Formulate a precise hypothesis, confidence score (0.0 to 1.0), citations, "
+            "and any proposed remediation actions."
+        )
+
+        # 1. First priority: ctx.llm (async LlmClient with Argon -> Flash fallback)
         if self.ctx is not None and hasattr(self.ctx, "llm") and self.ctx.llm is not None:
             try:
-                user_content = (
-                    f"Instruction:\n{self.instruction}\n\n"
-                    f"Analyze the following evidence pack for incident {incident_id} on {self.subject_ref}.\n"
-                    f"Evidence: {json.dumps(prompt_data, default=str)}\n"
-                    "Formulate a precise hypothesis, confidence score (0.0 to 1.0), citations, "
-                    "and any proposed remediation actions."
-                )
-                response = self.ctx.llm.generate(
-                    role="reasoning",
-                    contents=[{"role": "user", "parts": [{"text": user_content}]}],
-                    response_schema=Diagnosis,
-                )
-                if isinstance(response, Diagnosis):
-                    return response
-                if isinstance(response, dict):
-                    return Diagnosis.model_validate(response)
+                call_kwargs: dict[str, Any] = {
+                    "role": "reasoning",
+                    "contents": [{"role": "user", "parts": [{"text": user_content}]}],
+                    "response_schema": Diagnosis,
+                }
+                try:
+                    sig = inspect.signature(self.ctx.llm.generate)
+                    if "agent_id" in sig.parameters or any(
+                        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+                    ):
+                        call_kwargs["agent_id"] = self.name
+                except Exception:
+                    pass
+
+                res = self.ctx.llm.generate(**call_kwargs)
+                if inspect.isawaitable(res):
+                    res = await res
+
+                if isinstance(res, Diagnosis):
+                    return res
+                if hasattr(res, "parsed") and isinstance(res.parsed, Diagnosis):
+                    return res.parsed
+                if hasattr(res, "text") and res.text:
+                    try:
+                        return Diagnosis.model_validate_json(res.text)
+                    except Exception:
+                        pass
+                if isinstance(res, dict):
+                    return Diagnosis.model_validate(res)
             except Exception as exc:
-                logger.warning("ctx.llm invocation failed, falling back to evidence heuristics: %s", exc)
+                logger.warning("ctx.llm invocation failed in specialist %s: %s", self.name, exc)
 
-        # Fallback evidence-based deterministic diagnosis when LLM is unavailable
-        hypothesis = (
-            f"Evidence-based analysis by {self.archetype} specialist for {self.subject_ref} "
-            f"on incident {incident_id}."
-        )
-        confidence = 0.85
-        citations = []
-        proposed_actions = list(self.tools_helper.proposed_actions)
+        # 2. Second priority: custom pluggable llm_runner if supplied
+        if self.llm_runner is not None and hasattr(self.llm_runner, "generate"):
+            try:
+                gen_res = self.llm_runner.generate(
+                    model=self.primary_model_id,
+                    contents=user_content,
+                    agent_id=self.name,
+                )
+                if inspect.isawaitable(gen_res):
+                    gen_res = await gen_res
 
-        # Check for specific evidence patterns in evidence_pack
-        if "preconfiguredExprIds" in str(ep) or "denied_by_security_policy" in str(ep):
-            hypothesis = (
-                "Edge security policy rejected valid application traffic due to overly strict "
-                "WAF preconfigured rule sensitivity."
-            )
-            confidence = 0.95
-            citations.append("edge.security_policy:denied_by_security_policy")
-            proposed_actions.append(
-                ProposedAction(
-                    capability_id="armor.set_waf_sensitivity",
-                    args={"sensitivity": 1, "preview": True},
-                    rationale="Tune WAF rule sensitivity to 1 with preview to allow legitimate JSON requests.",
-                    confidence=0.95,
-                )
-            )
-        elif "137" in str(ep) or "OOMKilled" in str(ep):
-            hypothesis = "Container terminated with exit code 137 (OOMKilled) under memory pressure."
-            confidence = 0.92
-            citations.append("container.status:exit_code_137")
-            proposed_actions.append(
-                ProposedAction(
-                    capability_id="gke.patch_probe",
-                    args={"memory_limit": "2Gi"},
-                    rationale="Increase memory limit and adjust liveness probe.",
-                    confidence=0.9,
-                )
-            )
-        elif "offset" in str(ep) or "schema" in str(ep):
-            hypothesis = "Payload format shifted unexpectedly causing parser misalignment."
-            confidence = 0.90
-            citations.append("payload.parser:offset_shift")
-            proposed_actions.append(
-                ProposedAction(
-                    capability_id="git.create_pull_request",
-                    args={"patch": "update_schema_offset"},
-                    rationale="Update payload schema definitions",
-                    confidence=0.9,
-                )
-            )
+                if isinstance(gen_res, Diagnosis):
+                    return gen_res
+                if isinstance(gen_res, str):
+                    try:
+                        return Diagnosis.model_validate_json(gen_res)
+                    except Exception:
+                        return Diagnosis(
+                            hypothesis=gen_res,
+                            confidence=0.85,
+                            citations=[f"agent:{self.name}"],
+                        )
+                if isinstance(gen_res, dict):
+                    return Diagnosis.model_validate(gen_res)
+            except Exception as exc:
+                logger.warning("llm_runner failed in specialist %s: %s", self.name, exc)
 
-        category = (
-            ep.get("scenario")
-            or ep.get("category")
-            or ("payload_schema_offset_shift" if "offset" in str(ep) else f"{self.archetype}_evidence_finding")
-        )
+        # 3. Model unavailable: return confidence=0.0 and never fabricate a story
+        logger.info("Model unavailable for specialist %s on incident %s", self.name, incident_id)
         return Diagnosis(
-            hypothesis=hypothesis,
-            confidence=confidence,
+            hypothesis="not diagnosed: model unavailable",
+            confidence=0.0,
             evidence=[{"source": "evidence_pack", "sample": str(ep)[:200]}],
-            proposed_actions=proposed_actions,
-            root_cause_category=category,
-            citations=citations or [f"incident:{incident_id}"],
+            proposed_actions=[],
+            root_cause_category="model_unavailable",
+            citations=[f"incident:{incident_id}"] if incident_id else [],
         )
+
+    # Synchronous shim for callers needing direct invocation
+    def diagnose_evidence(
+        self,
+        incident_id: str,
+        evidence_pack: dict[str, Any] | None = None,
+    ) -> Diagnosis:
+        """Synchronous wrapper for diagnose()."""
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is not None and loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(lambda: asyncio.run(self.diagnose(incident_id, evidence_pack)))
+                return future.result(timeout=60)
+        return asyncio.run(self.diagnose(incident_id, evidence_pack))
 
 
 def create_specialist_agent(

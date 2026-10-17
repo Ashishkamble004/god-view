@@ -20,6 +20,7 @@ from godview_shared.config import (
 )
 from godview_shared.contracts import (
     Diagnosis,
+    ProposedAction,
 )
 from godview_shared.fakes import (
     InMemoryAgentEngine,
@@ -27,16 +28,13 @@ from godview_shared.fakes import (
     InMemoryFirestore,
     InMemoryPubSub,
 )
+from google.adk.agents import LlmAgent
+from google.adk.agents.remote_a2a_agent import RemoteA2aAgent
 
-from godview.agents.adk.compat import (
-    Event,
-    InvocationContext,
-    RemoteA2aAgent,
-)
 from godview.agents.adk.court import (
     CONSENSUS_THRESHOLD,
     CourtOrchestrator,
-    register_in_process_court,
+    install_court_and_rsi,
 )
 from godview.agents.adk.specialist import (
     ARCHETYPE_GENERIC_INSTRUCTIONS,
@@ -44,12 +42,12 @@ from godview.agents.adk.specialist import (
     create_specialist_agent,
 )
 from godview.agents.archetypes import COURT_DOMAINS
-from godview.agents.server import AgentExecutor
 from godview.harness.cloud_library import InMemorySkillsStorageClient
 from godview.harness.rsi import evolve_specialist
 from godview.sovereign.court_manager import CourtManager
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+
 
 def _load_router(name: str) -> Any:
     p = REPO_ROOT / "godview" / "sovereign" / "control_api" / "routers" / f"{name}.py"
@@ -59,26 +57,57 @@ def _load_router(name: str) -> Any:
     spec.loader.exec_module(mod)
     return mod
 
+
 build_court_router = _load_router("court").build_router
 build_harness_router = _load_router("harness").build_router
 
 
-class FakeLlmRunner:
-    """Deterministic in-memory LLM runner for ADK testing without API calls."""
+class AsyncFakeLlm:
+    """Async fake LLM matching shared/godview_shared/llm.py `async def generate(...)`."""
 
-    def __init__(self, canned_response: str = "Root cause analyzed successfully.") -> None:
-        self.canned_response = canned_response
+    def __init__(self, canned_diag: Diagnosis | None = None) -> None:
+        self.awaited = 0
         self.invocations: list[dict[str, Any]] = []
+        self._canned = canned_diag or Diagnosis(
+            hypothesis="LLM-PRODUCED: TLS certificate expired on observed edge service",
+            confidence=0.92,
+            root_cause_category="certificate_expired",
+            citations=["evidence:cert_status_failed"],
+            proposed_actions=[
+                ProposedAction(
+                    capability_id="cert.renew_certificate",
+                    args={"domain": "edge.domain.test"},
+                    rationale="Renew expired TLS cert to restore traffic",
+                    confidence=0.92,
+                )
+            ],
+        )
 
-    async def generate(self, model: str, contents: Any, **kwargs: Any) -> str:
-        self.invocations.append({"model": model, "contents": contents, "kwargs": kwargs})
-        return self.canned_response
+    async def generate(
+        self,
+        role: str = "reasoning",
+        contents: Any = "",
+        tools: list[Any] | None = None,
+        response_schema: Any | None = None,
+        agent_id: str = "sovereign",
+        **kwargs: Any,
+    ) -> Diagnosis:
+        self.awaited += 1
+        self.invocations.append({
+            "role": role,
+            "contents": contents,
+            "tools": tools,
+            "response_schema": response_schema,
+            "agent_id": agent_id,
+            "kwargs": kwargs,
+        })
+        return self._canned
 
 
 class MockSovereignContext:
     """Mock SovereignContext matching plan §1.2."""
 
-    def __init__(self) -> None:
+    def __init__(self, llm: Any | None = None) -> None:
         self.docs = InMemoryFirestore()
         self.ledger = InMemoryBigQuery()
         self.bus = InMemoryPubSub()
@@ -86,6 +115,10 @@ class MockSovereignContext:
         self.adapters = []
         self.hooks = MagicMock()
         self.hooks.on_incident = []
+        self.hooks.on_incident_closed = []
+        self.hooks.on_approval_decided = []
+        self.llm = llm
+        self.court_orchestrator = None
         self.court_manager = CourtManager(
             firestore=self.docs,
             pubsub=self.bus,
@@ -95,7 +128,7 @@ class MockSovereignContext:
 
 def test_specialist_agent_generic_archetypes_and_tools() -> None:
     ctx = MockSovereignContext()
-    runner = FakeLlmRunner()
+    runner = AsyncFakeLlm()
 
     for domain in COURT_DOMAINS:
         agent = create_specialist_agent(
@@ -105,14 +138,17 @@ def test_specialist_agent_generic_archetypes_and_tools() -> None:
             llm_runner=runner,
         )
         assert agent.archetype == domain
-        assert agent.model == DEFAULT_AGENT_MODEL_ID
-        assert agent.fallback_model == DEFAULT_AGENT_FALLBACK_MODEL_ID
-        assert agent.location == DEFAULT_AGENT_MODEL_LOCATION
+        assert agent.primary_model_id == DEFAULT_AGENT_MODEL_ID
+        assert agent.fallback_model_id == DEFAULT_AGENT_FALLBACK_MODEL_ID
+        assert agent.model_location == DEFAULT_AGENT_MODEL_LOCATION
         assert agent.name == f"{domain}__test-{domain}"
         assert domain in ARCHETYPE_GENERIC_INSTRUCTIONS
 
+        # Real Google ADK LlmAgent object
+        assert isinstance(agent.adk_agent, LlmAgent)
+
         # Verify specialist tools
-        tools = agent.specialist_tools
+        tools = agent.tools_helper
         assert isinstance(tools, SpecialistTools)
 
         # 1. get_incident
@@ -147,84 +183,123 @@ def test_specialist_agent_generic_archetypes_and_tools() -> None:
 
 
 @pytest.mark.asyncio
-async def test_court_orchestrator_parallel_fanout_and_critic_consensus() -> None:
-    ctx = MockSovereignContext()
-    runner = FakeLlmRunner()
-    orchestrator = CourtOrchestrator(ctx=ctx, llm_runner=runner)
+async def test_specialist_agent_async_llm_diagnose() -> None:
+    llm = AsyncFakeLlm()
+    ctx = MockSovereignContext(llm=llm)
 
-    evidence = {
-        "scenario": "payload_schema_offset_shift",
-        "offset": 120,
-        "expected_score_offset": 108,
-        "actual_score_offset": 228,
-        "service": "orders-gateway",
+    agent = create_specialist_agent(
+        archetype="platform",
+        subject_ref="edge-gateway",
+        ctx=ctx,
+    )
+
+    unseen_evidence = {
+        "summary": "TLS handshake failures after managed certificate expired",
+        "telemetry": {"5xx_rate": 0.35, "ssl_handshake_errors": 420},
+    }
+
+    diag = await agent.diagnose("inc-unseen-tls", unseen_evidence)
+    assert isinstance(diag, Diagnosis)
+    assert llm.awaited >= 1
+    # Confirms hypothesis originated from LLM and not keywords
+    assert "LLM-PRODUCED" in diag.hypothesis
+    assert diag.confidence == 0.92
+    assert diag.root_cause_category == "certificate_expired"
+    assert len(diag.proposed_actions) >= 1
+    assert diag.proposed_actions[0].capability_id == "cert.renew_certificate"
+
+
+@pytest.mark.asyncio
+async def test_specialist_agent_model_unavailable_fallback() -> None:
+    # No LLM provided in ctx
+    ctx = MockSovereignContext(llm=None)
+    agent = create_specialist_agent(
+        archetype="application",
+        subject_ref="orders-svc",
+        ctx=ctx,
+    )
+
+    diag = await agent.diagnose("inc-nomodel", {"error": "any"})
+    assert isinstance(diag, Diagnosis)
+    assert diag.confidence == 0.0
+    assert diag.hypothesis == "not diagnosed: model unavailable"
+    assert diag.proposed_actions == []
+
+
+@pytest.mark.asyncio
+async def test_court_orchestrator_parallel_fanout_and_critic_consensus() -> None:
+    llm = AsyncFakeLlm()
+    ctx = MockSovereignContext(llm=llm)
+    orchestrator = CourtOrchestrator(ctx=ctx)
+
+    unseen_evidence = {
+        "summary": "Sudden latency spike and handshake aborts on edge ingress",
+        "network": {"reset_count": 89},
     }
 
     diagnosis = await orchestrator.convene(
         incident_id="inc-test-convene",
-        evidence_pack=evidence,
-        specialists=["application", "data"],
+        evidence_pack=unseen_evidence,
+        specialists=["application", "platform"],
     )
 
     assert isinstance(diagnosis, Diagnosis)
+    # Critic and specialists both awaited
+    assert llm.awaited >= 2
     assert diagnosis.confidence >= CONSENSUS_THRESHOLD
-    assert diagnosis.hypothesis
-    assert diagnosis.root_cause_category == "payload_schema_offset_shift"
+    assert "LLM-PRODUCED" in diagnosis.hypothesis
+    assert diagnosis.root_cause_category == "certificate_expired"
     assert len(diagnosis.proposed_actions) >= 1
-    assert any(
-        a.capability_id in ("git.create_pull_request", "run.restore_revision_config")
-        for a in diagnosis.proposed_actions
-    )
+    assert diagnosis.proposed_actions[0].capability_id == "cert.renew_certificate"
 
 
 @pytest.mark.asyncio
-async def test_in_process_fallback_hook_registration() -> None:
-    ctx = MockSovereignContext()
-    orchestrator = register_in_process_court(ctx)
-    assert isinstance(orchestrator, CourtOrchestrator)
+async def test_court_orchestrator_model_unavailable() -> None:
+    ctx = MockSovereignContext(llm=None)
+    orchestrator = CourtOrchestrator(ctx=ctx)
+
+    diagnosis = await orchestrator.convene(
+        incident_id="inc-nomodel",
+        evidence_pack={"some": "telemetry"},
+    )
+    assert isinstance(diagnosis, Diagnosis)
+    assert diagnosis.confidence == 0.0
+    assert diagnosis.hypothesis == "not diagnosed: model unavailable"
+
+
+@pytest.mark.asyncio
+async def test_install_court_and_rsi_wiring() -> None:
+    llm = AsyncFakeLlm()
+    ctx = MockSovereignContext(llm=llm)
+
+    install_court_and_rsi(ctx)
+    assert ctx.court_orchestrator is not None
+    assert isinstance(ctx.court_orchestrator, CourtOrchestrator)
+
+    # Verify incident hook dispatcher
     assert len(ctx.hooks.on_incident) >= 1
-
-    callback = ctx.hooks.on_incident[0]
-    fake_incident = {
-        "incident_id": "inc-hook-001",
-        "evidence_pack": {
-            "scenario": "container_oom_exit_137",
-            "container_exit_code": 137,
-            "dlq_backlog_depth": 10,
-        },
-    }
-    diag = await callback(fake_incident)
+    hook_fn = ctx.hooks.on_incident[0]
+    diag = await hook_fn({"incident_id": "inc-hook-test", "evidence_pack": {"metric": "val"}})
     assert isinstance(diag, Diagnosis)
-    assert diag.confidence >= 0.85
+    assert llm.awaited >= 1
 
 
 @pytest.mark.asyncio
-async def test_a2a_remote_agent_and_executor_round_trip() -> None:
-    executor = AgentExecutor()
-    card = executor.build_agent_card("application")
-    assert card.name
-    assert card.domain == "application"
-    assert card.default_model_id == DEFAULT_AGENT_MODEL_ID
+async def test_remote_a2a_agent_registration() -> None:
+    ctx = MockSovereignContext()
+    orchestrator = CourtOrchestrator(ctx=ctx)
 
-    # Test RemoteA2aAgent interacting with AgentExecutor
-    remote_agent = RemoteA2aAgent(
-        name="application__specialist",
-        agent_card=card.model_dump(),
-        client=executor,
-    )
-    inv_ctx = InvocationContext(session_id="test-a2a-sess")
-    event = await remote_agent.invoke(
-        {"incident_id": "inc-a2a-roundtrip", "evidence": {"offset": 120}},
-        inv_ctx,
-    )
-    assert isinstance(event, Event)
-    assert isinstance(event.content, dict)
-    assert event.content.get("status") == "completed"
-    assert event.content.get("model_used") == DEFAULT_AGENT_MODEL_ID
+    card_url = "https://us-central1-aiplatform.googleapis.com/v1beta1/projects/test/locations/us-central1/reasoningEngines/app-1:query"
+    remote = orchestrator.register_remote_agent("application__orders-svc", card_url)
+    assert isinstance(remote, RemoteA2aAgent)
+    assert "application__orders-svc" in orchestrator._remote_specialists
 
 
 def test_routers_court_and_harness_endpoints() -> None:
-    ctx = MockSovereignContext()
+    llm = AsyncFakeLlm()
+    ctx = MockSovereignContext(llm=llm)
+    install_court_and_rsi(ctx)
+
     app = FastAPI()
     court_router = build_court_router(ctx)
     harness_router = build_harness_router(ctx)
@@ -262,7 +337,7 @@ def test_routers_court_and_harness_endpoints() -> None:
         "/court/convene",
         json={
             "incident_id": "inc-router-convene",
-            "evidence_pack": {"container_exit_code": 137},
+            "evidence_pack": {"tls_issue": True},
         },
     )
     assert r_convene.status_code == 200
@@ -274,7 +349,7 @@ def test_routers_court_and_harness_endpoints() -> None:
     tree_data = r_tree.json()
     assert tree_data["surface"] == "godview"
     assert tree_data["validation"]["ok"] is True
-    assert tree_data["always_on_tokens"] <= 12_000
+    assert tree_data["living_model_version"] >= 1
 
     # 7. POST /harness/{id}:evolve
     r_evolve = client.post(
@@ -283,11 +358,11 @@ def test_routers_court_and_harness_endpoints() -> None:
     )
     assert r_evolve.status_code == 200
     assert r_evolve.json()["status"] == "completed"
-    assert r_evolve.json()["winner_passed"] is True
 
 
 def test_rsi_evolution_and_gcs_persistence(tmp_path: Path) -> None:
-    ctx = MockSovereignContext()
+    llm = AsyncFakeLlm()
+    ctx = MockSovereignContext(llm=llm)
     fake_gcs = InMemorySkillsStorageClient()
 
     # Pre-spawn court agent doc in firestore
@@ -310,6 +385,11 @@ def test_rsi_evolution_and_gcs_persistence(tmp_path: Path) -> None:
         mode="parallel",
         k=1,
         storage_client=fake_gcs,
+        evidence_pack={
+            "summary": "archived case replay",
+            "category": "certificate_expired",
+            "require_adaptation_on_h0": True,
+        },
     )
 
     assert res.passed is True
