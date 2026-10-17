@@ -305,24 +305,58 @@ class _FixtureAsyncTransport(httpx.BaseTransport, httpx.AsyncBaseTransport):
             )
 
         # 4. Compute Engine
-        if host == "compute.googleapis.com" and "/instances" in path:
-            if "compute" not in self._fixtures:
-                return self._json_response(404, {"error": {"code": 404, "message": "not found"}})
-            if method == "GET":
-                return self._json_response(200, self._fixtures["compute"])
-            if method in ("PATCH", "POST"):
-                body = json.loads(request.content.decode("utf-8")) if request.content else {}
-                return self._json_response(200, {"status": "DONE", "applied": body})
+        if host == "compute.googleapis.com":
+            if path.endswith("/forwardingRules"):
+                return self._json_response(200, self._fixtures.get("forwarding_rules", {"items": []}))
+            if path.endswith("/urlMaps"):
+                return self._json_response(200, self._fixtures.get("url_maps", {"items": []}))
+            if path.endswith("/backendServices"):
+                return self._json_response(200, self._fixtures.get("backend_services", {"items": []}))
+            if path.endswith("/securityPolicies"):
+                return self._json_response(200, self._fixtures.get("security_policies", {"items": []}))
+            if "/aggregated/instances" in path:
+                zone = str(self._fixtures.get("zone", "us-central1-a"))
+                inst_list = self._fixtures.get("compute", {}).get("items", [])
+                agg_default = {"items": {f"zones/{zone}": {"instances": inst_list}}}
+                return self._json_response(200, self._fixtures.get("compute_aggregated", agg_default))
+            if "/instances" in path:
+                if "compute" not in self._fixtures:
+                    return self._json_response(404, {"error": {"code": 404, "message": "not found"}})
+                if method == "GET":
+                    return self._json_response(200, self._fixtures["compute"])
+                if method in ("PATCH", "POST"):
+                    body = json.loads(request.content.decode("utf-8")) if request.content else {}
+                    return self._json_response(200, {"status": "DONE", "applied": body})
+
+        # 4b. API Gateway
+        if host == "apigateway.googleapis.com":
+            if path.endswith("/gateways"):
+                return self._json_response(200, self._fixtures.get("api_gateways", {"gateways": []}))
+            if path.endswith("/configs"):
+                return self._json_response(200, self._fixtures.get("api_configs", {"apiConfigs": []}))
+            if "/configs/" in path:
+                cfg_full = self._fixtures.get("api_config_full")
+                if cfg_full:
+                    return self._json_response(200, cfg_full)
+                configs = self._fixtures.get("api_configs", {}).get("apiConfigs", [])
+                if configs:
+                    return self._json_response(200, configs[0])
+                return self._json_response(404, {"error": {"code": 404, "message": "config not found"}})
 
         # 5. Cloud SQL Admin
-        if host == "sqladmin.googleapis.com" and "/instances" in path:
-            if "sql_admin" not in self._fixtures:
-                return self._json_response(404, {"error": {"code": 404, "message": "not found"}})
-            if method == "GET":
-                return self._json_response(200, self._fixtures["sql_admin"])
-            if method == "PATCH":
-                body = json.loads(request.content.decode("utf-8")) if request.content else {}
-                return self._json_response(200, {"status": "DONE", "applied": body})
+        if host == "sqladmin.googleapis.com":
+            if path.endswith("/databases"):
+                return self._json_response(200, self._fixtures.get("sql_databases", {"items": []}))
+            if path.endswith("/users"):
+                return self._json_response(200, self._fixtures.get("sql_users", {"items": []}))
+            if "/instances" in path:
+                if "sql_admin" not in self._fixtures:
+                    return self._json_response(404, {"error": {"code": 404, "message": "not found"}})
+                if method == "GET":
+                    return self._json_response(200, self._fixtures["sql_admin"])
+                if method in ("PATCH", "POST"):
+                    body = json.loads(request.content.decode("utf-8")) if request.content else {}
+                    return self._json_response(200, {"status": "DONE", "applied": body})
 
         # 6. Cloud Monitoring
         if host == "monitoring.googleapis.com":
@@ -361,10 +395,13 @@ class _FixtureAsyncTransport(httpx.BaseTransport, httpx.AsyncBaseTransport):
                 return self._json_response(200, {"entries": entries})
 
         # 9. Pub/Sub
-        if host == "pubsub.googleapis.com" and path.endswith("/topics"):
-            if "pubsub" not in self._fixtures:
-                return self._json_response(404, {"error": {"code": 404, "message": "not found"}})
-            return self._json_response(200, self._fixtures["pubsub"])
+        if host == "pubsub.googleapis.com":
+            if path.endswith("/topics"):
+                if "pubsub" not in self._fixtures:
+                    return self._json_response(404, {"error": {"code": 404, "message": "not found"}})
+                return self._json_response(200, self._fixtures["pubsub"])
+            if path.endswith("/subscriptions"):
+                return self._json_response(200, self._fixtures.get("pubsub_subscriptions", {"subscriptions": []}))
 
         # 10. BigQuery
         if host == "bigquery.googleapis.com":
@@ -528,6 +565,10 @@ class _FixtureAsyncTransport(httpx.BaseTransport, httpx.AsyncBaseTransport):
             meta["name"] = obj_name
             return self._json_response(200, meta)
 
+        # 18. Generic HTTP probe targets (e.g. Cloud Run, Gateway, public endpoints)
+        if host.endswith(".run.app") or host.endswith(".gateway.dev") or host in ("example.com", "localhost"):
+            return self._json_response(200, {"status": "ok", "probe": "passed"})
+
         return self._json_response(
             404,
             {"error": {"code": 404, "message": f"Unhandled fixture route {method} {request.url}"}},
@@ -537,6 +578,24 @@ class _FixtureAsyncTransport(httpx.BaseTransport, httpx.AsyncBaseTransport):
 def build_fixture_http_transport(fixtures: dict[str, Any]) -> _FixtureAsyncTransport:
     """Create an `httpx.AsyncBaseTransport` backed by recorded GCP API fixtures."""
     return _FixtureAsyncTransport(fixtures)
+
+
+def _redact_tfstate_node(node: Any) -> Any:
+    """Recursively redact sensitive credentials, passwords, and tokens from tfstate (Decision A2/A8)."""
+    if isinstance(node, dict):
+        cleaned: dict[str, Any] = {}
+        for k, v in node.items():
+            lower_k = str(k).lower()
+            if any(s in lower_k for s in ("password", "private_key", "secret", "token", "credential", "auth_token")):
+                cleaned[k] = "[REDACTED]"
+            elif lower_k in ("result", "bcrypt_hash") and isinstance(v, str) and len(v) > 0:
+                cleaned[k] = "[REDACTED]"
+            else:
+                cleaned[k] = _redact_tfstate_node(v)
+        return cleaned
+    if isinstance(node, list):
+        return [_redact_tfstate_node(item) for item in node]
+    return node
 
 
 class TerraformDriftAdapter(SenseAdapter):
@@ -670,7 +729,7 @@ class TerraformDriftAdapter(SenseAdapter):
 
             media_resp = await client.get(base_url, params={"alt": "media"})
             media_resp.raise_for_status()
-            raw_state = copy.deepcopy(media_resp.json())
+            raw_state = _redact_tfstate_node(copy.deepcopy(media_resp.json()))
 
         self.tfstate_download_count += 1
         self._cached_tfstate_by_prefix[prefix] = raw_state

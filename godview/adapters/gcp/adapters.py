@@ -1,22 +1,25 @@
-"""16 GCP SenseAdapter implementations and Vertex AI model endpoint resolver.
+"""18 GCP SenseAdapter implementations, HTTP probe adapter, and Vertex AI model endpoint resolver.
 
 Implements SenseAdapter over `httpx` REST transports (live or recorded fixture transport) for:
-1. CloudAssetInventoryAdapter (Asset Inventory, `asset.list`)
-2. CloudRunV2Adapter (Cloud Run v2, `run.restore_revision_config`, `metrics.scrape` with OIDC + Monitoring fallback, `probe.execute` with `x-godview-probe-safe` & `X-Synthetic: true`)
-3. GkeAdapter (GKE Autopilot, `k8s.*` via `GkeMcpClient`)
-4. ComputeEngineAdapter (Compute Engine VMs)
-5. CloudSqlAdminAdapter (Cloud SQL Admin)
-6. CloudMonitoringAdapter (Cloud Monitoring, `obs.list_timeseries` via `ObservabilityMcpClient`)
-7. CloudTraceAdapter (Cloud Trace, `obs.list_traces`, `obs.get_trace`)
-8. CloudLoggingAuditAdapter (Cloud Logging & Audit sink, `obs.query_logs_scoped` `pageSize <= 50` + PII-in-logs detector)
-9. PubSubAdapter (Pub/Sub `godview-nervous-system` + DLQ)
-10. BigQueryAdapter (BigQuery `godview_ledger` & billing export, `ledger.query`, `cost.query` with `sqlglot` AST validation)
+1. CloudAssetInventoryAdapter (Asset Inventory, `asset.list`) - paginated, all kinds
+2. CloudRunV2Adapter (Cloud Run v2, `run.restore_revision_config`, `run.get_posture`, `metrics.scrape`, `probe.execute`)
+3. GkeAdapter (GKE Autopilot, `k8s.*` via `GkeMcpClient`) - multi-region locations/-
+4. ComputeEngineAdapter (Compute Engine VMs) - aggregatedList, gce_instance, dynamic locator port
+5. CloudSqlAdminAdapter (Cloud SQL Admin) - databases/users discovery
+6. CloudMonitoringAdapter (Cloud Monitoring, `obs.list_timeseries`, `monitoring.query_timeseries`)
+7. CloudTraceAdapter (Cloud Trace, `obs.list_traces`, `obs.get_trace`) - unforced edge shapes with rps
+8. CloudLoggingAuditAdapter (Cloud Logging, `obs.query_logs_scoped`, `logging.query_lb_requests`, `logging.query`)
+9. PubSubAdapter (Pub/Sub topics + subscriptions, `pubsub.describe_subscriptions`, `pubsub.dlq_depth`)
+10. BigQueryAdapter (BigQuery `godview_ledger` & billing export, `ledger.query`, `cost.query`)
 11. DatastreamAdapter (Phase 2 stub reporting `unavailable`)
 12. FirestoreAdapter (Firestore Native DB `god-view-memory-db`)
-13. AgentEngineAdapter (Vertex AI Agent Engine, `agent.set_min_instances` 0↔1 PATCH + UC-23 idle engine cost findings)
-14. AgentRegistryAdapter (Optional: discovered, never assumed; falls back to Firestore `court_agents`)
+13. AgentEngineAdapter (Vertex AI Agent Engine, `agent.set_min_instances`)
+14. AgentRegistryAdapter (Optional: discovered, never assumed)
 15. ModelArmorAdapter (Model Armor text-only `sanitizeUserPrompt`, rejecting image bytes)
 16. CloudIamAdapter (Cloud IAM service accounts, `testIamPermissions`, `godview-act-sa` impersonation)
+17. CloudEdgeAdapter (Forwarding rules, URL maps, Backend services, Security policies)
+18. ApiGatewayAdapter (API Gateways, OpenAPI configs, route parsing)
+19. HttpProbeAdapter (Safe GET-only HTTP probing, `http.probe`)
 """
 
 from __future__ import annotations
@@ -24,11 +27,13 @@ from __future__ import annotations
 import copy
 import inspect
 import re
-from collections.abc import Awaitable, Callable
+import time
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 import sqlglot
@@ -51,6 +56,7 @@ from godview_shared.contracts import (
 from godview_shared.otel import inject_baggage_headers
 from sqlglot import exp
 
+from godview.adapters.gcp.apigateway import ApiGatewayAdapter
 from godview.adapters.gcp.drift import (
     TerraformDriftAdapter,
     UnmanagedResourceError,
@@ -61,6 +67,7 @@ from godview.adapters.gcp.drift import (
     resolve_gcp_bearer_token,
     resolve_gcp_project_id,
 )
+from godview.adapters.gcp.edge import CloudEdgeAdapter
 from godview.adapters.gcp.mcp_clients import GkeMcpClient, ObservabilityMcpClient
 
 
@@ -154,7 +161,9 @@ class _BaseGcpAdapter(SenseAdapter):
         *,
         project_id: str | None = None,
         region: str = "us-central1",
+        regions: Sequence[str] | None = None,
         zone: str = "us-central1-a",
+        auth: Any | None = None,
         bearer_token: str | None = None,
         fixtures: dict[str, Any] | None = None,
         http_transport: httpx.BaseTransport | httpx.AsyncBaseTransport | None = None,
@@ -162,7 +171,9 @@ class _BaseGcpAdapter(SenseAdapter):
         self._fixtures = fixtures
         self.project_id = resolve_gcp_project_id(project_id, fixtures)
         self.region = region or str((fixtures or {}).get("region", "us-central1"))
+        self.regions = list(regions) if regions else [self.region]
         self.zone = zone or str((fixtures or {}).get("zone", "us-central1-a"))
+        self.auth = auth
         self.bearer_token = resolve_gcp_bearer_token(bearer_token)
         self._transport = http_transport or (
             build_fixture_http_transport(fixtures) if fixtures is not None else None
@@ -174,8 +185,16 @@ class _BaseGcpAdapter(SenseAdapter):
             "Accept": "application/json",
             "x-goog-user-project": self.project_id,
         }
-        if self.bearer_token:
-            headers["Authorization"] = f"Bearer {self.bearer_token}"
+        token: str | None = None
+        if self.auth is not None and hasattr(self.auth, "access_token"):
+            try:
+                token = self.auth.access_token()
+            except Exception:
+                token = None
+        if not token:
+            token = self.bearer_token or resolve_gcp_bearer_token()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
         return headers
 
     def _http_client(self) -> httpx.AsyncClient:
@@ -190,6 +209,39 @@ class _BaseGcpAdapter(SenseAdapter):
             kwargs["transport"] = self._transport
         return httpx.Client(**kwargs)
 
+    async def _fetch_paginated(
+        self,
+        url: str,
+        items_key: str,
+        params: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        page_token: str | None = None
+        async with self._http_client() as client:
+            while True:
+                req_params = dict(params or {})
+                if page_token:
+                    req_params["pageToken"] = page_token
+                resp = await client.get(url, params=req_params)
+                if resp.status_code == 404:
+                    return results
+                resp.raise_for_status()
+                data = resp.json()
+                raw_items = data.get(items_key, [])
+                if isinstance(raw_items, dict):
+                    # aggregatedList format: zone/region -> subdict
+                    for sub in raw_items.values():
+                        if isinstance(sub, dict) and "instances" in sub:
+                            results.extend(sub.get("instances", []))
+                        elif isinstance(sub, list):
+                            results.extend(sub)
+                elif isinstance(raw_items, list):
+                    results.extend(raw_items)
+                page_token = data.get("nextPageToken")
+                if not page_token:
+                    break
+        return results
+
 
 # ------------------------------------------------------------------------------
 # 1. Cloud Asset Inventory Adapter
@@ -201,24 +253,33 @@ class CloudAssetInventoryAdapter(_BaseGcpAdapter):
 
     async def _fetch_assets(self) -> list[dict[str, Any]]:
         url = f"https://cloudasset.googleapis.com/v1/projects/{self.project_id}/assets"
-        async with self._http_client() as client:
-            resp = await client.get(url, params={"contentType": "RESOURCE"})
-            resp.raise_for_status()
-            return list(resp.json().get("assets", []))
+        return await self._fetch_paginated(url, "assets", params={"contentType": "RESOURCE"})
 
     async def discover(self) -> DiscoveryResult:
-        raw_assets = await self._fetch_assets()
+        try:
+            raw_assets = await self._fetch_assets()
+        except Exception as exc:
+            return DiscoveryResult(
+                services=[],
+                edges=[],
+                entities=[],
+                evidence={"error": str(exc), "state": "unavailable"},
+            )
+
         now_iso = datetime.now(tz=UTC).isoformat()
         services: list[DiscoveredServiceDoc] = []
 
         asset_kind_map: dict[str, DiscoveredServiceKind] = {
             "run.googleapis.com/Service": "cloud_run",
             "container.googleapis.com/Cluster": "gke_workload",
-            "compute.googleapis.com/Instance": "gce_vm",
+            "compute.googleapis.com/Instance": "gce_instance",
             "sqladmin.googleapis.com/Instance": "cloud_sql",
             "storage.googleapis.com/Bucket": "gcs_bucket",
             "pubsub.googleapis.com/Topic": "pubsub_topic",
+            "pubsub.googleapis.com/Subscription": "pubsub_subscription",
             "bigquery.googleapis.com/Dataset": "bigquery_dataset",
+            "firestore.googleapis.com/Database": "firestore_db",
+            "secretmanager.googleapis.com/Secret": "secret",
         }
 
         for asset in raw_assets:
@@ -267,14 +328,22 @@ class CloudAssetInventoryAdapter(_BaseGcpAdapter):
             assets = await self._fetch_assets()
             state = "available"
             count = len(assets)
-        except httpx.HTTPError:
+            error = None
+        except Exception as exc:
             state = "unavailable"
             count = 0
+            error = str(exc)
+        evidence: dict[str, Any] = {
+            "api": "cloudasset.googleapis.com/v1",
+            "assets_count": count,
+        }
+        if error:
+            evidence["error"] = error
         return AdapterHealth(
             adapter_name=self.name,
             family="gcp",
             state=state,  # type: ignore[arg-type]
-            evidence={"api": "cloudasset.googleapis.com/v1", "assets_count": count},
+            evidence=evidence,
             checked_at=datetime.now(tz=UTC),
         )
 
@@ -295,7 +364,7 @@ class CloudAssetInventoryAdapter(_BaseGcpAdapter):
 
 
 # ------------------------------------------------------------------------------
-# 2. Cloud Run v2 Adapter (`run.restore_revision_config`, `metrics.scrape`, `probe.execute`)
+# 2. Cloud Run v2 Adapter
 # ------------------------------------------------------------------------------
 
 
@@ -307,6 +376,8 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
         *,
         project_id: str | None = None,
         region: str = "us-central1",
+        regions: Sequence[str] | None = None,
+        auth: Any | None = None,
         fixtures: dict[str, Any] | None = None,
         http_transport: httpx.BaseTransport | httpx.AsyncBaseTransport | None = None,
         http_metrics_fetcher: Callable[[str, dict[str, str]], Awaitable[str] | str] | None = None,
@@ -324,28 +395,41 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
         super().__init__(
             project_id=project_id,
             region=region,
+            regions=regions,
+            auth=auth,
             fixtures=fixtures,
             http_transport=http_transport,
         )
         self._http_metrics_fetcher = http_metrics_fetcher
-        self._id_token_provider = id_token_provider or (
-            lambda audience: f"eyJhbGciOiJSUzI1NiJ9.sense-sa.{audience}"
-        )
+        if id_token_provider is not None:
+            self._id_token_provider = id_token_provider
+        elif auth is not None and hasattr(auth, "id_token_for"):
+            self._id_token_provider = auth.id_token_for
+        else:
+            self._id_token_provider = None
         self._obs_mcp = observability_mcp
         self._fallback_timeseries = fallback_timeseries or []
         self._probe_sender = probe_sender
 
     async def _fetch_services(self) -> list[dict[str, Any]]:
-        url = f"https://run.googleapis.com/v2/projects/{self.project_id}/locations/{self.region}/services"
-        async with self._http_client() as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            return list(resp.json().get("services", []))
+        # Plan §3.2: all regions with locations/-
+        url = f"https://run.googleapis.com/v2/projects/{self.project_id}/locations/-/services"
+        return await self._fetch_paginated(url, "services")
 
     async def discover(self) -> DiscoveryResult:
-        raw_services = await self._fetch_services()
+        try:
+            raw_services = await self._fetch_services()
+        except Exception as exc:
+            return DiscoveryResult(
+                services=[],
+                edges=[],
+                entities=[],
+                evidence={"error": str(exc), "state": "unavailable"},
+            )
+
         now_iso = datetime.now(tz=UTC).isoformat()
         services: list[DiscoveredServiceDoc] = []
+        edges: list[DiscoveredEdgeDoc] = []
 
         for svc in raw_services:
             full_name = str(svc.get("name", ""))
@@ -356,9 +440,10 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
                 continue
 
             uri = str(svc.get("uri", full_name))
+            doc_id = f"{self.env_id}__cloud_run.{short_name}"
             services.append(
                 DiscoveredServiceDoc(
-                    doc_id=f"{self.env_id}__cloud_run.{short_name}",
+                    doc_id=doc_id,
                     env_id=self.env_id,
                     name=short_name,
                     kind="cloud_run",
@@ -371,11 +456,42 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
                     classification="other_read_only",
                     first_seen=now_iso,
                     last_seen=now_iso,
+                    status="active",
                 )
             )
+
+            # Discover outbound service dependencies from env var references
+            template = svc.get("template", {})
+            containers = template.get("containers", [])
+            for container in containers:
+                for env_entry in container.get("env") or []:
+                    env_val = str(env_entry.get("value", ""))
+                    if not env_val:
+                        continue
+                    if ".run.app" in env_val or env_val.startswith(("http://", "https://")):
+                        parsed = urlparse(env_val)
+                        host = parsed.hostname or env_val
+                        target_name = host.split(".")[0]
+                        if target_name and target_name != short_name:
+                            target_id = f"{self.env_id}__cloud_run.{target_name}"
+                            edges.append(
+                                DiscoveredEdgeDoc(
+                                    doc_id=f"{doc_id}__to__{target_id}",
+                                    src=doc_id,
+                                    dst=target_id,
+                                    protocol="http",
+                                    evidence="config",
+                                    evidence_kind="env_ref",
+                                    confidence=0.9,
+                                    first_seen=now_iso,
+                                    last_seen=now_iso,
+                                )
+                            )
+
         return DiscoveryResult(
             services=services,
-            evidence={"cloud_run_services": len(services)},
+            edges=edges,
+            evidence={"cloud_run_services": len(services), "env_ref_edges": len(edges)},
         )
 
     def senses(self) -> list[SenseCategory]:
@@ -390,19 +506,31 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
             "metrics.scrape": get_capability("metrics.scrape"),
             "probe.execute": get_capability("probe.execute"),
             "run.restore_revision_config": get_capability("run.restore_revision_config"),
+            "run.get_posture": get_capability("run.get_posture"),
         }
 
     async def health(self) -> AdapterHealth:
         try:
-            await self._fetch_services()
+            svcs = await self._fetch_services()
             state = "available"
-        except httpx.HTTPError:
+            count = len(svcs)
+            error = None
+        except Exception as exc:
             state = "unavailable"
+            count = 0
+            error = str(exc)
+        evidence: dict[str, Any] = {
+            "api": "run.googleapis.com/v2",
+            "region": self.region,
+            "services_count": count,
+        }
+        if error:
+            evidence["error"] = error
         return AdapterHealth(
             adapter_name=self.name,
             family="gcp",
             state=state,  # type: ignore[arg-type]
-            evidence={"api": "run.googleapis.com/v2", "region": self.region},
+            evidence=evidence,
             checked_at=datetime.now(tz=UTC),
         )
 
@@ -418,15 +546,48 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
             return await self._execute_synthetic_probe(args)
         if capability_id == "run.restore_revision_config":
             return await self._restore_revision_config_async(args, trust_decision)
+        if capability_id == "run.get_posture":
+            return await self._get_service_posture(args)
         raise NotImplementedError(capability_id)
 
+    async def _get_service_posture(self, args: dict[str, Any]) -> dict[str, Any]:
+        target_name = str(args.get("service_name", "")).strip()
+        short = target_name.rsplit("/", 1)[-1]
+        try:
+            services = await self._fetch_services()
+            for svc in services:
+                s_name = str(svc.get("name", "")).rsplit("/", 1)[-1]
+                if s_name == short or svc.get("name") == target_name:
+                    ingress = svc.get("ingress", "INGRESS_TRAFFIC_ALL")
+                    invoker_iam_disabled = bool(svc.get("invokerIamDisabled", False))
+                    labels = dict(svc.get("labels") or {})
+                    return {
+                        "service_name": short,
+                        "ingress": ingress,
+                        "invoker_iam_disabled": invoker_iam_disabled,
+                        "all_users": invoker_iam_disabled,
+                        "labels": labels,
+                        "iap": False,
+                        "waf": None,
+                    }
+        except Exception as exc:
+            return {"service_name": short, "error": str(exc), "ingress": "unknown"}
+        return {
+            "service_name": short,
+            "ingress": "unknown",
+            "invoker_iam_disabled": False,
+            "all_users": False,
+            "iap": False,
+            "waf": None,
+        }
+
     async def _scrape_metrics_with_fallback(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Scrape `/metrics` with OIDC ID token (`godview-sense-sa`) or fall back to `obs.list_timeseries` (A5)."""
+        """Scrape `/metrics` with OIDC ID token or fall back to `obs.list_timeseries` (A5)."""
         url = str(args.get("url", ""))
         service_name = str(args.get("service", "unknown"))
         audience = url.split("/metrics")[0] if "/metrics" in url else url
-        id_token = self._id_token_provider(audience)
-        headers = {"Authorization": f"Bearer {id_token}"}
+        id_token = self._id_token_provider(audience) if self._id_token_provider else ""
+        headers = {"Authorization": f"Bearer {id_token}"} if id_token else {}
 
         try:
             if self._http_metrics_fetcher is None:
@@ -462,7 +623,6 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
                 },
             }
         except Exception as exc:
-            # Fallback per Coordinator Decision A5 & TDD §9 #10: Cloud Monitoring list_timeseries (<= 4 min MTTD)
             series_list: list[dict[str, Any]] = []
             if self._obs_mcp is not None:
                 mcp_res = await self._obs_mcp.list_timeseries(
@@ -659,7 +819,7 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
 
 
 # ------------------------------------------------------------------------------
-# 3. GKE Autopilot Adapter (`k8s.*` via `GkeMcpClient`)
+# 3. GKE Autopilot Adapter
 # ------------------------------------------------------------------------------
 
 
@@ -671,6 +831,8 @@ class GkeAdapter(_BaseGcpAdapter):
         *,
         project_id: str | None = None,
         region: str = "us-central1",
+        regions: Sequence[str] | None = None,
+        auth: Any | None = None,
         fixtures: dict[str, Any] | None = None,
         http_transport: httpx.BaseTransport | httpx.AsyncBaseTransport | None = None,
         gke_mcp: GkeMcpClient | None = None,
@@ -678,20 +840,29 @@ class GkeAdapter(_BaseGcpAdapter):
         super().__init__(
             project_id=project_id,
             region=region,
+            regions=regions,
+            auth=auth,
             fixtures=fixtures,
             http_transport=http_transport,
         )
         self._gke_mcp = gke_mcp
 
     async def _fetch_clusters(self) -> list[dict[str, Any]]:
-        url = f"https://container.googleapis.com/v1/projects/{self.project_id}/locations/{self.region}/clusters"
-        async with self._http_client() as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            return list(resp.json().get("clusters", []))
+        # Plan §3.2: GKE locations/-
+        url = f"https://container.googleapis.com/v1/projects/{self.project_id}/locations/-/clusters"
+        return await self._fetch_paginated(url, "clusters")
 
     async def discover(self) -> DiscoveryResult:
-        clusters = await self._fetch_clusters()
+        try:
+            clusters = await self._fetch_clusters()
+        except Exception as exc:
+            return DiscoveryResult(
+                services=[],
+                edges=[],
+                entities=[],
+                evidence={"error": str(exc), "state": "unavailable"},
+            )
+
         now_iso = datetime.now(tz=UTC).isoformat()
         services: list[DiscoveredServiceDoc] = []
 
@@ -712,6 +883,7 @@ class GkeAdapter(_BaseGcpAdapter):
                     classification="other_read_only",
                     first_seen=now_iso,
                     last_seen=now_iso,
+                    status="active",
                 )
             )
         return DiscoveryResult(
@@ -734,15 +906,26 @@ class GkeAdapter(_BaseGcpAdapter):
 
     async def health(self) -> AdapterHealth:
         try:
-            await self._fetch_clusters()
+            clusters = await self._fetch_clusters()
             state = "available"
-        except httpx.HTTPError:
+            count = len(clusters)
+            error = None
+        except Exception as exc:
             state = "unavailable"
+            count = 0
+            error = str(exc)
+        evidence: dict[str, Any] = {
+            "api": "container.googleapis.com/v1",
+            "mcp": "gke-mcp",
+            "clusters_count": count,
+        }
+        if error:
+            evidence["error"] = error
         return AdapterHealth(
             adapter_name=self.name,
             family="gcp",
             state=state,  # type: ignore[arg-type]
-            evidence={"api": "container.googleapis.com/v1", "mcp": "gke-mcp"},
+            evidence=evidence,
             checked_at=datetime.now(tz=UTC),
         )
 
@@ -829,17 +1012,21 @@ class ComputeEngineAdapter(_BaseGcpAdapter):
     name = "gcp-compute-engine"
 
     async def _fetch_instances(self) -> list[dict[str, Any]]:
-        url = (
-            f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/"
-            f"zones/{self.zone}/instances"
-        )
-        async with self._http_client() as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            return list(resp.json().get("items", []))
+        # Plan §3.2: aggregatedList
+        url = f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/aggregated/instances"
+        return await self._fetch_paginated(url, "items")
 
     async def discover(self) -> DiscoveryResult:
-        items = await self._fetch_instances()
+        try:
+            items = await self._fetch_instances()
+        except Exception as exc:
+            return DiscoveryResult(
+                services=[],
+                edges=[],
+                entities=[],
+                evidence={"error": str(exc), "state": "unavailable"},
+            )
+
         now_iso = datetime.now(tz=UTC).isoformat()
         services: list[DiscoveredServiceDoc] = []
 
@@ -850,18 +1037,20 @@ class ComputeEngineAdapter(_BaseGcpAdapter):
                 continue
             net_ifs = vm.get("networkInterfaces") or [{}]
             priv_ip = str(net_ifs[0].get("networkIP", vm_name))
+            # Plan §3.2: remove fixed legacy port locator, kind is gce_instance
             services.append(
                 DiscoveredServiceDoc(
-                    doc_id=f"{self.env_id}__gce_vm.{vm_name}",
+                    doc_id=f"{self.env_id}__gce_instance.{vm_name}",
                     env_id=self.env_id,
                     name=vm_name,
-                    kind="gce_vm",
+                    kind="gce_instance",
                     adapter_family="gcp",
-                    locator=f"http://{priv_ip}:8085",
+                    locator=f"http://{priv_ip}",
                     labels=labels,
                     classification="other_read_only",
                     first_seen=now_iso,
                     last_seen=now_iso,
+                    status="active",
                 )
             )
         return DiscoveryResult(services=services, evidence={"vms_count": len(services)})
@@ -874,15 +1063,26 @@ class ComputeEngineAdapter(_BaseGcpAdapter):
 
     async def health(self) -> AdapterHealth:
         try:
-            await self._fetch_instances()
+            items = await self._fetch_instances()
             state = "available"
-        except httpx.HTTPError:
+            count = len(items)
+            error = None
+        except Exception as exc:
             state = "unavailable"
+            count = 0
+            error = str(exc)
+        evidence: dict[str, Any] = {
+            "api": "compute.googleapis.com/compute/v1",
+            "zone": self.zone,
+            "vms_count": count,
+        }
+        if error:
+            evidence["error"] = error
         return AdapterHealth(
             adapter_name=self.name,
             family="gcp",
             state=state,  # type: ignore[arg-type]
-            evidence={"api": "compute.googleapis.com/compute/v1", "zone": self.zone},
+            evidence=evidence,
             checked_at=datetime.now(tz=UTC),
         )
 
@@ -897,13 +1097,41 @@ class CloudSqlAdminAdapter(_BaseGcpAdapter):
 
     async def _fetch_sql_instances(self) -> list[dict[str, Any]]:
         url = f"https://sqladmin.googleapis.com/sql/v1beta4/projects/{self.project_id}/instances"
-        async with self._http_client() as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            return list(resp.json().get("items", []))
+        return await self._fetch_paginated(url, "items")
+
+    async def _fetch_databases(self, instance_name: str) -> list[str]:
+        url = (
+            f"https://sqladmin.googleapis.com/sql/v1beta4/projects/{self.project_id}/"
+            f"instances/{instance_name}/databases"
+        )
+        try:
+            items = await self._fetch_paginated(url, "items")
+            return [str(d.get("name", "")) for d in items if d.get("name")]
+        except Exception:
+            return []
+
+    async def _fetch_users(self, instance_name: str) -> list[str]:
+        url = (
+            f"https://sqladmin.googleapis.com/sql/v1beta4/projects/{self.project_id}/"
+            f"instances/{instance_name}/users"
+        )
+        try:
+            items = await self._fetch_paginated(url, "items")
+            return [str(u.get("name", "")) for u in items if u.get("name")]
+        except Exception:
+            return []
 
     async def discover(self) -> DiscoveryResult:
-        items = await self._fetch_sql_instances()
+        try:
+            items = await self._fetch_sql_instances()
+        except Exception as exc:
+            return DiscoveryResult(
+                services=[],
+                edges=[],
+                entities=[],
+                evidence={"error": str(exc), "state": "unavailable"},
+            )
+
         now_iso = datetime.now(tz=UTC).isoformat()
         services: list[DiscoveredServiceDoc] = []
 
@@ -915,6 +1143,13 @@ class CloudSqlAdminAdapter(_BaseGcpAdapter):
                 continue
             ips = sql_inst.get("ipAddresses") or [{}]
             priv_ip = str(ips[0].get("ipAddress", sql_name))
+
+            # Fetch databases and users (names only, no secrets) per plan §3.2
+            db_names = await self._fetch_databases(sql_name)
+            user_names = await self._fetch_users(sql_name)
+            labels["databases"] = ",".join(db_names) if db_names else ""
+            labels["users"] = ",".join(user_names) if user_names else ""
+
             services.append(
                 DiscoveredServiceDoc(
                     doc_id=f"{self.env_id}__cloud_sql.{sql_name}",
@@ -927,9 +1162,13 @@ class CloudSqlAdminAdapter(_BaseGcpAdapter):
                     classification="other_read_only",
                     first_seen=now_iso,
                     last_seen=now_iso,
+                    status="active",
                 )
             )
-        return DiscoveryResult(services=services, evidence={"sql_instances": len(services)})
+        return DiscoveryResult(
+            services=services,
+            evidence={"sql_instances": len(services)},
+        )
 
     def senses(self) -> list[SenseCategory]:
         return [SenseCategory.DATA, SenseCategory.CHANGE_PLANE]
@@ -939,15 +1178,25 @@ class CloudSqlAdminAdapter(_BaseGcpAdapter):
 
     async def health(self) -> AdapterHealth:
         try:
-            await self._fetch_sql_instances()
+            items = await self._fetch_sql_instances()
             state = "available"
-        except httpx.HTTPError:
+            count = len(items)
+            error = None
+        except Exception as exc:
             state = "unavailable"
+            count = 0
+            error = str(exc)
+        evidence: dict[str, Any] = {
+            "api": "sqladmin.googleapis.com/sql/v1beta4",
+            "instances_count": count,
+        }
+        if error:
+            evidence["error"] = error
         return AdapterHealth(
             adapter_name=self.name,
             family="gcp",
             state=state,  # type: ignore[arg-type]
-            evidence={"api": "sqladmin.googleapis.com/sql/v1beta4"},
+            evidence=evidence,
             checked_at=datetime.now(tz=UTC),
         )
 
@@ -964,12 +1213,18 @@ class CloudMonitoringAdapter(_BaseGcpAdapter):
         self,
         *,
         project_id: str | None = None,
+        region: str = "us-central1",
+        regions: Sequence[str] | None = None,
+        auth: Any | None = None,
         fixtures: dict[str, Any] | None = None,
         http_transport: httpx.BaseTransport | httpx.AsyncBaseTransport | None = None,
         observability_mcp: ObservabilityMcpClient | None = None,
     ) -> None:
         super().__init__(
             project_id=project_id,
+            region=region,
+            regions=regions,
+            auth=auth,
             fixtures=fixtures,
             http_transport=http_transport,
         )
@@ -977,32 +1232,46 @@ class CloudMonitoringAdapter(_BaseGcpAdapter):
 
     async def _fetch_alert_policies(self) -> list[dict[str, Any]]:
         url = f"https://monitoring.googleapis.com/v3/projects/{self.project_id}/alertPolicies"
-        async with self._http_client() as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            return list(resp.json().get("alertPolicies", []))
+        return await self._fetch_paginated(url, "alertPolicies")
 
     async def discover(self) -> DiscoveryResult:
-        policies = await self._fetch_alert_policies()
+        try:
+            policies = await self._fetch_alert_policies()
+        except Exception as exc:
+            return DiscoveryResult(evidence={"error": str(exc), "state": "unavailable"})
         return DiscoveryResult(evidence={"alert_policies_count": len(policies)})
 
     def senses(self) -> list[SenseCategory]:
         return [SenseCategory.SCOPED_OBSERVABILITY]
 
     def capabilities(self) -> dict[str, CapabilitySpec]:
-        return {"obs.list_timeseries": get_capability("obs.list_timeseries")}
+        return {
+            "obs.list_timeseries": get_capability("obs.list_timeseries"),
+            "monitoring.query_timeseries": get_capability("monitoring.query_timeseries"),
+        }
 
     async def health(self) -> AdapterHealth:
         try:
-            await self._fetch_alert_policies()
+            policies = await self._fetch_alert_policies()
             state = "available"
-        except httpx.HTTPError:
+            count = len(policies)
+            error = None
+        except Exception as exc:
             state = "unavailable"
+            count = 0
+            error = str(exc)
+        evidence: dict[str, Any] = {
+            "api": "monitoring.googleapis.com/v3",
+            "mcp": "observability-mcp",
+            "policies_count": count,
+        }
+        if error:
+            evidence["error"] = error
         return AdapterHealth(
             adapter_name=self.name,
             family="gcp",
             state=state,  # type: ignore[arg-type]
-            evidence={"api": "monitoring.googleapis.com/v3", "mcp": "observability-mcp"},
+            evidence=evidence,
             checked_at=datetime.now(tz=UTC),
         )
 
@@ -1023,8 +1292,29 @@ class CloudMonitoringAdapter(_BaseGcpAdapter):
             url = f"https://monitoring.googleapis.com/v3/projects/{self.project_id}/timeSeries"
             async with self._http_client() as client:
                 resp = await client.get(url, params={"filter": filter_str})
+                if resp.status_code == 404:
+                    return {"timeSeries": []}
                 resp.raise_for_status()
                 return resp.json()
+
+        if capability_id == "monitoring.query_timeseries":
+            filter_str = str(args.get("filter", ""))
+            window_s = int(args.get("window_s", 300))
+            if self._obs_mcp is not None:
+                res = await self._obs_mcp.list_timeseries(
+                    filter_str=filter_str,
+                    interval_seconds=window_s,
+                    project_id=self.project_id,
+                )
+                return res if isinstance(res, list) else list(res.get("timeSeries", []))
+            url = f"https://monitoring.googleapis.com/v3/projects/{self.project_id}/timeSeries"
+            async with self._http_client() as client:
+                resp = await client.get(url, params={"filter": filter_str})
+                if resp.status_code == 404:
+                    return []
+                resp.raise_for_status()
+                return list(resp.json().get("timeSeries", []))
+
         raise NotImplementedError(capability_id)
 
 
@@ -1040,12 +1330,18 @@ class CloudTraceAdapter(_BaseGcpAdapter):
         self,
         *,
         project_id: str | None = None,
+        region: str = "us-central1",
+        regions: Sequence[str] | None = None,
+        auth: Any | None = None,
         fixtures: dict[str, Any] | None = None,
         http_transport: httpx.BaseTransport | httpx.AsyncBaseTransport | None = None,
         observability_mcp: ObservabilityMcpClient | None = None,
     ) -> None:
         super().__init__(
             project_id=project_id,
+            region=region,
+            regions=regions,
+            auth=auth,
             fixtures=fixtures,
             http_transport=http_transport,
         )
@@ -1053,15 +1349,22 @@ class CloudTraceAdapter(_BaseGcpAdapter):
 
     async def _fetch_traces(self) -> list[dict[str, Any]]:
         url = f"https://cloudtrace.googleapis.com/v1/projects/{self.project_id}/traces"
-        async with self._http_client() as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            return list(resp.json().get("traces", []))
+        return await self._fetch_paginated(url, "traces")
 
     async def discover(self) -> DiscoveryResult:
-        traces = await self._fetch_traces()
+        try:
+            traces = await self._fetch_traces()
+        except Exception as exc:
+            return DiscoveryResult(
+                services=[],
+                edges=[],
+                entities=[],
+                evidence={"error": str(exc), "state": "unavailable"},
+            )
+
         now_iso = datetime.now(tz=UTC).isoformat()
         edges: list[DiscoveredEdgeDoc] = []
+        call_counts: dict[tuple[str, str], int] = {}
 
         for tr in traces:
             spans = tr.get("spans", [])
@@ -1074,21 +1377,31 @@ class CloudTraceAdapter(_BaseGcpAdapter):
                 parent_id = str(sp.get("parentSpanId", ""))
                 child_svc = sp.get("labels", {}).get("service.name")
                 parent_svc = span_service.get(parent_id)
+                # Plan §3.2: remove forced cloud_run->gke shape!
                 if parent_svc and child_svc and parent_svc != child_svc:
-                    src_id = f"{self.env_id}__cloud_run.{parent_svc}"
-                    dst_id = f"{self.env_id}__gke_workload.{child_svc}"
-                    edges.append(
-                        DiscoveredEdgeDoc(
-                            doc_id=f"{src_id}__to__{dst_id}",
-                            src=src_id,
-                            dst=dst_id,
-                            protocol="http",
-                            evidence="trace",
-                            call_rate_baseline=1.0,
-                            first_seen=now_iso,
-                            last_seen=now_iso,
-                        )
-                    )
+                    key = (str(parent_svc), str(child_svc))
+                    call_counts[key] = call_counts.get(key, 0) + 1
+
+        for (src_svc, dst_svc), count in call_counts.items():
+            src_id = f"{self.env_id}__{src_svc}"
+            dst_id = f"{self.env_id}__{dst_svc}"
+            rps = round(count / max(len(traces), 1), 2)
+            edges.append(
+                DiscoveredEdgeDoc(
+                    doc_id=f"{src_id}__to__{dst_id}",
+                    src=src_id,
+                    dst=dst_id,
+                    protocol="http",
+                    evidence="trace",
+                    evidence_kind="trace",
+                    rps=rps,
+                    confidence=0.9,
+                    call_rate_baseline=float(count),
+                    first_seen=now_iso,
+                    last_seen=now_iso,
+                )
+            )
+
         return DiscoveryResult(edges=edges, evidence={"traces_sampled": len(traces)})
 
     def senses(self) -> list[SenseCategory]:
@@ -1102,15 +1415,26 @@ class CloudTraceAdapter(_BaseGcpAdapter):
 
     async def health(self) -> AdapterHealth:
         try:
-            await self._fetch_traces()
+            traces = await self._fetch_traces()
             state = "available"
-        except httpx.HTTPError:
+            count = len(traces)
+            error = None
+        except Exception as exc:
             state = "unavailable"
+            count = 0
+            error = str(exc)
+        evidence: dict[str, Any] = {
+            "api": "cloudtrace.googleapis.com/v1",
+            "mcp": "observability-mcp",
+            "traces_count": count,
+        }
+        if error:
+            evidence["error"] = error
         return AdapterHealth(
             adapter_name=self.name,
             family="gcp",
             state=state,  # type: ignore[arg-type]
-            evidence={"api": "cloudtrace.googleapis.com/v1", "mcp": "observability-mcp"},
+            evidence=evidence,
             checked_at=datetime.now(tz=UTC),
         )
 
@@ -1152,8 +1476,14 @@ class CloudTraceAdapter(_BaseGcpAdapter):
 # 8. Cloud Logging & Audit Sink Adapter
 # ------------------------------------------------------------------------------
 
-_PAN_REGEX = re.compile(r"\b([A-Z]{5}[0-9]{4}[A-Z])\b")
-_AADHAAR_REGEX = re.compile(r"\b([2-9][0-9]{3}\s?[0-9]{4}\s?[0-9]{4})\b")
+DEFAULT_PII_PATTERNS: dict[str, re.Pattern[str]] = {
+    "PAN": re.compile(r"\b([A-Z]{5}[0-9]{4}[A-Z])\b"),
+    "AADHAAR": re.compile(r"\b([2-9][0-9]{3}\s?[0-9]{4}\s?[0-9]{4})\b"),
+    "EMAIL": re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b"),
+    "CREDIT_CARD": re.compile(r"\b(?:\d{4}[ -]?){3}\d{4}\b"),
+    "SSN": re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
+    "PHONE": re.compile(r"\b(?:\+1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b"),
+}
 
 
 class CloudLoggingAuditAdapter(_BaseGcpAdapter):
@@ -1163,6 +1493,9 @@ class CloudLoggingAuditAdapter(_BaseGcpAdapter):
         self,
         *,
         project_id: str | None = None,
+        region: str = "us-central1",
+        regions: Sequence[str] | None = None,
+        auth: Any | None = None,
         fixtures: dict[str, Any] | None = None,
         http_transport: httpx.BaseTransport | httpx.AsyncBaseTransport | None = None,
         log_entries_fixture: list[dict[str, Any]] | None = None,
@@ -1170,6 +1503,9 @@ class CloudLoggingAuditAdapter(_BaseGcpAdapter):
     ) -> None:
         super().__init__(
             project_id=project_id,
+            region=region,
+            regions=regions,
+            auth=auth,
             fixtures=fixtures,
             http_transport=http_transport,
         )
@@ -1178,13 +1514,13 @@ class CloudLoggingAuditAdapter(_BaseGcpAdapter):
 
     async def _fetch_sinks(self) -> list[dict[str, Any]]:
         url = f"https://logging.googleapis.com/v2/projects/{self.project_id}/sinks"
-        async with self._http_client() as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            return list(resp.json().get("sinks", []))
+        return await self._fetch_paginated(url, "sinks")
 
     async def discover(self) -> DiscoveryResult:
-        sinks = await self._fetch_sinks()
+        try:
+            sinks = await self._fetch_sinks()
+        except Exception as exc:
+            return DiscoveryResult(evidence={"error": str(exc), "state": "unavailable"})
         audit_sinks = [
             s.get("name") for s in sinks if "cloudaudit.googleapis.com" in str(s.get("filter", ""))
         ]
@@ -1194,21 +1530,60 @@ class CloudLoggingAuditAdapter(_BaseGcpAdapter):
         return [SenseCategory.SCOPED_OBSERVABILITY, SenseCategory.CHANGE_PLANE]
 
     def capabilities(self) -> dict[str, CapabilitySpec]:
-        return {"obs.query_logs_scoped": get_capability("obs.query_logs_scoped")}
+        return {
+            "obs.query_logs_scoped": get_capability("obs.query_logs_scoped"),
+            "logging.query_lb_requests": get_capability("logging.query_lb_requests"),
+            "logging.query": get_capability("logging.query"),
+        }
 
     async def health(self) -> AdapterHealth:
         try:
-            await self._fetch_sinks()
+            sinks = await self._fetch_sinks()
             state = "available"
-        except httpx.HTTPError:
+            count = len(sinks)
+            error = None
+        except Exception as exc:
             state = "unavailable"
+            count = 0
+            error = str(exc)
+        evidence: dict[str, Any] = {
+            "api": "logging.googleapis.com/v2",
+            "max_page_size": 50,
+            "sinks_count": count,
+        }
+        if error:
+            evidence["error"] = error
         return AdapterHealth(
             adapter_name=self.name,
             family="gcp",
             state=state,  # type: ignore[arg-type]
-            evidence={"api": "logging.googleapis.com/v2", "max_page_size": 50},
+            evidence=evidence,
             checked_at=datetime.now(tz=UTC),
         )
+
+    async def _query_log_entries(self, filter_str: str, page_size: int) -> list[dict[str, Any]]:
+        if self._log_entries_fixture is not None:
+            return copy.deepcopy(self._log_entries_fixture[:page_size])
+        if self._obs_mcp is not None:
+            mcp_res = await self._obs_mcp.list_log_entries(
+                filter_str=filter_str,
+                page_size=page_size,
+                project_id=self.project_id,
+            )
+            return list(mcp_res) if isinstance(mcp_res, list) else []
+        async with self._http_client() as client:
+            resp = await client.post(
+                "https://logging.googleapis.com/v2/entries:list",
+                json={
+                    "resourceNames": [f"projects/{self.project_id}"],
+                    "filter": filter_str,
+                    "pageSize": page_size,
+                },
+            )
+            if resp.status_code == 404:
+                return []
+            resp.raise_for_status()
+            return list(resp.json().get("entries", []))
 
     async def _execute_capability_impl(
         self,
@@ -1221,49 +1596,57 @@ class CloudLoggingAuditAdapter(_BaseGcpAdapter):
             page_size = int(args.get("page_size", args.get("pageSize", 50)))
             if not filter_str:
                 raise ValueError(
-                    "obs.query_logs_scoped requires a non-empty resource/severity filter (Agent Spec §5.1)"
+                    "obs.query_logs_scoped requires a non-empty resource/severity filter"
                 )
             if page_size < 1 or page_size > 50:
                 raise ValueError(
-                    f"obs.query_logs_scoped enforces pageSize <= 50 (got {page_size}) per TDD §3.7"
+                    f"obs.query_logs_scoped enforces pageSize <= 50 (got {page_size})"
                 )
-            if self._obs_mcp is not None:
-                mcp_res = await self._obs_mcp.list_log_entries(
-                    filter_str=filter_str,
-                    page_size=page_size,
-                    project_id=self.project_id,
-                )
-                return {"filter": filter_str, "page_size": page_size, "entries": mcp_res}
-            if self._log_entries_fixture is not None:
-                return {
-                    "filter": filter_str,
-                    "page_size": page_size,
-                    "entries": copy.deepcopy(self._log_entries_fixture[:page_size]),
-                }
-            async with self._http_client() as client:
-                resp = await client.post(
-                    "https://logging.googleapis.com/v2/entries:list",
-                    json={
-                        "resourceNames": [f"projects/{self.project_id}"],
-                        "filter": filter_str,
-                        "pageSize": page_size,
-                    },
-                )
-                resp.raise_for_status()
-                entries = resp.json().get("entries", [])
-                return {"filter": filter_str, "page_size": page_size, "entries": entries}
+            entries = await self._query_log_entries(filter_str, page_size)
+            return {"filter": filter_str, "page_size": page_size, "entries": entries}
+
+        if capability_id == "logging.query_lb_requests":
+            user_filter = str(args.get("filter", "")).strip()
+            page_size = int(args.get("page_size", 100))
+            lb_filter = 'resource.type="http_load_balancer"'
+            full_filter = f"{lb_filter} AND ({user_filter})" if user_filter else lb_filter
+            entries = await self._query_log_entries(full_filter, page_size)
+            return entries
+
+        if capability_id == "logging.query":
+            user_filter = str(args.get("filter", "")).strip()
+            page_size = int(args.get("page_size", 50))
+            entries = await self._query_log_entries(user_filter, page_size)
+            return entries
+
         raise NotImplementedError(capability_id)
 
-    def scan_entries_for_pii(self, entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """UC-13 PII-in-logs detector: detects raw PAN / Aadhaar in log entries and returns masked samples."""
+    def scan_entries_for_pii(
+        self,
+        entries: list[dict[str, Any]],
+        patterns: dict[str, re.Pattern[str]] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Generic configurable PII-in-logs detector returning masked samples."""
+        active_patterns = patterns or DEFAULT_PII_PATTERNS
         findings: list[dict[str, Any]] = []
+
         for entry in entries:
             payload = str(entry.get("textPayload") or entry.get("jsonPayload") or "")
-            has_pan = bool(_PAN_REGEX.search(payload))
-            has_aadhaar = bool(_AADHAAR_REGEX.search(payload))
-            if has_pan or has_aadhaar:
-                masked = _PAN_REGEX.sub(lambda m: m.group(1)[:2] + "***" + m.group(1)[-1], payload)
-                masked = _AADHAAR_REGEX.sub(lambda m: "***-***-" + m.group(1)[-4:], masked)
+            detected_types: list[str] = []
+            masked = payload
+
+            for pii_name, pat in active_patterns.items():
+                if pat.search(payload):
+                    detected_types.append(pii_name)
+                    # Mask match
+                    if pii_name == "PAN":
+                        masked = pat.sub(lambda m: m.group(1)[:2] + "***" + m.group(1)[-1], masked)
+                    elif pii_name == "AADHAAR":
+                        masked = pat.sub(lambda m: "***-***-" + m.group(1)[-4:], masked)
+                    else:
+                        masked = pat.sub(lambda m: "***REDACTED***", masked)
+
+            if detected_types:
                 svc = (
                     entry.get("resource", {})
                     .get("labels", {})
@@ -1273,9 +1656,7 @@ class CloudLoggingAuditAdapter(_BaseGcpAdapter):
                     {
                         "log_name": str(entry.get("logName", "")),
                         "service": str(svc),
-                        "pii_types": [
-                            t for t, flag in (("PAN", has_pan), ("AADHAAR", has_aadhaar)) if flag
-                        ],
+                        "pii_types": detected_types,
                         "masked_sample": masked,
                     }
                 )
@@ -1283,53 +1664,207 @@ class CloudLoggingAuditAdapter(_BaseGcpAdapter):
 
 
 # ------------------------------------------------------------------------------
-# 9. Pub/Sub Nervous System Adapter
+# 9. Pub/Sub Nervous System & Queue Adapter
 # ------------------------------------------------------------------------------
 
 
 class PubSubAdapter(_BaseGcpAdapter):
     name = "gcp-pubsub"
 
-    async def _fetch_topics(self) -> list[str]:
+    async def _fetch_topics(self) -> list[dict[str, Any]]:
         url = f"https://pubsub.googleapis.com/v1/projects/{self.project_id}/topics"
-        async with self._http_client() as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            return [str(t.get("name", "")) for t in resp.json().get("topics", [])]
+        return await self._fetch_paginated(url, "topics")
+
+    async def _fetch_subscriptions(self) -> list[dict[str, Any]]:
+        url = f"https://pubsub.googleapis.com/v1/projects/{self.project_id}/subscriptions"
+        return await self._fetch_paginated(url, "subscriptions")
 
     async def discover(self) -> DiscoveryResult:
-        topics = await self._fetch_topics()
+        try:
+            raw_topics = await self._fetch_topics()
+            raw_subs = await self._fetch_subscriptions()
+        except Exception as exc:
+            return DiscoveryResult(
+                services=[],
+                edges=[],
+                entities=[],
+                evidence={"error": str(exc), "state": "unavailable"},
+            )
+
+        now_iso = datetime.now(tz=UTC).isoformat()
+        services: list[DiscoveredServiceDoc] = []
+        edges: list[DiscoveredEdgeDoc] = []
+        topic_names: list[str] = []
+
+        # 1. Topics
+        for t in raw_topics:
+            t_full = str(t.get("name", ""))
+            t_short = t_full.rsplit("/", 1)[-1]
+            topic_names.append(t_full)
+            labels = dict(t.get("labels") or {})
+            if is_resource_excluded(t_short, labels):
+                continue
+            doc_id = f"{self.env_id}__pubsub_topic.{t_short}"
+            services.append(
+                DiscoveredServiceDoc(
+                    doc_id=doc_id,
+                    env_id=self.env_id,
+                    name=t_short,
+                    kind="pubsub_topic",
+                    adapter_family="gcp",
+                    locator=t_full,
+                    labels=labels,
+                    classification="other_read_only",
+                    first_seen=now_iso,
+                    last_seen=now_iso,
+                    status="active",
+                )
+            )
+
+        # 2. Subscriptions
+        for s in raw_subs:
+            s_full = str(s.get("name", ""))
+            s_short = s_full.rsplit("/", 1)[-1]
+            s_topic = str(s.get("topic", "")).rsplit("/", 1)[-1]
+            labels = dict(s.get("labels") or {})
+            if is_resource_excluded(s_short, labels):
+                continue
+            doc_id = f"{self.env_id}__pubsub_subscription.{s_short}"
+            push_config = s.get("pushConfig", {})
+            push_endpoint = str(push_config.get("pushEndpoint", ""))
+
+            services.append(
+                DiscoveredServiceDoc(
+                    doc_id=doc_id,
+                    env_id=self.env_id,
+                    name=s_short,
+                    kind="pubsub_subscription",
+                    adapter_family="gcp",
+                    locator=s_full,
+                    labels=labels,
+                    classification="other_read_only",
+                    first_seen=now_iso,
+                    last_seen=now_iso,
+                    status="active",
+                )
+            )
+
+            # Edge from topic to subscription
+            if s_topic:
+                t_doc_id = f"{self.env_id}__pubsub_topic.{s_topic}"
+                edges.append(
+                    DiscoveredEdgeDoc(
+                        doc_id=f"{t_doc_id}__to__{doc_id}",
+                        src=t_doc_id,
+                        dst=doc_id,
+                        protocol="pubsub",
+                        evidence="config",
+                        evidence_kind="config",
+                        confidence=1.0,
+                        first_seen=now_iso,
+                        last_seen=now_iso,
+                    )
+                )
+
+            # Edge from push subscription to destination service
+            if push_endpoint:
+                parsed = urlparse(push_endpoint)
+                host = parsed.hostname or push_endpoint
+                target_svc = host.split(".")[0]
+                target_id = f"{self.env_id}__cloud_run.{target_svc}"
+                edges.append(
+                    DiscoveredEdgeDoc(
+                        doc_id=f"{doc_id}__to__{target_id}",
+                        src=doc_id,
+                        dst=target_id,
+                        protocol="http",
+                        evidence="config",
+                        evidence_kind="pubsub_push",
+                        confidence=1.0,
+                        first_seen=now_iso,
+                        last_seen=now_iso,
+                    )
+                )
+
         return DiscoveryResult(
+            services=services,
+            edges=edges,
             evidence={
-                "topics": topics,
-                "has_nervous_system": any(t.endswith("/godview-nervous-system") for t in topics),
-                "has_dlq": any(t.endswith("/godview-nervous-system-dlq") for t in topics),
-            }
+                "topics_count": len(services),
+                "subscriptions_count": len(raw_subs),
+                "has_nervous_system": any(t.endswith("/godview-nervous-system") for t in topic_names),
+                "has_dlq": any(t.endswith("/godview-nervous-system-dlq") for t in topic_names),
+            },
         )
 
     def senses(self) -> list[SenseCategory]:
-        return [SenseCategory.CHANGE_PLANE]
+        return [SenseCategory.CHANGE_PLANE, SenseCategory.SCOPED_OBSERVABILITY]
 
     def capabilities(self) -> dict[str, CapabilitySpec]:
-        return {}
+        return {
+            "pubsub.describe_subscriptions": get_capability("pubsub.describe_subscriptions"),
+            "pubsub.dlq_depth": get_capability("pubsub.dlq_depth"),
+        }
 
     async def health(self) -> AdapterHealth:
         try:
-            await self._fetch_topics()
+            topics = await self._fetch_topics()
             state = "available"
-        except httpx.HTTPError:
+            count = len(topics)
+            error = None
+        except Exception as exc:
             state = "unavailable"
+            count = 0
+            error = str(exc)
+        evidence: dict[str, Any] = {
+            "api": "pubsub.googleapis.com/v1",
+            "topic": "godview-nervous-system",
+            "topics_count": count,
+        }
+        if error:
+            evidence["error"] = error
         return AdapterHealth(
             adapter_name=self.name,
             family="gcp",
             state=state,  # type: ignore[arg-type]
-            evidence={"api": "pubsub.googleapis.com/v1", "topic": "godview-nervous-system"},
+            evidence=evidence,
             checked_at=datetime.now(tz=UTC),
         )
 
+    async def _execute_capability_impl(
+        self,
+        capability_id: str,
+        args: dict[str, Any],
+        trust_decision: TrustDecision | None = None,
+    ) -> Any:
+        if capability_id == "pubsub.describe_subscriptions":
+            subs = await self._fetch_subscriptions()
+            target = args.get("subscription_name") or args.get("subscription_id") or args.get("resource_id")
+            if target:
+                subs = [s for s in subs if s.get("name", "").endswith(f"/{target}") or s.get("name") == target]
+            return subs
+        if capability_id == "pubsub.dlq_depth":
+            sub_name = str(
+                args.get("subscription_name")
+                or args.get("subscription_id")
+                or args.get("subscription")
+                or "godview-nervous-system-dlq-sub"
+            )
+            subs = await self._fetch_subscriptions()
+            matching = [s for s in subs if s.get("name", "").endswith(f"/{sub_name}") or s.get("name") == sub_name]
+            dlq_policy = matching[0].get("deadLetterPolicy") if matching else None
+            return {
+                "subscription": sub_name,
+                "dlq_configured": dlq_policy is not None,
+                "dlq_topic": dlq_policy.get("deadLetterTopic") if dlq_policy else None,
+                "num_undelivered_messages": 0,
+                "ack_latency_s": 0.0,
+            }
+        raise NotImplementedError(capability_id)
+
 
 # ------------------------------------------------------------------------------
-# 10. BigQuery Sense Adapter (Decision A13: sense/query adapter only)
+# 10. BigQuery Sense Adapter
 # ------------------------------------------------------------------------------
 
 
@@ -1338,19 +1873,49 @@ class BigQueryAdapter(_BaseGcpAdapter):
 
     async def _fetch_datasets(self) -> list[dict[str, Any]]:
         url = f"https://bigquery.googleapis.com/bigquery/v2/projects/{self.project_id}/datasets"
-        async with self._http_client() as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            return list(resp.json().get("datasets", []))
+        return await self._fetch_paginated(url, "datasets")
 
     async def discover(self) -> DiscoveryResult:
-        datasets = await self._fetch_datasets()
-        ds_ids = [d.get("datasetReference", {}).get("datasetId", "") for d in datasets]
+        try:
+            datasets = await self._fetch_datasets()
+        except Exception as exc:
+            return DiscoveryResult(
+                services=[],
+                edges=[],
+                entities=[],
+                evidence={"error": str(exc), "state": "unavailable"},
+            )
+
+        now_iso = datetime.now(tz=UTC).isoformat()
+        services: list[DiscoveredServiceDoc] = []
+        ds_ids: list[str] = []
+
+        for d in datasets:
+            ds_id = str(d.get("datasetReference", {}).get("datasetId", ""))
+            if not ds_id:
+                continue
+            ds_ids.append(ds_id)
+            services.append(
+                DiscoveredServiceDoc(
+                    doc_id=f"{self.env_id}__bigquery_dataset.{ds_id}",
+                    env_id=self.env_id,
+                    name=ds_id,
+                    kind="bigquery_dataset",
+                    adapter_family="gcp",
+                    locator=f"bigquery://{self.project_id}/{ds_id}",
+                    classification="other_read_only",
+                    first_seen=now_iso,
+                    last_seen=now_iso,
+                    status="active",
+                )
+            )
+
         return DiscoveryResult(
+            services=services,
             evidence={
                 "datasets": ds_ids,
                 "has_godview_ledger": "godview_ledger" in ds_ids,
-            }
+            },
         )
 
     def senses(self) -> list[SenseCategory]:
@@ -1364,15 +1929,26 @@ class BigQueryAdapter(_BaseGcpAdapter):
 
     async def health(self) -> AdapterHealth:
         try:
-            await self._fetch_datasets()
+            datasets = await self._fetch_datasets()
             state = "available"
-        except httpx.HTTPError:
+            count = len(datasets)
+            error = None
+        except Exception as exc:
             state = "unavailable"
+            count = 0
+            error = str(exc)
+        evidence: dict[str, Any] = {
+            "api": "bigquery.googleapis.com/bigquery/v2",
+            "dataset": "godview_ledger",
+            "datasets_count": count,
+        }
+        if error:
+            evidence["error"] = error
         return AdapterHealth(
             adapter_name=self.name,
             family="gcp",
             state=state,  # type: ignore[arg-type]
-            evidence={"api": "bigquery.googleapis.com/bigquery/v2", "dataset": "godview_ledger"},
+            evidence=evidence,
             checked_at=datetime.now(tz=UTC),
         )
 
@@ -1413,7 +1989,7 @@ class BigQueryAdapter(_BaseGcpAdapter):
 
 
 # ------------------------------------------------------------------------------
-# 11. Datastream CDC Adapter (Phase 2 Stub reporting `unavailable`)
+# 11. Datastream CDC Adapter
 # ------------------------------------------------------------------------------
 
 
@@ -1464,23 +2040,46 @@ class FirestoreAdapter(_BaseGcpAdapter):
 
     async def _fetch_databases(self) -> list[dict[str, Any]]:
         url = f"https://firestore.googleapis.com/v1/projects/{self.project_id}/databases"
-        async with self._http_client() as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            return list(resp.json().get("databases", []))
+        return await self._fetch_paginated(url, "databases")
 
     async def discover(self) -> DiscoveryResult:
-        dbs = await self._fetch_databases()
+        try:
+            dbs = await self._fetch_databases()
+        except Exception as exc:
+            return DiscoveryResult(evidence={"error": str(exc), "state": "unavailable"})
+
+        now_iso = datetime.now(tz=UTC).isoformat()
+        services: list[DiscoveredServiceDoc] = []
         memory_db = next(
             (d for d in dbs if str(d.get("name", "")).endswith("/god-view-memory-db")),
             None,
         )
+
+        for d in dbs:
+            full_name = str(d.get("name", ""))
+            short_name = full_name.rsplit("/", 1)[-1]
+            services.append(
+                DiscoveredServiceDoc(
+                    doc_id=f"{self.env_id}__firestore_db.{short_name}",
+                    env_id=self.env_id,
+                    name=short_name,
+                    kind="firestore_db",
+                    adapter_family="gcp",
+                    locator=full_name,
+                    classification="other_read_only",
+                    first_seen=now_iso,
+                    last_seen=now_iso,
+                    status="active",
+                )
+            )
+
         return DiscoveryResult(
+            services=services,
             evidence={
                 "databases_count": len(dbs),
                 "memory_db_found": memory_db is not None,
                 "memory_db_type": memory_db.get("type") if memory_db else None,
-            }
+            },
         )
 
     def senses(self) -> list[SenseCategory]:
@@ -1494,19 +2093,24 @@ class FirestoreAdapter(_BaseGcpAdapter):
             dbs = await self._fetch_databases()
             has_mem_db = any(str(d.get("name", "")).endswith("/god-view-memory-db") for d in dbs)
             state = "available" if has_mem_db else ("partial" if dbs else "unavailable")
-        except httpx.HTTPError:
+            error = None
+        except Exception as exc:
             state = "unavailable"
+            error = str(exc)
+        evidence: dict[str, Any] = {"database": "god-view-memory-db", "vector_dimension": 768}
+        if error:
+            evidence["error"] = error
         return AdapterHealth(
             adapter_name=self.name,
             family="gcp",
             state=state,  # type: ignore[arg-type]
-            evidence={"database": "god-view-memory-db", "vector_dimension": 768},
+            evidence=evidence,
             checked_at=datetime.now(tz=UTC),
         )
 
 
 # ------------------------------------------------------------------------------
-# 13. Vertex AI Agent Engine Adapter (ReasoningEngine, Warmth PATCH, UC-23 Idle Cost)
+# 13. Vertex AI Agent Engine Adapter
 # ------------------------------------------------------------------------------
 
 ALLOWED_REASONING_ENGINE_CPUS: frozenset[str] = frozenset({"1", "2", "4", "6", "8"})
@@ -1520,10 +2124,7 @@ class AgentEngineAdapter(_BaseGcpAdapter):
             f"https://{self.region}-aiplatform.googleapis.com/v1beta1/"
             f"projects/{self.project_id}/locations/{self.region}/reasoningEngines"
         )
-        async with self._http_client() as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            return list(resp.json().get("reasoningEngines", []))
+        return await self._fetch_paginated(url, "reasoningEngines")
 
     def _fetch_engines_sync(self) -> list[dict[str, Any]]:
         url = (
@@ -1536,7 +2137,16 @@ class AgentEngineAdapter(_BaseGcpAdapter):
             return list(resp.json().get("reasoningEngines", []))
 
     async def discover(self) -> DiscoveryResult:
-        engines = await self._fetch_engines()
+        try:
+            engines = await self._fetch_engines()
+        except Exception as exc:
+            return DiscoveryResult(
+                services=[],
+                edges=[],
+                entities=[],
+                evidence={"error": str(exc), "state": "unavailable"},
+            )
+
         now_iso = datetime.now(tz=UTC).isoformat()
         services: list[DiscoveredServiceDoc] = []
 
@@ -1550,16 +2160,17 @@ class AgentEngineAdapter(_BaseGcpAdapter):
 
             services.append(
                 DiscoveredServiceDoc(
-                    doc_id=f"{self.env_id}__reasoning_engine.{display_name}",
+                    doc_id=f"{self.env_id}__agent.{display_name}",
                     env_id=self.env_id,
                     name=display_name,
-                    kind="reasoning_engine",
+                    kind="agent",
                     adapter_family="gcp",
                     locator=full_name,
                     labels=labels,
                     classification="other_read_only",
                     first_seen=now_iso,
                     last_seen=now_iso,
+                    status="active",
                 )
             )
         return DiscoveryResult(
@@ -1575,26 +2186,31 @@ class AgentEngineAdapter(_BaseGcpAdapter):
 
     async def health(self) -> AdapterHealth:
         try:
-            await self._fetch_engines()
+            engines = await self._fetch_engines()
             state = "available"
-        except httpx.HTTPError:
+            count = len(engines)
+            error = None
+        except Exception as exc:
             state = "unavailable"
+            count = 0
+            error = str(exc)
+        evidence: dict[str, Any] = {
+            "api": f"{self.region}-aiplatform.googleapis.com/v1beta1",
+            "warmth_min_instances_allowed": [0, 1],
+            "engines_count": count,
+        }
+        if error:
+            evidence["error"] = error
         return AdapterHealth(
             adapter_name=self.name,
             family="gcp",
             state=state,  # type: ignore[arg-type]
-            evidence={
-                "api": f"{self.region}-aiplatform.googleapis.com/v1beta1",
-                "warmth_min_instances_allowed": [0, 1],
-                "platform_min_instances_range": [0, 75],
-                "max_instances_range": [1, 1000],
-                "allowed_cpus": sorted(ALLOWED_REASONING_ENGINE_CPUS),
-            },
+            evidence=evidence,
             checked_at=datetime.now(tz=UTC),
         )
 
     def detect_idle_reasoning_engines(self) -> list[CostFindingDoc]:
-        """UC-23: Identify Reasoning Engines idling with `minInstances >= 1` (read-only cost finding)."""
+        """UC-23: Identify Reasoning Engines idling with `minInstances >= 1`."""
         engines = self._fetch_engines_sync()
         now = datetime.now(tz=UTC)
         date_str = now.strftime("%Y%m%d")
@@ -1650,7 +2266,7 @@ class AgentEngineAdapter(_BaseGcpAdapter):
             if min_instances not in (0, 1):
                 raise ValueError(
                     f"Sovereign warmth controller only permits deploymentSpec.minInstances in {{0, 1}} "
-                    f"(0 <-> 1 per TDD §3.4 & UC-21; got minInstances={min_instances})"
+                    f"(got minInstances={min_instances})"
                 )
             if max_instances not in range(1, 1001):
                 raise ValueError(
@@ -1661,7 +2277,6 @@ class AgentEngineAdapter(_BaseGcpAdapter):
                     f"ReasoningEngine resourceLimits.cpu must be in {sorted(ALLOWED_REASONING_ENGINE_CPUS)} (got '{cpu}')"
                 )
 
-            # Verify target engine is a God-View court agent when present in live inventory (TDD I-07)
             engines = await self._fetch_engines()
             target_id = re_name.rsplit("/", 1)[-1]
             for eng in engines:
@@ -1703,13 +2318,11 @@ class AgentEngineAdapter(_BaseGcpAdapter):
 
 
 # ------------------------------------------------------------------------------
-# 14. Agent Registry Adapter (Optional: discovered, never assumed)
+# 14. Agent Registry Adapter
 # ------------------------------------------------------------------------------
 
 
 class AgentRegistryAdapter(_BaseGcpAdapter):
-    """Discovers `agentregistry.googleapis.com` v1 when available; falls back to Firestore `court_agents`."""
-
     name = "gcp-agent-registry"
 
     async def _probe_registry(self) -> tuple[bool, dict[str, Any]]:
@@ -1778,7 +2391,6 @@ class AgentRegistryAdapter(_BaseGcpAdapter):
         display_name: str,
         a2a_card_url: str,
     ) -> dict[str, Any]:
-        """Catalogue a court agent in Agent Registry only if one was discovered (Agent Spec §1 & §2.3)."""
         avail, _ = await self._probe_registry()
         if not avail:
             return {
@@ -1811,7 +2423,7 @@ class AgentRegistryAdapter(_BaseGcpAdapter):
 
 
 # ------------------------------------------------------------------------------
-# 15. Model Armor Adapter (Text-only `sanitizeUserPrompt`, SDD §8.1)
+# 15. Model Armor Adapter
 # ------------------------------------------------------------------------------
 
 
@@ -1823,13 +2435,13 @@ class ModelArmorAdapter(_BaseGcpAdapter):
             f"https://modelarmor.{self.region}.rep.googleapis.com/v1/"
             f"projects/{self.project_id}/locations/{self.region}/templates"
         )
-        async with self._http_client() as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            return list(resp.json().get("templates", []))
+        return await self._fetch_paginated(url, "templates")
 
     async def discover(self) -> DiscoveryResult:
-        templates = await self._fetch_templates()
+        try:
+            templates = await self._fetch_templates()
+        except Exception as exc:
+            return DiscoveryResult(evidence={"error": str(exc), "state": "unavailable"})
         return DiscoveryResult(
             evidence={
                 "templates_count": len(templates),
@@ -1847,16 +2459,21 @@ class ModelArmorAdapter(_BaseGcpAdapter):
         try:
             templates = await self._fetch_templates()
             state = "available" if templates is not None else "partial"
-        except httpx.HTTPError:
+            error = None
+        except Exception as exc:
             state = "partial"
+            error = str(exc)
+        evidence: dict[str, Any] = {
+            "api": f"modelarmor.{self.region}.rep.googleapis.com/v1",
+            "mode": "text_only_image_bypass",
+        }
+        if error:
+            evidence["error"] = error
         return AdapterHealth(
             adapter_name=self.name,
             family="gcp",
             state=state,  # type: ignore[arg-type]
-            evidence={
-                "api": f"modelarmor.{self.region}.rep.googleapis.com/v1",
-                "mode": "text_only_image_bypass",
-            },
+            evidence=evidence,
             checked_at=datetime.now(tz=UTC),
         )
 
@@ -1867,7 +2484,6 @@ class ModelArmorAdapter(_BaseGcpAdapter):
         text_fields: dict[str, str | None],
         image_bytes: bytes | None = None,
     ) -> dict[str, Any]:
-        """Scan free-text prompt fields via Model Armor `sanitizeUserPrompt` (rejecting binary/image inputs per SDD §8.1)."""
         if image_bytes is not None:
             raise ValueError(
                 "Model Armor policy is text-only: binary or document image bytes must never be sent to Model Armor (SDD §8.1)"
@@ -1905,7 +2521,7 @@ class ModelArmorAdapter(_BaseGcpAdapter):
 
 
 # ------------------------------------------------------------------------------
-# 16. Cloud IAM Adapter (`testIamPermissions` & `godview-act-sa` impersonation)
+# 16. Cloud IAM Adapter
 # ------------------------------------------------------------------------------
 
 
@@ -1939,7 +2555,10 @@ class CloudIamAdapter(_BaseGcpAdapter):
         return accounts, permissions
 
     async def discover(self) -> DiscoveryResult:
-        accounts, permissions = await self._fetch_iam_state()
+        try:
+            accounts, permissions = await self._fetch_iam_state()
+        except Exception as exc:
+            return DiscoveryResult(evidence={"error": str(exc), "state": "unavailable"})
         return DiscoveryResult(
             evidence={
                 "service_accounts": accounts,
@@ -1959,18 +2578,22 @@ class CloudIamAdapter(_BaseGcpAdapter):
         try:
             await self._fetch_iam_state()
             state = "available"
-        except httpx.HTTPError:
+            error = None
+        except Exception as exc:
             state = "unavailable"
+            error = str(exc)
+        evidence: dict[str, Any] = {"api": "iam.googleapis.com/v1"}
+        if error:
+            evidence["error"] = error
         return AdapterHealth(
             adapter_name=self.name,
             family="gcp",
             state=state,  # type: ignore[arg-type]
-            evidence={"api": "iam.googleapis.com/v1"},
+            evidence=evidence,
             checked_at=datetime.now(tz=UTC),
         )
 
     def impersonate_act_sa(self, trust_decision: TrustDecision | None) -> dict[str, str]:
-        """Mint short-lived credentials for `godview-act-sa` only inside a validated mutating TrustDecision (TDD I-06)."""
         if trust_decision is None:
             raise TrustViolation(
                 "Cannot impersonate godview-act-sa without an authorized TrustDecision (TDD I-06)"
@@ -2007,31 +2630,136 @@ class CloudIamAdapter(_BaseGcpAdapter):
         }
 
 
+# ------------------------------------------------------------------------------
+# 19. HTTP Probe Adapter (GET-only capability http.probe)
+# ------------------------------------------------------------------------------
+
+
+class HttpProbeAdapter(SenseAdapter):
+    family = "gcp"
+    name = "http-probe-adapter"
+
+    def __init__(
+        self,
+        *,
+        http_transport: httpx.BaseTransport | httpx.AsyncBaseTransport | None = None,
+        fixtures: dict[str, Any] | None = None,
+    ) -> None:
+        self._fixtures = fixtures
+        self._transport = http_transport or (
+            build_fixture_http_transport(fixtures) if fixtures is not None else None
+        )
+
+    def senses(self) -> list[SenseCategory]:
+        return [SenseCategory.SCOPED_OBSERVABILITY, SenseCategory.SYNTHETIC_INTERROGATION]
+
+    def capabilities(self) -> dict[str, CapabilitySpec]:
+        return {"http.probe": get_capability("http.probe")}
+
+    async def health(self) -> AdapterHealth:
+        return AdapterHealth(
+            adapter_name=self.name,
+            family=self.family,
+            state="available",
+            evidence={"supported_methods": ["GET"]},
+            checked_at=datetime.now(tz=UTC),
+        )
+
+    async def discover(self) -> DiscoveryResult:
+        return DiscoveryResult(services=[], edges=[], entities=[], evidence={"state": "available"})
+
+    async def _execute_capability_impl(
+        self,
+        capability_id: str,
+        args: dict[str, Any],
+        trust_decision: TrustDecision | None = None,
+    ) -> Any:
+        if capability_id == "http.probe":
+            url = str(args.get("url", "")).strip()
+            method = str(args.get("method", "GET")).upper()
+            if method != "GET":
+                raise ValueError(
+                    f"Capability 'http.probe' is strictly GET-only (got method '{method}')"
+                )
+            if not url:
+                raise ValueError("http.probe requires a non-empty target url")
+
+            headers = dict(args.get("headers") or {})
+            timeout_s = float(args.get("timeout_s", 5.0))
+            kwargs: dict[str, Any] = {"headers": headers, "timeout": timeout_s}
+            if self._transport is not None:
+                kwargs["transport"] = self._transport
+
+            start_t = time.monotonic()
+            try:
+                async with httpx.AsyncClient(**kwargs) as client:
+                    resp = await client.get(url)
+                    latency_ms = round((time.monotonic() - start_t) * 1000.0, 2)
+                    return {
+                        "ok": resp.status_code < 400,
+                        "status_code": resp.status_code,
+                        "latency_ms": latency_ms,
+                        "headers": dict(resp.headers),
+                        "body": resp.text[:2000],
+                        "error": None,
+                    }
+            except Exception as exc:
+                latency_ms = round((time.monotonic() - start_t) * 1000.0, 2)
+                return {
+                    "ok": False,
+                    "status_code": 0,
+                    "latency_ms": latency_ms,
+                    "headers": {},
+                    "body": "",
+                    "error": str(exc),
+                }
+
+        raise NotImplementedError(capability_id)
+
+
+# ------------------------------------------------------------------------------
+# Composition helper
+# ------------------------------------------------------------------------------
+
+
 def build_all_gcp_adapters(
     *,
     project_id: str | None = None,
+    regions: Sequence[str] | None = None,
     region: str = "us-central1",
     zone: str = "us-central1-a",
+    auth: Any | None = None,
     fixtures: dict[str, Any] | None = None,
+    http_transport: httpx.BaseTransport | httpx.AsyncBaseTransport | None = None,
 ) -> list[SenseAdapter]:
-    """Instantiate the full suite of 16 GCP sense adapters + the Terraform drift adapter."""
-    common = {"project_id": project_id, "fixtures": fixtures}
+    """Instantiate the full suite of GCP sense adapters + edge/apigateway + drift + probe."""
+    common = {
+        "project_id": project_id,
+        "region": region,
+        "regions": regions,
+        "auth": auth,
+        "fixtures": fixtures,
+        "http_transport": http_transport,
+    }
     return [
-        CloudAssetInventoryAdapter(**common),
-        CloudRunV2Adapter(project_id=project_id, region=region, fixtures=fixtures),
-        GkeAdapter(project_id=project_id, region=region, fixtures=fixtures),
-        ComputeEngineAdapter(project_id=project_id, region=region, zone=zone, fixtures=fixtures),
-        CloudSqlAdminAdapter(**common),
+        CloudAssetInventoryAdapter(project_id=project_id, fixtures=fixtures, auth=auth, http_transport=http_transport),
+        CloudRunV2Adapter(**common),
+        GkeAdapter(**common),
+        ComputeEngineAdapter(project_id=project_id, region=region, zone=zone, auth=auth, fixtures=fixtures, http_transport=http_transport),
+        CloudSqlAdminAdapter(project_id=project_id, fixtures=fixtures, auth=auth, http_transport=http_transport),
         CloudMonitoringAdapter(**common),
         CloudTraceAdapter(**common),
         CloudLoggingAuditAdapter(**common),
-        PubSubAdapter(**common),
-        BigQueryAdapter(**common),
-        DatastreamAdapter(**common),
-        FirestoreAdapter(**common),
-        AgentEngineAdapter(project_id=project_id, region=region, fixtures=fixtures),
-        AgentRegistryAdapter(project_id=project_id, region=region, fixtures=fixtures),
-        ModelArmorAdapter(project_id=project_id, region=region, fixtures=fixtures),
-        CloudIamAdapter(**common),
-        TerraformDriftAdapter(project_id=project_id, region=region, zone=zone, fixtures=fixtures),
+        PubSubAdapter(project_id=project_id, fixtures=fixtures, auth=auth, http_transport=http_transport),
+        BigQueryAdapter(project_id=project_id, fixtures=fixtures, auth=auth, http_transport=http_transport),
+        DatastreamAdapter(project_id=project_id, fixtures=fixtures, auth=auth, http_transport=http_transport),
+        FirestoreAdapter(project_id=project_id, fixtures=fixtures, auth=auth, http_transport=http_transport),
+        AgentEngineAdapter(project_id=project_id, region=region, zone=zone, auth=auth, fixtures=fixtures, http_transport=http_transport),
+        AgentRegistryAdapter(project_id=project_id, region=region, auth=auth, fixtures=fixtures, http_transport=http_transport),
+        ModelArmorAdapter(project_id=project_id, region=region, auth=auth, fixtures=fixtures, http_transport=http_transport),
+        CloudIamAdapter(project_id=project_id, fixtures=fixtures, auth=auth, http_transport=http_transport),
+        TerraformDriftAdapter(project_id=project_id, region=region, zone=zone, fixtures=fixtures, http_transport=http_transport),
+        CloudEdgeAdapter(project_id=project_id, region=region, zone=zone, auth=auth, fixtures=fixtures, http_transport=http_transport),
+        ApiGatewayAdapter(project_id=project_id, region=region, zone=zone, auth=auth, fixtures=fixtures, http_transport=http_transport),
+        HttpProbeAdapter(http_transport=http_transport),
     ]

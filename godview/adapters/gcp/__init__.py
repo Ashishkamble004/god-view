@@ -17,6 +17,7 @@ from godview.adapters.gcp.adapters import (
     DatastreamAdapter,
     FirestoreAdapter,
     GkeAdapter,
+    HttpProbeAdapter,
     ModelArmorAdapter,
     ModelEndpointSpec,
     ProbeSafetyError,
@@ -24,6 +25,7 @@ from godview.adapters.gcp.adapters import (
     VertexModelEndpointClient,
     build_all_gcp_adapters,
 )
+from godview.adapters.gcp.apigateway import ApiGatewayAdapter
 from godview.adapters.gcp.drift import (
     TerraformDriftAdapter,
     UnmanagedResourceError,
@@ -34,6 +36,7 @@ from godview.adapters.gcp.drift import (
     resolve_gcp_bearer_token,
     resolve_gcp_project_id,
 )
+from godview.adapters.gcp.edge import CloudEdgeAdapter
 from godview.adapters.gcp.mcp_clients import (
     DEFAULT_MCP_SERVER_COMMANDS,
     GitHubMcpClient,
@@ -50,8 +53,10 @@ __all__ = [
     "DEFAULT_MCP_SERVER_COMMANDS",
     "AgentEngineAdapter",
     "AgentRegistryAdapter",
+    "ApiGatewayAdapter",
     "BigQueryAdapter",
     "CloudAssetInventoryAdapter",
+    "CloudEdgeAdapter",
     "CloudIamAdapter",
     "CloudLoggingAuditAdapter",
     "CloudMonitoringAdapter",
@@ -64,6 +69,7 @@ __all__ = [
     "GitHubMcpClient",
     "GkeAdapter",
     "GkeMcpClient",
+    "HttpProbeAdapter",
     "McpToolClientProtocol",
     "McpToolError",
     "ModelArmorAdapter",

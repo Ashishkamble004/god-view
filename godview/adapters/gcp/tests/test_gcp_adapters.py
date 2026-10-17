@@ -103,7 +103,7 @@ async def test_all_sixteen_gcp_sense_adapters_discover_and_health(
 ) -> None:
     """All 16 GCP adapters + drift adapter implement SenseAdapter and report health with evidence."""
     adapters = build_all_gcp_adapters(fixtures=gcp_fixtures)
-    assert len(adapters) == 17
+    assert len(adapters) == 20
     for adapter in adapters:
         assert isinstance(adapter, SenseAdapter)
         assert adapter.family == "gcp"

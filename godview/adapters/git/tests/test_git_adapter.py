@@ -223,7 +223,7 @@ def test_contract_reading_openapi_proto_and_json_schema() -> None:
             "/admin/v1/settlements/{item_id}:replay": {
                 "post": {
                     "operationId": "replaySettlement",
-                    "x-godview-admin-action": "biz.replay_disbursement",
+                    "x-godview-admin-action": "biz.replay_settlement",
                     "x-godview-reversal": {"capability": "biz.compensate_journey"},
                 }
             },
@@ -249,7 +249,7 @@ def test_contract_reading_openapi_proto_and_json_schema() -> None:
     assert routes_by_path[("POST", "/v1/items")]["probe_safe"] is False
     admin_route = routes_by_path[("POST", "/admin/v1/settlements/{item_id}:replay")]
     assert admin_route["admin"] is True
-    assert admin_route["admin_capability"] == "biz.replay_disbursement"
+    assert admin_route["admin_capability"] == "biz.replay_settlement"
     assert admin_route["reversal"]["capability"] == "biz.compensate_journey"
     assert any(
         e["name"] == "OrderRecord" and "journey_id" in e["correlation_keys"]
@@ -302,7 +302,7 @@ async def test_git_create_rollback_pr_exact_five_call_recipe() -> None:
     bad_sha = "9f1c2ab0001"
     parent_sha = "8e0b19a0000"
     target_file = "services/evaluator/app/rules_engine.py"
-    parent_content = "MAX_FOIR_PCT = 60.0\nMIN_SCORE = 680\n"
+    parent_content = "MAX_RATIO_PCT = 60.0\nMIN_SCORE = 680\n"
 
     mcp_client = _RecordingGitHubMcpClient(
         parent_sha=parent_sha,
@@ -342,7 +342,7 @@ async def test_git_create_rollback_pr_exact_five_call_recipe() -> None:
             "repo": repo,
             "sha": bad_sha,
             "base_branch": "main",
-            "reason": "Revert FOIR threshold regression",
+            "reason": "Revert ratio threshold regression",
         },
         trust_decision=valid_td,
     )

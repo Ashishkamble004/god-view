@@ -9,7 +9,10 @@
       {
         "name": "//run.googleapis.com/projects/proj-alpha-771/locations/us-central1/services/svc-origination-901",
         "assetType": "run.googleapis.com/Service",
-        "ancestors": ["projects/418293056112", "organizations/301928475610"],
+        "ancestors": [
+          "projects/418293056112",
+          "organizations/301928475610"
+        ],
         "updateTime": "2026-10-16T09:21:05Z",
         "resource": {
           "data": {
@@ -25,7 +28,9 @@
       {
         "name": "//run.googleapis.com/projects/proj-alpha-771/locations/us-central1/services/god-view-sovereign",
         "assetType": "run.googleapis.com/Service",
-        "ancestors": ["projects/418293056112"],
+        "ancestors": [
+          "projects/418293056112"
+        ],
         "updateTime": "2026-10-16T09:21:05Z",
         "resource": {
           "data": {
@@ -40,7 +45,9 @@
       {
         "name": "//storage.googleapis.com/proj-alpha-771-god-view-tfstate",
         "assetType": "storage.googleapis.com/Bucket",
-        "ancestors": ["projects/418293056112"],
+        "ancestors": [
+          "projects/418293056112"
+        ],
         "updateTime": "2026-10-16T09:00:00Z",
         "resource": {
           "data": {
@@ -54,7 +61,9 @@
       {
         "name": "//run.googleapis.com/projects/proj-alpha-771/locations/us-central1/services/svc-external-regulator-web",
         "assetType": "run.googleapis.com/Service",
-        "ancestors": ["projects/418293056112"],
+        "ancestors": [
+          "projects/418293056112"
+        ],
         "updateTime": "2026-10-16T08:53:57Z",
         "resource": {
           "data": {
@@ -102,14 +111,28 @@
             {
               "image": "us-central1-docker.pkg.dev/proj-alpha-771/god-view-containers/svc-origination-901:sha-a1b2c3d",
               "env": [
-                {"name": "PROJECT_ID", "value": "proj-alpha-771"},
-                {"name": "LOCATION", "value": "us-central1"}
+                {
+                  "name": "PROJECT_ID",
+                  "value": "proj-alpha-771"
+                },
+                {
+                  "name": "LOCATION",
+                  "value": "us-central1"
+                }
               ],
               "resources": {
-                "limits": {"cpu": "1", "memory": "512Mi"},
+                "limits": {
+                  "cpu": "1",
+                  "memory": "512Mi"
+                },
                 "cpuIdle": true
               },
-              "ports": [{"name": "http1", "containerPort": 8080}]
+              "ports": [
+                {
+                  "name": "http1",
+                  "containerPort": 8080
+                }
+              ]
             }
           ]
         },
@@ -135,13 +158,22 @@
           "tf_module": "05-godview"
         },
         "template": {
-          "scaling": {"minInstanceCount": 1, "maxInstanceCount": 1},
+          "scaling": {
+            "minInstanceCount": 1,
+            "maxInstanceCount": 1
+          },
           "serviceAccount": "godview-sense-sa@proj-alpha-771.iam.gserviceaccount.com",
           "maxInstanceRequestConcurrency": 80,
           "containers": [
             {
               "image": "us-central1-docker.pkg.dev/proj-alpha-771/god-view-containers/god-view-sovereign:sha-a1b2c3d",
-              "resources": {"limits": {"cpu": "1", "memory": "1Gi"}, "cpuIdle": false}
+              "resources": {
+                "limits": {
+                  "cpu": "1",
+                  "memory": "1Gi"
+                },
+                "cpuIdle": false
+              }
             }
           ]
         },
@@ -152,15 +184,25 @@
         "uid": "a1000003-1111-4222-8333-444444444003",
         "generation": "11",
         "ingress": "INGRESS_TRAFFIC_ALL",
-        "labels": {"team": "research"},
+        "labels": {
+          "team": "research"
+        },
         "template": {
-          "scaling": {"minInstanceCount": 1, "maxInstanceCount": 2},
+          "scaling": {
+            "minInstanceCount": 1,
+            "maxInstanceCount": 2
+          },
           "serviceAccount": "demo-run@proj-alpha-771.iam.gserviceaccount.com",
           "maxInstanceRequestConcurrency": 160,
           "containers": [
             {
               "image": "us-central1-docker.pkg.dev/proj-alpha-771/cloud-run-source-deploy/svc-unrelated-demo-88:v9",
-              "resources": {"limits": {"cpu": "2", "memory": "2Gi"}}
+              "resources": {
+                "limits": {
+                  "cpu": "2",
+                  "memory": "2Gi"
+                }
+              }
             }
           ]
         },
@@ -175,13 +217,17 @@
         "location": "us-central1",
         "status": "RUNNING",
         "endpoint": "gke-dns-endpoint.us-central1.gke.goog",
-        "autopilot": {"enabled": true},
+        "autopilot": {
+          "enabled": true
+        },
         "privateClusterConfig": {
           "enablePrivateNodes": true,
           "enablePrivateEndpoint": false,
           "masterIpv4CidrBlock": "172.16.0.0/28"
         },
-        "releaseChannel": {"channel": "REGULAR"},
+        "releaseChannel": {
+          "channel": "REGULAR"
+        },
         "resourceLabels": {
           "godview_managed": "true",
           "tf_module": "04-tenant-compute",
@@ -215,12 +261,17 @@
         "serviceAccounts": [
           {
             "email": "godview-runtime-sa@proj-alpha-771.iam.gserviceaccount.com",
-            "scopes": ["https://www.googleapis.com/auth/cloud-platform"]
+            "scopes": [
+              "https://www.googleapis.com/auth/cloud-platform"
+            ]
           }
         ],
         "metadata": {
           "items": [
-            {"key": "startup-script", "value": "#!/bin/bash\nsystemctl start worker-daemon.service"}
+            {
+              "key": "startup-script",
+              "value": "#!/bin/bash\nsystemctl start worker-daemon.service"
+            }
           ]
         }
       }
@@ -237,7 +288,10 @@
         "region": "us-central1",
         "state": "RUNNABLE",
         "ipAddresses": [
-          {"type": "PRIVATE", "ipAddress": "10.22.0.3"}
+          {
+            "type": "PRIVATE",
+            "ipAddress": "10.22.0.3"
+          }
         ],
         "settings": {
           "tier": "db-g1-small",
@@ -259,8 +313,14 @@
             "pointInTimeRecoveryEnabled": false
           },
           "databaseFlags": [
-            {"name": "cloudsql.logical_decoding", "value": "on"},
-            {"name": "cloudsql.enable_pg_stat_statements", "value": "on"}
+            {
+              "name": "cloudsql.logical_decoding",
+              "value": "on"
+            },
+            {
+              "name": "cloudsql.enable_pg_stat_statements",
+              "value": "on"
+            }
           ]
         }
       }
@@ -336,8 +396,12 @@
   },
   "pubsub": {
     "topics": [
-      {"name": "projects/proj-alpha-771/topics/godview-nervous-system"},
-      {"name": "projects/proj-alpha-771/topics/godview-nervous-system-dlq"}
+      {
+        "name": "projects/proj-alpha-771/topics/godview-nervous-system"
+      },
+      {
+        "name": "projects/proj-alpha-771/topics/godview-nervous-system-dlq"
+      }
     ]
   },
   "bigquery": {
@@ -351,11 +415,17 @@
           "projectId": "proj-alpha-771"
         },
         "location": "us-central1",
-        "labels": {"godview_managed": "true", "tf_module": "03-data"}
+        "labels": {
+          "godview_managed": "true",
+          "tf_module": "03-data"
+        }
       }
     ],
     "query_rows": [
-      {"service": "svc-origination-901", "cost_usd": 1.25}
+      {
+        "service": "svc-origination-901",
+        "cost_usd": 1.25
+      }
     ]
   },
   "datastream": {
@@ -397,17 +467,28 @@
           "deploymentSpec": {
             "minInstances": 0,
             "maxInstances": 1,
-            "resourceLimits": {"cpu": "1", "memory": "2Gi"},
+            "resourceLimits": {
+              "cpu": "1",
+              "memory": "2Gi"
+            },
             "containerConcurrency": 4,
             "env": [
-              {"name": "GODVIEW_AGENT_ID", "value": "application__svc-decision-402"},
-              {"name": "GOOGLE_CLOUD_LOCATION", "value": "global"}
+              {
+                "name": "GODVIEW_AGENT_ID",
+                "value": "application__svc-decision-402"
+              },
+              {
+                "name": "GOOGLE_CLOUD_LOCATION",
+                "value": "global"
+              }
             ]
           },
           "effectiveIdentity": "service-418293056112@gcp-sa-aiplatform-re.iam.gserviceaccount.com"
         },
         "contextSpec": {
-          "memoryBankConfig": {"generationConfig": {}}
+          "memoryBankConfig": {
+            "generationConfig": {}
+          }
         }
       },
       {
@@ -417,11 +498,16 @@
         "createTime": "2026-06-04T16:04:49.000000Z",
         "updateTime": "2026-06-04T16:41:08.000000Z",
         "spec": {
-          "packageSpec": {"pythonVersion": "3.13"},
+          "packageSpec": {
+            "pythonVersion": "3.13"
+          },
           "deploymentSpec": {
             "minInstances": 1,
             "maxInstances": 10,
-            "resourceLimits": {"cpu": "4", "memory": "4Gi"},
+            "resourceLimits": {
+              "cpu": "4",
+              "memory": "4Gi"
+            },
             "containerConcurrency": 9
           }
         }
@@ -474,10 +560,15 @@
             "confidenceLevel": "MEDIUM_AND_ABOVE"
           },
           "sdpSettings": {
-            "basicConfig": {"filterEnforcement": "ENABLED"}
+            "basicConfig": {
+              "filterEnforcement": "ENABLED"
+            }
           }
         },
-        "labels": {"godview_managed": "true", "tf_module": "04-tenant-compute"}
+        "labels": {
+          "godview_managed": "true",
+          "tf_module": "04-tenant-compute"
+        }
       }
     ]
   },
@@ -567,8 +658,14 @@
                           }
                         ],
                         "env": [
-                          {"name": "PROJECT_ID", "value": "proj-alpha-771"},
-                          {"name": "LOCATION", "value": "us-central1"}
+                          {
+                            "name": "PROJECT_ID",
+                            "value": "proj-alpha-771"
+                          },
+                          {
+                            "name": "LOCATION",
+                            "value": "us-central1"
+                          }
                         ]
                       }
                     ]
@@ -647,8 +744,14 @@
                       }
                     ],
                     "database_flags": [
-                      {"name": "cloudsql.logical_decoding", "value": "on"},
-                      {"name": "cloudsql.enable_pg_stat_statements", "value": "on"}
+                      {
+                        "name": "cloudsql.logical_decoding",
+                        "value": "on"
+                      },
+                      {
+                        "name": "cloudsql.enable_pg_stat_statements",
+                        "value": "on"
+                      }
                     ]
                   }
                 ]
@@ -675,5 +778,201 @@
         }
       ]
     }
+  },
+  "forwarding_rules": {
+    "items": [
+      {
+        "name": "lb-frontend-main",
+        "IPAddress": "34.120.55.10",
+        "IPProtocol": "TCP",
+        "portRange": "443-443",
+        "target": "projects/test-project-123/global/targetHttpsProxies/proxy-main",
+        "selfLink": "https://compute.googleapis.com/compute/v1/projects/test-project-123/global/forwardingRules/lb-frontend-main"
+      }
+    ]
+  },
+  "url_maps": {
+    "items": [
+      {
+        "name": "url-map-main",
+        "defaultService": "projects/test-project-123/global/backendServices/backend-api-svc",
+        "hostRules": [
+          {
+            "hosts": [
+              "api.example.com"
+            ],
+            "pathMatcher": "matcher-api"
+          }
+        ],
+        "pathMatchers": [
+          {
+            "name": "matcher-api",
+            "defaultService": "projects/test-project-123/global/backendServices/backend-api-svc",
+            "pathRules": [
+              {
+                "paths": [
+                  "/v1/*"
+                ],
+                "service": "projects/test-project-123/global/backendServices/backend-api-svc"
+              }
+            ]
+          }
+        ],
+        "selfLink": "https://compute.googleapis.com/compute/v1/projects/test-project-123/global/urlMaps/url-map-main"
+      }
+    ]
+  },
+  "backend_services": {
+    "items": [
+      {
+        "name": "backend-api-svc",
+        "protocol": "HTTPS",
+        "securityPolicy": "projects/test-project-123/global/securityPolicies/sec-policy-edge",
+        "iap": {
+          "enabled": true,
+          "oauth2ClientId": "test-client-id"
+        },
+        "logConfig": {
+          "enable": true,
+          "sampleRate": 1.0
+        },
+        "backends": [
+          {
+            "group": "projects/test-project-123/regions/us-central1/networkEndpointGroups/neg-cloud-run-svc-core",
+            "balancingMode": "UTILIZATION"
+          }
+        ],
+        "selfLink": "https://compute.googleapis.com/compute/v1/projects/test-project-123/global/backendServices/backend-api-svc"
+      }
+    ]
+  },
+  "security_policies": {
+    "items": [
+      {
+        "name": "sec-policy-edge",
+        "description": "Cloud Armor security policy for public ingress",
+        "rules": [
+          {
+            "action": "deny(403)",
+            "priority": 100,
+            "match": {
+              "expr": {
+                "expression": "evaluatePreconfiguredWaf('sqli-v33-stable', {'sensitivity': 1}) || evaluatePreconfiguredWaf('xss-v33-stable', {'sensitivity': 1})"
+              }
+            },
+            "preview": false
+          },
+          {
+            "action": "allow",
+            "priority": 2147483647,
+            "match": {
+              "versionedExpr": "SRC_IPS_V1",
+              "config": {
+                "srcIpRanges": [
+                  "*"
+                ]
+              }
+            },
+            "preview": false
+          }
+        ],
+        "selfLink": "https://compute.googleapis.com/compute/v1/projects/test-project-123/global/securityPolicies/sec-policy-edge"
+      }
+    ]
+  },
+  "api_gateways": {
+    "gateways": [
+      {
+        "name": "projects/test-project-123/locations/us-central1/gateways/gw-main",
+        "apiConfig": "projects/test-project-123/locations/global/apis/api-main/configs/cfg-v1",
+        "state": "ACTIVE",
+        "defaultHostname": "gw-main-xyz.gateway.dev",
+        "labels": {
+          "godview_managed": "true"
+        }
+      }
+    ]
+  },
+  "api_gateway_configs": {
+    "apiConfigs": [
+      {
+        "name": "projects/test-project-123/locations/global/apis/api-main/configs/cfg-v1",
+        "state": "ACTIVE",
+        "openapiDocuments": [
+          {
+            "document": {
+              "contents": "c3dhZ2dlcjogIjIuMCIKaW5mbzoKICB0aXRsZTogIkNvcmUgU2VydmljZSBBUEkiCiAgdmVyc2lvbjogIjEuMC4wIgpzY2hlbWVzOgogIC0gImh0dHBzIgpwcm9kdWNlczoKICAtICJhcHBsaWNhdGlvbi9qc29uIgpwYXRoczoKICAvdjEvaXRlbXM6CiAgICBnZXQ6CiAgICAgIHN1bW1hcnk6ICJMaXN0IGFsbCBpdGVtcyIKICAgICAgb3BlcmF0aW9uSWQ6ICJsaXN0SXRlbXMiCiAgICAgIHgtZ29kdmlldy1wcm9iZS1zYWZlOiB0cnVlCiAgICAgIHgtZ29vZ2xlLWJhY2tlbmQ6CiAgICAgICAgYWRkcmVzczogImh0dHBzOi8vc3ZjLWNvcmUucnVuLmFwcCIKICAgICAgcmVzcG9uc2VzOgogICAgICAgIDIwMDoKICAgICAgICAgIGRlc2NyaXB0aW9uOiAiQSBzdWNjZXNzZnVsIHJlc3BvbnNlLiIKICAgIHBvc3Q6CiAgICAgIHN1bW1hcnk6ICJDcmVhdGUgbmV3IGl0ZW0iCiAgICAgIG9wZXJhdGlvbklkOiAiY3JlYXRlSXRlbSIKICAgICAgeC1nb29nbGUtYmFja2VuZDoKICAgICAgICBhZGRyZXNzOiAiaHR0cHM6Ly9zdmMtY29yZS5ydW4uYXBwIgogICAgICByZXNwb25zZXM6CiAgICAgICAgMjAxOgogICAgICAgICAgZGVzY3JpcHRpb246ICJDcmVhdGVkIHN1Y2Nlc3NmdWxseS4iCiAgL3YxL2FkbWluL3JlY29uY2lsZToKICAgIHBvc3Q6CiAgICAgIHN1bW1hcnk6ICJSZWNvbmNpbGUgc3lzdGVtIHRyYW5zYWN0aW9ucyIKICAgICAgb3BlcmF0aW9uSWQ6ICJyZWNvbmNpbGVTeXN0ZW0iCiAgICAgIHgtZ29kdmlldy1hZG1pbi1hY3Rpb246IHRydWUKICAgICAgeC1nb29nbGUtYmFja2VuZDoKICAgICAgICBhZGRyZXNzOiAiaHR0cHM6Ly9zdmMtY29yZS5ydW4uYXBwIgogICAgICByZXNwb25zZXM6CiAgICAgICAgMjAwOgogICAgICAgICAgZGVzY3JpcHRpb246ICJSZWNvbmNpbGlhdGlvbiBjb21wbGV0ZS4iCg==",
+              "path": "openapi.yaml"
+            }
+          }
+        ],
+        "gatewayConfig": {
+          "backendConfig": {
+            "googleServiceAccount": "sa-gateway@test-project-123.iam.gserviceaccount.com"
+          }
+        }
+      }
+    ]
+  },
+  "pubsub_subscriptions": {
+    "subscriptions": [
+      {
+        "name": "projects/test-project-123/subscriptions/sub-events-push",
+        "topic": "projects/test-project-123/topics/events-topic",
+        "pushConfig": {
+          "pushEndpoint": "https://svc-core.run.app/v1/events/push"
+        },
+        "deadLetterPolicy": {
+          "deadLetterTopic": "projects/test-project-123/topics/events-dlq",
+          "maxDeliveryAttempts": 5
+        },
+        "ackDeadlineSeconds": 60
+      }
+    ]
+  },
+  "sql_databases": {
+    "items": [
+      {
+        "name": "appdb",
+        "instance": "db-main-data"
+      },
+      {
+        "name": "postgres",
+        "instance": "db-main-data"
+      }
+    ]
+  },
+  "sql_users": {
+    "items": [
+      {
+        "name": "appuser",
+        "instance": "db-main-data"
+      },
+      {
+        "name": "cloudsqlsuperuser",
+        "instance": "db-main-data"
+      }
+    ]
+  },
+  "api_configs": {
+    "apiConfigs": [
+      {
+        "name": "projects/test-project-123/locations/global/apis/api-main/configs/cfg-v1",
+        "state": "ACTIVE",
+        "openapiDocuments": [
+          {
+            "document": {
+              "contents": "c3dhZ2dlcjogIjIuMCIKaW5mbzoKICB0aXRsZTogIkNvcmUgU2VydmljZSBBUEkiCiAgdmVyc2lvbjogIjEuMC4wIgpzY2hlbWVzOgogIC0gImh0dHBzIgpwcm9kdWNlczoKICAtICJhcHBsaWNhdGlvbi9qc29uIgpwYXRoczoKICAvdjEvaXRlbXM6CiAgICBnZXQ6CiAgICAgIHN1bW1hcnk6ICJMaXN0IGFsbCBpdGVtcyIKICAgICAgb3BlcmF0aW9uSWQ6ICJsaXN0SXRlbXMiCiAgICAgIHgtZ29kdmlldy1wcm9iZS1zYWZlOiB0cnVlCiAgICAgIHgtZ29vZ2xlLWJhY2tlbmQ6CiAgICAgICAgYWRkcmVzczogImh0dHBzOi8vc3ZjLWNvcmUucnVuLmFwcCIKICAgICAgcmVzcG9uc2VzOgogICAgICAgIDIwMDoKICAgICAgICAgIGRlc2NyaXB0aW9uOiAiQSBzdWNjZXNzZnVsIHJlc3BvbnNlLiIKICAgIHBvc3Q6CiAgICAgIHN1bW1hcnk6ICJDcmVhdGUgbmV3IGl0ZW0iCiAgICAgIG9wZXJhdGlvbklkOiAiY3JlYXRlSXRlbSIKICAgICAgeC1nb29nbGUtYmFja2VuZDoKICAgICAgICBhZGRyZXNzOiAiaHR0cHM6Ly9zdmMtY29yZS5ydW4uYXBwIgogICAgICByZXNwb25zZXM6CiAgICAgICAgMjAxOgogICAgICAgICAgZGVzY3JpcHRpb246ICJDcmVhdGVkIHN1Y2Nlc3NmdWxseS4iCiAgL3YxL2FkbWluL3JlY29uY2lsZToKICAgIHBvc3Q6CiAgICAgIHN1bW1hcnk6ICJSZWNvbmNpbGUgc3lzdGVtIHRyYW5zYWN0aW9ucyIKICAgICAgb3BlcmF0aW9uSWQ6ICJyZWNvbmNpbGVTeXN0ZW0iCiAgICAgIHgtZ29kdmlldy1hZG1pbi1hY3Rpb246IHRydWUKICAgICAgeC1nb29nbGUtYmFja2VuZDoKICAgICAgICBhZGRyZXNzOiAiaHR0cHM6Ly9zdmMtY29yZS5ydW4uYXBwIgogICAgICByZXNwb25zZXM6CiAgICAgICAgMjAwOgogICAgICAgICAgZGVzY3JpcHRpb246ICJSZWNvbmNpbGlhdGlvbiBjb21wbGV0ZS4iCg==",
+              "path": "openapi.yaml"
+            }
+          }
+        ],
+        "gatewayConfig": {
+          "backendConfig": {
+            "googleServiceAccount": "sa-gateway@test-project-123.iam.gserviceaccount.com"
+          }
+        }
+      }
+    ]
   }
 }

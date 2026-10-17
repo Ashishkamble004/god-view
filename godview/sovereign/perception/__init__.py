@@ -1,13 +1,14 @@
 """Environment Perception Organ (`godview.sovereign.perception`).
 
 Implements SDD §2.1 & Agent Spec §1 6-step identity-only self-awareness protocol,
-TDD I-02 (zero hardcoded application/tenant knowledge), and Coordinator Decision A11
-(exclusion of God-View's own observer infrastructure).
+TDD I-02 (zero hardcoded application/tenant knowledge), Plan §3.2 (error-isolated senses,
+evidence-only business context inference, canonical topology graph, and zero placeholder nodes).
 """
 
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 import os
 from collections.abc import Sequence
@@ -22,10 +23,13 @@ from godview_shared.contracts import (
     DiscoveredServiceDoc,
     JourneyDoc,
 )
-from godview_shared.fakes import InMemoryFirestore, InMemoryPubSub
 from pydantic import BaseModel, Field
 
+from godview.sovereign.business_context.inferencer import BusinessContextInferencer
 from godview.sovereign.nervous_system import NervousSystemRouter
+from godview.sovereign.topology.builder import TopologyBuilder, TopologyReport
+
+logger = logging.getLogger("godview.sovereign.perception")
 
 
 def _deterministic_embedding_768(text: str) -> list[float]:
@@ -57,26 +61,37 @@ class PerceptionOrgan:
 
     def __init__(
         self,
-        firestore: InMemoryFirestore,
-        pubsub: InMemoryPubSub,
+        firestore: Any,
+        pubsub: Any,
         adapters: Sequence[SenseAdapter] | None = None,
         settings: GodViewSettings | None = None,
+        llm: Any | None = None,
+        inferencer: BusinessContextInferencer | None = None,
+        topology_builder: TopologyBuilder | None = None,
     ) -> None:
         self._firestore = firestore
         self._pubsub = pubsub
         self._adapters: list[SenseAdapter] = list(adapters) if adapters is not None else []
         self._settings = settings or GodViewSettings.from_env()
         self._router = NervousSystemRouter(pubsub=pubsub)
+        self._llm = llm
+        self._inferencer = inferencer or BusinessContextInferencer(llm=llm, firestore=firestore)
+        self._topology_builder = topology_builder or TopologyBuilder(env_id=self._settings.env_mode)
         self.role_inference_calls: int = 0
         self.embedding_batch_calls: int = 0
         self._last_report: PerceptionReport | None = None
+        self._last_topology: TopologyReport | None = None
 
     @property
     def last_report(self) -> PerceptionReport | None:
         return self._last_report
 
+    @property
+    def last_topology(self) -> TopologyReport | None:
+        return self._last_topology
+
     async def perceive(self, *, reset: bool = False) -> PerceptionReport:
-        """Execute the 6-step self-awareness protocol (SDD §2.1 & Agent Spec §1)."""
+        """Execute the 6-step self-awareness protocol (SDD §2.1 & Plan §3.2)."""
         now_iso = datetime.now(tz=UTC).isoformat()
 
         # Step 1: Introspect runtime identity from credentials / environment
@@ -90,7 +105,7 @@ class PerceptionOrgan:
             "hint_repo_urls": list(self._settings.hint_repo_urls),
         }
 
-        # Step 2 & 3: Probe sense adapters & discover if Agent Registry is available
+        # Step 2 & 3: Probe sense adapters with error isolation & discover agent registry
         health_reports: list[AdapterHealth] = []
         agent_registry_discovered = False
         discovered_services: list[DiscoveredServiceDoc] = []
@@ -98,37 +113,37 @@ class PerceptionOrgan:
         discovered_entities: list[DiscoveredEntityDoc] = []
 
         for adapter in self._adapters:
-            h = await adapter.health()
-            health_reports.append(h)
-            if h.evidence.get("agent_registry_available") is True:
-                agent_registry_discovered = True
-            if h.state in ("available", "partial"):
-                disc = await adapter.discover()
-                discovered_services.extend(disc.services)
-                discovered_edges.extend(disc.edges)
-                discovered_entities.extend(disc.entities)
-
-        # If no external adapters were injected in hermetic mode, synthesize a neutral default node
-        if not self._adapters and not discovered_services:
-            discovered_services.append(
-                DiscoveredServiceDoc(
-                    env_id="local-compose",
-                    name="svc-alpha-01",
-                    kind="cloud_run",
-                    adapter_family="local",
-                    locator="http://svc-alpha-01:8080",
-                    labels={"godview_managed": "true"},
-                    routes=[
-                        {"method": "POST", "path": "/v1/process", "x-godview-probe-safe": True}
-                    ],
-                    metrics_endpoint="http://svc-alpha-01:8080/metrics",
-                    repo_ref="git://local/repo-alpha",
-                    first_seen=now_iso,
-                    last_seen=now_iso,
+            try:
+                h = await adapter.health()
+                health_reports.append(h)
+                if h.evidence.get("agent_registry_available") is True:
+                    agent_registry_discovered = True
+                if h.state in ("available", "partial"):
+                    disc = await adapter.discover()
+                    discovered_services.extend(disc.services)
+                    discovered_edges.extend(disc.edges)
+                    discovered_entities.extend(disc.entities)
+            except Exception as exc:
+                logger.warning(
+                    "Sense adapter '%s' probe failed: %s",
+                    getattr(adapter, "name", "unknown"),
+                    exc,
                 )
-            )
+                health_reports.append(
+                    AdapterHealth(
+                        adapter_name=getattr(adapter, "name", "unknown"),
+                        family=getattr(adapter, "family", "gcp"),
+                        state="unavailable",
+                        evidence={"error": str(exc)},
+                        checked_at=datetime.now(tz=UTC),
+                    )
+                )
 
-        env_id = discovered_services[0].env_id if discovered_services else "local-compose"
+        env_id = (
+            discovered_services[0].env_id
+            if discovered_services
+            else (getattr(self._router, "env_id", None) or self._settings.env_mode or "local-compose")
+        )
         self._router.env_id = env_id
 
         # Step 4: Filter observer resources (Decision A11), classify & batch-infer roles/embeddings
@@ -157,6 +172,20 @@ class PerceptionOrgan:
             inferred_role = svc.inferred_role or f"{svc.kind}:{svc.name}:{classification}"
             embedding = svc.purpose_embedding or _deterministic_embedding_768(inferred_role)
 
+            # Infer BusinessContext purely from technical evidence
+            business_ctx = svc.business_context
+            if business_ctx is None and self._inferencer is not None:
+                try:
+                    business_ctx = await self._inferencer.infer_service_context(
+                        svc, discovered_edges
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Business context inference failed for '%s': %s",
+                        svc.name,
+                        exc,
+                    )
+
             existing = self._firestore.get("discovered_services", doc_id)
             updated_doc = svc.model_copy(
                 update={
@@ -165,6 +194,7 @@ class PerceptionOrgan:
                     "inferred_role": inferred_role,
                     "role_confidence": svc.role_confidence or (0.92 if is_managed else 0.65),
                     "purpose_embedding": embedding,
+                    "business_context": business_ctx,
                     "status": "active",
                     "last_seen": now_iso,
                 }
@@ -211,7 +241,7 @@ class PerceptionOrgan:
                         },
                     )
 
-        # Persist discovered edges & entities & journeys
+        # Persist discovered edges & entities
         for edge in discovered_edges:
             edge_id = edge.doc_id or f"{edge.src}__to__{edge.dst}"
             self._firestore.set(
@@ -228,44 +258,38 @@ class PerceptionOrgan:
                 ent.model_copy(update={"doc_id": ent_id}).model_dump(mode="json"),
             )
 
-        # Ensure at least one discovered journey document exists per entity/flow
+        # Persist journeys from entities or inferred trace DAGs (zero placeholder flow)
         journey_keys: list[str] = []
-        if discovered_entities:
-            for ent in discovered_entities:
-                j_key = f"{ent.name}_journey"
-                journey_keys.append(j_key)
-                j_doc = JourneyDoc(
-                    doc_id=j_key,
-                    name=j_key,
-                    steps=list(ent.states) or ["START", "COMPLETE"],
-                    intended_order_source="perception",
-                    owner_agent_id=f"business_line__{j_key}",
-                    status="active",
-                )
-                self._firestore.set("journeys", j_key, j_doc.model_dump(mode="json"))
-        else:
-            j_key = "primary_business_flow"
+        for ent in discovered_entities:
+            j_key = f"{ent.name}_journey"
             journey_keys.append(j_key)
             j_doc = JourneyDoc(
                 doc_id=j_key,
                 name=j_key,
-                steps=["STEP_1", "STEP_2"],
+                steps=list(ent.states) or ["START", "COMPLETE"],
                 intended_order_source="perception",
                 owner_agent_id=f"business_line__{j_key}",
                 status="active",
             )
             self._firestore.set("journeys", j_key, j_doc.model_dump(mode="json"))
 
-        # Step 5: Assemble court spawn plan (application, data, business_line, change, platform)
+        if self._inferencer is not None:
+            inferred_journeys = self._inferencer.infer_journeys_from_topology(
+                filtered_services, discovered_edges
+            )
+            for ij in inferred_journeys:
+                if ij.name not in journey_keys:
+                    journey_keys.append(ij.name)
+                    self._firestore.set("journeys", ij.doc_id, ij.model_dump(mode="json"))
+
+        # Step 5: Assemble court spawn plan (evidence-only, zero placeholders)
         spawn_plan: list[dict[str, Any]] = []
         repos_seen: set[str] = set()
-        has_data_agent = False
 
         for svc in filtered_services:
             doc_id = svc.doc_id or f"{svc.env_id}__{svc.kind}.{svc.name}"
             stored_svc = self._firestore.get("discovered_services", doc_id) or {}
             if svc.kind == "cloud_sql":
-                has_data_agent = True
                 spawn_plan.append(
                     {
                         "agent_type": "data",
@@ -293,22 +317,6 @@ class PerceptionOrgan:
                         }
                     )
 
-        if not has_data_agent:
-            spawn_plan.append(
-                {
-                    "agent_type": "data",
-                    "subject_ref": "primary-datastore",
-                    "agent_id": "data__primary-datastore",
-                }
-            )
-        if not repos_seen:
-            spawn_plan.append(
-                {
-                    "agent_type": "change",
-                    "subject_ref": "primary-repo",
-                    "agent_id": "change__primary-repo",
-                }
-            )
         for j_key in journey_keys:
             spawn_plan.append(
                 {
@@ -317,6 +325,8 @@ class PerceptionOrgan:
                     "agent_id": f"business_line__{j_key}",
                 }
             )
+
+        # Platform agent for environment supervisory duties
         spawn_plan.append(
             {
                 "agent_type": "platform",
@@ -324,6 +334,21 @@ class PerceptionOrgan:
                 "agent_id": f"platform__{env_id}",
             }
         )
+
+        # Build canonical topology report for cockpit
+        stored_journeys: list[JourneyDoc] = []
+        for j_raw in self._firestore.list_docs("journeys"):
+            try:
+                stored_journeys.append(JourneyDoc(**j_raw))
+            except Exception:
+                pass
+
+        topology_report = self._topology_builder.build(
+            services=filtered_services,
+            edges=discovered_edges,
+            journeys=stored_journeys,
+        )
+        self._last_topology = topology_report
 
         report = PerceptionReport(
             env_id=env_id,
@@ -340,3 +365,6 @@ class PerceptionOrgan:
         )
         self._last_report = report
         return report
+
+
+__all__ = ["PerceptionOrgan", "PerceptionReport"]
