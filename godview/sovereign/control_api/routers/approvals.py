@@ -160,6 +160,7 @@ def build_router(ctx: Any) -> APIRouter:
         return card.model_dump(mode="json")
 
     @router.post("/approvals/{approval_id}/approve")
+    @router.post("/approvals/{approval_id}:approve")
     async def approve_card(
         approval_id: str,
         body: ApprovalDecisionRequest | None = None,
@@ -187,6 +188,7 @@ def build_router(ctx: Any) -> APIRouter:
             raise HTTPException(status_code=400, detail=str(tv)) from None
 
     @router.post("/approvals/{approval_id}/reject")
+    @router.post("/approvals/{approval_id}:reject")
     async def reject_card(
         approval_id: str,
         body: ApprovalDecisionRequest | None = None,

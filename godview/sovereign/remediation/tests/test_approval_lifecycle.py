@@ -182,12 +182,37 @@ async def test_approvals_router_endpoints() -> None:
         assert list_resp.status_code == 200
         assert len(list_resp.json()) == 1
 
-        # Approve card
+        # Approve card using colon syntax alias :approve
         approve_resp = await client.post(
-            f"/approvals/{app_id}/approve",
+            f"/approvals/{app_id}:approve",
             headers={"X-Goog-Authenticated-User-Email": "accounts.google.com:operator@example.com"},
         )
         assert approve_resp.status_code == 200
         approved_data = approve_resp.json()
         assert approved_data["approval"]["decision"] == "approved"
         assert approved_data["approval"]["decided_by"] == "operator@example.com"
+
+        # Create second card to test :reject alias
+        create_resp2 = await client.post(
+            "/approvals",
+            json={
+                "incident_id": "inc-api-02",
+                "agent_id": "platform__env-01",
+                "capability_id": "armor.set_waf_sensitivity",
+                "target_resource": "god-view-edge-policy",
+                "trust_level_required": 2,
+                "narrative": "Test reject colon alias",
+            },
+        )
+        assert create_resp2.status_code == 200
+        app_id2 = create_resp2.json()["approval_id"]
+
+        # Reject card using :reject alias
+        reject_resp = await client.post(
+            f"/approvals/{app_id2}:reject",
+            headers={"X-Goog-Authenticated-User-Email": "accounts.google.com:operator@example.com"},
+        )
+        assert reject_resp.status_code == 200
+        rejected_data = reject_resp.json()
+        assert rejected_data["approval"]["decision"] == "rejected"
+        assert rejected_data["approval"]["decided_by"] == "operator@example.com"
