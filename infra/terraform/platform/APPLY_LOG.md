@@ -174,4 +174,10 @@
   - **Result**: 3 added, 2 changed, 1 destroyed. Custom role `projects/general-ak/roles/godview_hibernate_operator` created with valid permission `cloudscheduler.jobs.enable` and bound to `godview-act-sa`. Uptime check replaced with `monitored_resource { type = "cloud_run_revision" }` and OIDC service agent authentication against path `/public/healthz`. Alert policy condition filter and group_by updated to match.
   - **Rollback**: `terraform destroy -target=module.project_iam.google_project_iam_member.act_hibernate ...`
 
+- **2026-10-17T18:08:02Z**
+  - **Command**: `terraform -chdir=infra/terraform/platform apply -input=false $HOME/tmp/platform-infra-rev5.tfplan` (targets: `module.godview.google_monitoring_uptime_check_config.sovereign_health`, `module.godview.google_monitoring_alert_policy.sovereign_heartbeat`)
+  - **Result**: 1 added, 2 changed, 1 destroyed. `google_monitoring_uptime_check_config.sovereign_health` recreated without `validate_ssl` using `cloud_run_revision` resource and OIDC service agent auth (`god-view-sovereign-uptime--m6bfN8PA-M`). Alert policy `sovereign_heartbeat` updated.
+  - **Rollback**: `terraform destroy -target=module.godview.google_monitoring_uptime_check_config.sovereign_health ...`
+
+
 

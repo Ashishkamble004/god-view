@@ -274,3 +274,15 @@ gcloud scheduler jobs run godview-tenant-resume --location=us-central1 --project
   - **Result**: 4 changed. Deletion protection locked (`true`) on all 4 BigQuery ledger tables. Outputs exported to `outputs.json`.
   - **Rollback**: `terraform -chdir=infra/terraform/platform apply -input=false -var="ledger_table_deletion_protection=false" ...`
 
+- **2026-10-17T18:04:59Z**
+  - **Command**: `terraform -chdir=infra/terraform/platform apply -input=false $HOME/tmp/platform-infra-rev4.tfplan` (targets: `module.project_iam.google_project_iam_custom_role.act_hibernate`, `module.project_iam.google_project_iam_member.act_hibernate`, `module.godview.google_monitoring_uptime_check_config.sovereign_health`, `module.godview.google_monitoring_alert_policy.sovereign_heartbeat`)
+  - **Result**: Custom role `godview_hibernate_operator` created and bound to `godview-act-sa` successfully. Uptime check returned 400 (`validate_ssl feature is currently only allowed on uptime_url checks`).
+  - **Rollback**: `terraform destroy -target=module.project_iam.google_project_iam_member.act_hibernate ...`
+
+- **2026-10-17T18:08:02Z**
+  - **Command**: `terraform -chdir=infra/terraform/platform apply -input=false $HOME/tmp/platform-infra-rev5.tfplan` (targets: `module.godview.google_monitoring_uptime_check_config.sovereign_health`, `module.godview.google_monitoring_alert_policy.sovereign_heartbeat`)
+  - **Result**: 1 added, 2 changed, 1 destroyed. `google_monitoring_uptime_check_config.sovereign_health` recreated successfully with `monitored_resource { type = "cloud_run_revision" }` and OIDC service agent authentication against `/public/healthz`. Alert policy updated.
+  - **Rollback**: `terraform destroy -target=module.godview.google_monitoring_uptime_check_config.sovereign_health ...`
+
+
+
