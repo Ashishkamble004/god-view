@@ -343,15 +343,25 @@ class TopologyBuilder:
             for j in journeys:
                 steps: list[TopologyJourneyStep] = []
                 for s in j.steps:
+                    node = ""
+                    op = ""
                     if isinstance(s, dict):
-                        steps.append(
-                            TopologyJourneyStep(
-                                node=str(s.get("node") or s.get("service") or ""),
-                                operation=str(s.get("operation") or ""),
-                            )
-                        )
+                        node = str(s.get("node") or s.get("service") or "")
+                        op = str(s.get("operation") or "")
                     elif isinstance(s, str):
-                        steps.append(TopologyJourneyStep(node=s, operation=""))
+                        node = s
+                        op = ""
+
+                    # Disambiguate if node contains operation (e.g. node_id.op or node_id:op)
+                    if node and node not in status_by_node:
+                        for n_id in status_by_node:
+                            if node.startswith(f"{n_id}.") or node.startswith(f"{n_id}:"):
+                                if not op:
+                                    op = node[len(n_id) + 1:]
+                                node = n_id
+                                break
+
+                    steps.append(TopologyJourneyStep(node=node, operation=op))
 
                 # Calculate health from member nodes
                 member_statuses = [

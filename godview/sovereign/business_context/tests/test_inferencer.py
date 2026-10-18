@@ -30,7 +30,9 @@ class _FakeLlm:
         self.calls += 1
         if self.fail:
             raise RuntimeError("429 ResourceExhausted: rate limit exceeded")
-        if response_schema == BusinessContext:
+        if response_schema == BusinessContext or (
+            isinstance(response_schema, type) and "BusinessContext" in response_schema.__name__
+        ):
             return BusinessContext(
                 role_summary="Order processor and validator",
                 domain="orders",

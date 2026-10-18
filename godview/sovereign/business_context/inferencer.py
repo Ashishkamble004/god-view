@@ -19,6 +19,7 @@ from typing import Any
 
 from godview_shared.contracts import (
     BusinessContext,
+    BusinessContextEvidence,
     DiscoveredEdgeDoc,
     DiscoveredServiceDoc,
     JourneyDoc,
@@ -262,11 +263,25 @@ class BusinessContextInferencer:
                 f"{json.dumps(evidence_bundle, indent=2)}\n"
             )
             self.total_llm_calls += 1
-            res = await self.llm.generate(
-                role="reasoning",
-                contents=prompt,
-                response_schema=BusinessContext,
-            )
+            if hasattr(self.llm, "generate_structured"):
+                try:
+                    res = await self.llm.generate_structured(
+                        role="reasoning",
+                        prompt=prompt,
+                        schema=BusinessContext,
+                    )
+                except Exception:
+                    res = await self.llm.generate(
+                        role="reasoning",
+                        contents=prompt,
+                        response_schema=BusinessContext,
+                    )
+            else:
+                res = await self.llm.generate(
+                    role="reasoning",
+                    contents=prompt,
+                    response_schema=BusinessContext,
+                )
             model_name = (
                 getattr(res, "model_id", None)
                 or getattr(self.llm, "model_name", getattr(self.llm, "model", "llm-reasoner"))
@@ -293,6 +308,43 @@ class BusinessContextInferencer:
                     res_bc = BusinessContext(**parsed_ctx)
                 else:
                     raise ValueError(f"Could not parse BusinessContext from LLM response: {res}")
+
+            def _is_non_empty(item: Any) -> bool:
+                if isinstance(item, BaseModel):
+                    return any(bool(v) for v in item.model_dump().values())
+                if isinstance(item, dict):
+                    return any(bool(v) for v in item.values())
+                return bool(item)
+
+            # Ensure evidence references are never empty objects
+            cleaned_evidence = [e for e in res_bc.evidence if _is_non_empty(e)]
+            if not cleaned_evidence:
+                ev_items: list[BusinessContextEvidence] = []
+                for r in routes[:10]:
+                    ref = f"openapi:{r.get('method', 'GET')} {r.get('path', '/')}"
+                    summary = r.get("summary") or r.get("operation_id") or ""
+                    ev_items.append(
+                        BusinessContextEvidence(
+                            kind="openapi",
+                            ref=ref,
+                            excerpt=summary or f"Route {ref}",
+                        )
+                    )
+                for env_k in list(evidence_bundle.get("env_vars", {}).keys())[:5]:
+                    ev_items.append(
+                        BusinessContextEvidence(
+                            kind="env",
+                            ref=f"env:{env_k}",
+                            excerpt=f"Environment variable {env_k}",
+                        )
+                    )
+                cleaned_evidence = ev_items
+            res_bc.evidence = cleaned_evidence
+
+            # Ensure kpis/invariants/journeys do not contain empty objects
+            res_bc.kpis = [k for k in res_bc.kpis if _is_non_empty(k)]
+            res_bc.invariants = [i for i in res_bc.invariants if _is_non_empty(i)]
+            res_bc.journeys = [j for j in res_bc.journeys if _is_non_empty(j)]
 
             res_bc.inferred_by = model_name
             res_bc.inferred_at = now_iso
@@ -404,20 +456,37 @@ class BusinessContextInferencer:
                 if not name:
                     continue
                 raw_steps = getattr(item, "steps", None) or (item.get("steps", []) if isinstance(item, dict) else [])
-                steps_str: list[str] = []
+                steps_data: list[dict[str, str]] = []
                 for s in raw_steps:
-                    if isinstance(s, str):
-                        steps_str.append(s)
-                    elif isinstance(s, dict):
-                        node = s.get("node", "")
-                        op = s.get("operation", "")
-                        steps_str.append(f"{node}.{op}" if op else str(node))
+                    node = ""
+                    op = ""
+                    if isinstance(s, dict):
+                        node = str(s.get("node", ""))
+                        op = str(s.get("operation", ""))
                     elif hasattr(s, "node"):
-                        node = getattr(s, "node", "")
-                        op = getattr(s, "operation", "")
-                        steps_str.append(f"{node}.{op}" if op else str(node))
-                    else:
-                        steps_str.append(str(s))
+                        node = str(getattr(s, "node", ""))
+                        op = str(getattr(s, "operation", ""))
+                    elif isinstance(s, str):
+                        node = s
+                        op = ""
+
+                    # Disambiguate if node contains operation (e.g. node_id.op or node_id:op)
+                    if node:
+                        for svc in services:
+                            svc_id = svc.doc_id
+                            if svc_id and (node.startswith(f"{svc_id}.") or node.startswith(f"{svc_id}:")):
+                                if not op:
+                                    op = node[len(svc_id) + 1:]
+                                node = svc_id
+                                break
+                            svc_short = svc.name
+                            if svc_short and (node.startswith(f"{svc_short}.") or node.startswith(f"{svc_short}:")):
+                                if not op:
+                                    op = node[len(svc_short) + 1:]
+                                node = svc.doc_id or svc_short
+                                break
+
+                    steps_data.append({"node": node, "operation": op})
                 conf_val = float(getattr(item, "confidence", 0.0) or (item.get("confidence", 0.0) if isinstance(item, dict) else 0.0))
                 ev_val = getattr(item, "evidence", []) or (item.get("evidence", []) if isinstance(item, dict) else [])
                 if isinstance(ev_val, str):
@@ -426,7 +495,7 @@ class BusinessContextInferencer:
                     JourneyDoc(
                         doc_id=f"journey__{name.lower().replace(' ', '_')}",
                         name=name,
-                        steps=steps_str,
+                        steps=steps_data,
                         intended_order_source="trace_dag",
                         status="active",
                         confidence=conf_val,

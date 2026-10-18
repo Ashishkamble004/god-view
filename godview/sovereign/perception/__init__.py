@@ -341,21 +341,23 @@ class PerceptionOrgan:
                     ent.model_copy(update={"doc_id": ent_id}).model_dump(mode="json"),
                 )
 
-        # Persist journeys from entities or inferred trace DAGs (zero placeholder flow)
+        # Persist journeys from real state-machine entities or inferred trace DAGs (zero placeholder flow)
         journey_keys: list[str] = []
         if hasattr(self._firestore, "set"):
             for ent in discovered_entities:
-                j_key = f"{ent.name}_journey"
-                journey_keys.append(j_key)
-                j_doc = JourneyDoc(
-                    doc_id=j_key,
-                    name=j_key,
-                    steps=list(ent.states) if ent.states else [],
-                    intended_order_source="perception",
-                    owner_agent_id=f"business_line__{j_key}",
-                    status="active",
-                )
-                self._firestore.set("journeys", j_key, j_doc.model_dump(mode="json"))
+                if ent.states and len(ent.states) >= 2:
+                    j_key = f"{ent.name}_journey"
+                    journey_keys.append(j_key)
+                    j_doc = JourneyDoc(
+                        doc_id=j_key,
+                        name=j_key,
+                        steps=list(ent.states),
+                        intended_order_source="state_machine",
+                        owner_agent_id=f"business_line__{j_key}",
+                        confidence=0.8,
+                        status="active",
+                    )
+                    self._firestore.set("journeys", j_key, j_doc.model_dump(mode="json"))
 
             if self._inferencer is not None:
                 inferred_journeys = await self._inferencer.infer_journeys_from_topology(

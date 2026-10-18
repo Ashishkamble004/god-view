@@ -80,6 +80,7 @@ class LedgerEventRow(BaseModel):
     journey_id: str | None = None
     trace_id: str | None = None
     span_id: str | None = None
+    parent_span_id: str | None = None
 
     http_status: int | None = None
     duration_ms: int | None = None
@@ -257,18 +258,47 @@ InvariantProvenance = Literal["code", "policy", "observed"]
 InvariantDialect = Literal["bigquery", "postgres", "python"]
 
 
+class BusinessContextEvidence(BaseModel):
+    kind: str = Field(default="openapi", description="openapi | env | trace | log | code | schema | doc")
+    ref: str = Field(default="", description="Reference pointer (e.g. HTTP route, span name, metric)")
+    excerpt: str = Field(default="", description="Short evidence snippet or description")
+
+
+class BusinessContextJourney(BaseModel):
+    name: str = Field(default="", description="Journey or process flow name")
+    steps: list[dict[str, str] | str] = Field(default_factory=list, description="Ordered steps {service, operation} or operation string")
+    confidence: float = Field(default=0.0, description="Confidence score 0.0-1.0")
+    evidence: str = Field(default="", description="Evidence supporting this journey")
+
+
+class BusinessContextKpi(BaseModel):
+    name: str = Field(default="", description="KPI name")
+    definition: str = Field(default="", description="Metric formula or SQL query over ledger")
+    unit: str = Field(default="", description="Unit of measurement")
+    confidence: float = Field(default=0.0, description="Confidence score 0.0-1.0")
+    evidence: str = Field(default="", description="Evidence supporting this KPI")
+
+
+class BusinessContextInvariant(BaseModel):
+    statement: str = Field(default="", description="Invariant assertion statement")
+    check: str = Field(default="", description="SQL / CEL / python-safe verification check")
+    severity: str = Field(default="sev2", description="sev1 | sev2 | sev3")
+    confidence: float = Field(default=0.0, description="Confidence score 0.0-1.0")
+    evidence: str = Field(default="", description="Evidence supporting this invariant")
+
+
 class BusinessContext(BaseModel):
     role_summary: str = ""
     domain: str = ""
     capabilities: list[str] = Field(default_factory=list)
     upstream: list[str] = Field(default_factory=list)
     downstream: list[str] = Field(default_factory=list)
-    journeys: list[dict[str, Any]] = Field(default_factory=list)
-    kpis: list[dict[str, Any]] = Field(default_factory=list)
-    invariants: list[dict[str, Any]] = Field(default_factory=list)
+    journeys: list[BusinessContextJourney] = Field(default_factory=list)
+    kpis: list[BusinessContextKpi] = Field(default_factory=list)
+    invariants: list[BusinessContextInvariant] = Field(default_factory=list)
     risk_notes: list[str] = Field(default_factory=list)
     confidence: float = 0.0
-    evidence: list[dict[str, Any]] = Field(default_factory=list)
+    evidence: list[BusinessContextEvidence] = Field(default_factory=list)
     inferred_by: str = ""
     inferred_at: datetime | str | None = None
 
@@ -394,7 +424,7 @@ class JourneyDoc(BaseModel):
 
     doc_id: str | None = None
     name: str
-    steps: list[str] = Field(default_factory=list)
+    steps: list[dict[str, Any]] | list[str] = Field(default_factory=list)
     directly_follows: dict[str, list[str]] = Field(default_factory=dict)
     intended_order_source: str = ""
     conformance_rules: list[dict[str, Any]] = Field(default_factory=list)
