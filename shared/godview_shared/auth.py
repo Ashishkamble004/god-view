@@ -288,6 +288,8 @@ class AuthService:
         self,
         request_or_token: Request | str,
         audience: str | None = None,
+        *,
+        allowed_principals: set[str] | None = None,
     ) -> Principal | None:
         """Verify a Google OIDC ID token and return the service Principal."""
         token: str | None = None
@@ -379,10 +381,15 @@ class AuthService:
                 or ""
             )
 
+            effective_allowed = (
+                allowed_principals
+                if allowed_principals is not None
+                else self._allowed_service_principals
+            )
             # Strict project-qualified service principal allowlist (Decision #89/#91/#95)
-            if self._allowed_service_principals:
-                if email not in self._allowed_service_principals:
-                    logger.warning("OIDC rejected: email %s not in allowed principals %s", email, self._allowed_service_principals)
+            if effective_allowed:
+                if email not in effective_allowed:
+                    logger.warning("OIDC rejected: email %s not in allowed principals %s", email, effective_allowed)
                     return None
             else:
                 if current_project:
@@ -459,15 +466,15 @@ class AuthService:
     def require_trace_service(self) -> Any:
         """FastAPI dependency for trace ingestion (OIDC from trace principals)."""
         async def _dependency(request: Request) -> Principal:
-            principal = self.verify_google_oidc(request)
+            trace_allowed = self._allowed_trace_principals or self._allowed_service_principals
+            principal = self.verify_google_oidc(request, allowed_principals=trace_allowed)
             if principal is None:
                 raise HTTPException(
                     status_code=401,
                     detail="Unauthorized: valid trace service OIDC token required",
                 )
             if self.settings.env_mode != "hermetic":
-                allowed = self._allowed_trace_principals or self._allowed_service_principals
-                if allowed and principal.email not in allowed:
+                if trace_allowed and principal.email not in trace_allowed:
                     raise HTTPException(
                         status_code=403,
                         detail=f"Forbidden: trace sender {principal.email} not in trace principals",
