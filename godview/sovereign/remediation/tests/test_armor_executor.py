@@ -58,7 +58,7 @@ def test_patch_waf_expression_updates_existing_strict_sensitivity() -> None:
 async def test_armor_executor_set_waf_sensitivity_preview_first_and_verify(
     remediation_fixtures: dict[str, Any],
 ) -> None:
-    """Executes set_waf_sensitivity with preview_first=True: creates temp rule at higher priority, verifies, patches real rule, cleans up temp rule."""
+    """Executes set_waf_sensitivity with preview_first=True: creates temp rule at higher priority, verifies logs, patches real rule, cleans up temp rule."""
     ca_fixture = remediation_fixtures["cloud_armor"]
     rule_state = dict(ca_fixture["rule_1000"])
     temp_rules: dict[int, dict[str, Any]] = {}
@@ -73,6 +73,27 @@ async def test_armor_executor_set_waf_sensitivity_preview_first_and_verify(
             rule_state,
         ],
     }
+
+    class MockLoggingAdapter:
+        def capabilities(self) -> dict[str, Any]:
+            return {"logging.query_lb_requests": {}}
+
+        async def execute_capability(self, cap_id: str, args: dict[str, Any]) -> list[dict[str, Any]]:
+            return [
+                {
+                    "jsonPayload": {
+                        "previewSecurityPolicy": {
+                            "name": "edge-security-policy",
+                            "priority": 900,
+                            "outcome": "ACCEPT",
+                        }
+                    }
+                }
+            ]
+
+    class MockContext:
+        def __init__(self) -> None:
+            self.adapters = [MockLoggingAdapter()]
 
     def handle_request(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
@@ -128,7 +149,7 @@ async def test_armor_executor_set_waf_sensitivity_preview_first_and_verify(
         executor = CloudArmorExecutor(http_client=mock_client)
 
         result = await executor.set_waf_sensitivity(
-            ctx=None,
+            ctx=MockContext(),
             args={
                 "project_id": "proj-test",
                 "security_policy": "edge-security-policy",
@@ -157,9 +178,10 @@ async def test_armor_executor_set_waf_sensitivity_preview_first_and_verify(
         assert patch_history[0]["preview"] is False
         assert "{'sensitivity': 1}" in patch_history[0]["match"]["expr"]["expression"]
 
-        # Verification checks recorded (temp rule active, temp rule cleaned up, enforced, probe)
+        # Verification checks recorded (temp rule active, preview logs observed, temp rule cleaned up, enforced, probe)
         check_names = [v.check for v in result.verification]
         assert "waf_preview_temp_rule_active" in check_names
+        assert "preview_mode_lb_logs_observed" in check_names
         assert "waf_preview_temp_rule_cleaned_up" in check_names
         assert "waf_rule_enforced_with_sensitivity" in check_names
         assert "post_enforce_probe_bypasses_waf_block" in check_names
@@ -167,6 +189,190 @@ async def test_armor_executor_set_waf_sensitivity_preview_first_and_verify(
         # Final state
         assert result.after["preview"] is False
         assert "{'sensitivity': 1}" in result.after["expression"]
+
+
+@pytest.mark.unit
+async def test_armor_executor_preview_gate_aborts_on_would_deny_logs(
+    remediation_fixtures: dict[str, Any],
+) -> None:
+    """Verifier-core #140: preview gate must abort without patching real rule if would-be DENY is observed."""
+    ca_fixture = remediation_fixtures["cloud_armor"]
+    rule_state = dict(ca_fixture["rule_1000"])
+    temp_rules: dict[int, dict[str, Any]] = {}
+    patch_history: list[dict[str, Any]] = []
+    removed_rules: list[int] = []
+
+    policy_data = {
+        "name": "edge-security-policy",
+        "rules": [
+            {"priority": 100, "action": "deny(403)", "description": "emergency kill switch", "match": {"versionedExpr": "SRC_IPS_V1", "config": {"srcIpRanges": ["*"]}}},
+            rule_state,
+        ],
+    }
+
+    class MockLoggingAdapter:
+        def capabilities(self) -> dict[str, Any]:
+            return {"logging.query_lb_requests": {}}
+
+        async def execute_capability(self, cap_id: str, args: dict[str, Any]) -> list[dict[str, Any]]:
+            # Return a preview log entry indicating the rule WOULD DENY legitimate traffic
+            return [
+                {
+                    "jsonPayload": {
+                        "previewSecurityPolicy": {
+                            "name": "edge-security-policy",
+                            "priority": 900,
+                            "outcome": "DENY",
+                        }
+                    }
+                }
+            ]
+
+    class MockContext:
+        def __init__(self) -> None:
+            self.adapters = [MockLoggingAdapter()]
+
+    def handle_request(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if url.endswith("/securityPolicies/edge-security-policy"):
+            return httpx.Response(200, json=policy_data)
+        if "addRule" in url:
+            body = json.loads(request.content)
+            temp_rules[body["priority"]] = body
+            return httpx.Response(200, json={"status": "DONE", "name": "op-add"})
+        if "removeRule" in url:
+            parsed = urllib.parse.urlsplit(url)
+            qs = urllib.parse.parse_qs(parsed.query)
+            pri = int(qs["priority"][0])
+            removed_rules.append(pri)
+            temp_rules.pop(pri, None)
+            return httpx.Response(200, json={"status": "DONE", "name": "op-rm"})
+        if "getRule" in url:
+            parsed = urllib.parse.urlsplit(url)
+            qs = urllib.parse.parse_qs(parsed.query)
+            pri = int(qs["priority"][0])
+            if pri == 1000:
+                return httpx.Response(200, json=rule_state)
+            if pri in temp_rules:
+                return httpx.Response(200, json=temp_rules[pri])
+            return httpx.Response(404)
+        if "patchRule" in url:
+            body = json.loads(request.content)
+            patch_history.append(body)
+            return httpx.Response(200, json=rule_state)
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handle_request)
+    async with httpx.AsyncClient(transport=transport) as mock_client:
+        executor = CloudArmorExecutor(http_client=mock_client)
+
+        result = await executor.set_waf_sensitivity(
+            ctx=MockContext(),
+            args={
+                "project_id": "proj-test",
+                "security_policy": "edge-security-policy",
+                "priority": 1000,
+                "sensitivity": 1,
+                "preview_first": True,
+                "probe_url": "https://api.example.com/test-probe",
+            },
+            target_resource="edge-security-policy",
+        )
+
+        assert result.ok is False
+        assert result.reverted is True
+        assert "preview observation gate failed" in result.error.lower()
+        # Real rule was NEVER touched
+        assert len(patch_history) == 0
+        # Temp preview rule was cleaned up
+        assert removed_rules == [900]
+
+
+@pytest.mark.unit
+async def test_armor_executor_preview_gate_aborts_on_no_evaluations(
+    remediation_fixtures: dict[str, Any],
+) -> None:
+    """Verifier-core #140: preview gate must abort without patching real rule if no preview evaluations observed."""
+    ca_fixture = remediation_fixtures["cloud_armor"]
+    rule_state = dict(ca_fixture["rule_1000"])
+    temp_rules: dict[int, dict[str, Any]] = {}
+    patch_history: list[dict[str, Any]] = []
+    removed_rules: list[int] = []
+
+    policy_data = {
+        "name": "edge-security-policy",
+        "rules": [
+            {"priority": 100, "action": "deny(403)", "description": "emergency kill switch", "match": {"versionedExpr": "SRC_IPS_V1", "config": {"srcIpRanges": ["*"]}}},
+            rule_state,
+        ],
+    }
+
+    class MockLoggingAdapter:
+        def capabilities(self) -> dict[str, Any]:
+            return {"logging.query_lb_requests": {}}
+
+        async def execute_capability(self, cap_id: str, args: dict[str, Any]) -> list[dict[str, Any]]:
+            # Empty list = no evaluations observed
+            return []
+
+    class MockContext:
+        def __init__(self) -> None:
+            self.adapters = [MockLoggingAdapter()]
+
+    def handle_request(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if url.endswith("/securityPolicies/edge-security-policy"):
+            return httpx.Response(200, json=policy_data)
+        if "addRule" in url:
+            body = json.loads(request.content)
+            temp_rules[body["priority"]] = body
+            return httpx.Response(200, json={"status": "DONE", "name": "op-add"})
+        if "removeRule" in url:
+            parsed = urllib.parse.urlsplit(url)
+            qs = urllib.parse.parse_qs(parsed.query)
+            pri = int(qs["priority"][0])
+            removed_rules.append(pri)
+            temp_rules.pop(pri, None)
+            return httpx.Response(200, json={"status": "DONE", "name": "op-rm"})
+        if "getRule" in url:
+            parsed = urllib.parse.urlsplit(url)
+            qs = urllib.parse.parse_qs(parsed.query)
+            pri = int(qs["priority"][0])
+            if pri == 1000:
+                return httpx.Response(200, json=rule_state)
+            if pri in temp_rules:
+                return httpx.Response(200, json=temp_rules[pri])
+            return httpx.Response(404)
+        if "patchRule" in url:
+            body = json.loads(request.content)
+            patch_history.append(body)
+            return httpx.Response(200, json=rule_state)
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handle_request)
+    async with httpx.AsyncClient(transport=transport) as mock_client:
+        executor = CloudArmorExecutor(http_client=mock_client)
+
+        result = await executor.set_waf_sensitivity(
+            ctx=MockContext(),
+            args={
+                "project_id": "proj-test",
+                "security_policy": "edge-security-policy",
+                "priority": 1000,
+                "sensitivity": 1,
+                "preview_first": True,
+                "probe_url": "https://api.example.com/test-probe",
+            },
+            target_resource="edge-security-policy",
+        )
+
+        assert result.ok is False
+        assert result.reverted is True
+        assert "preview observation gate failed" in result.error.lower()
+        # Real rule was NEVER touched
+        assert len(patch_history) == 0
+        # Temp preview rule was cleaned up
+        assert removed_rules == [900]
 
 
 @pytest.mark.unit

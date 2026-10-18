@@ -338,6 +338,88 @@ class CloudArmorExecutor(BaseExecutor):
 
         return False, last_status, last_evidence
 
+    def _find_logging_adapter(self, ctx: Any) -> Any:
+        if not ctx or not hasattr(ctx, "adapters"):
+            return None
+        adapters = getattr(ctx, "adapters", []) or []
+        for adp in adapters:
+            caps: set[str] = set()
+            if callable(getattr(adp, "capabilities", None)):
+                try:
+                    c_dict = adp.capabilities()
+                    if isinstance(c_dict, dict):
+                        caps.update(c_dict.keys())
+                except Exception:
+                    pass
+            supported = getattr(adp, "supported_capabilities", [])
+            if isinstance(supported, (list, tuple, set)):
+                caps.update(supported)
+            if "logging.query_lb_requests" in caps or "obs.query_logs_scoped" in caps:
+                return adp
+        return None
+
+    async def _poll_preview_logs(
+        self,
+        logging_adapter: Any,
+        client: httpx.AsyncClient,
+        probe_url: str,
+        temp_priority: int,
+        env_mode: str,
+        timeout_s: float = 300.0,
+        interval_s: float = 15.0,
+        min_evaluations: int = 1,
+    ) -> tuple[bool, list[dict[str, Any]], str]:
+        """Poll LB logs for previewSecurityPolicy outcomes on temp_priority until min_evaluations seen or timeout."""
+        is_mock = isinstance(getattr(client, "_transport", None), httpx.MockTransport)
+        if env_mode == "hermetic" or is_mock:
+            timeout_s = min(timeout_s, 2.0)
+            interval_s = 0.05
+
+        start_time = asyncio.get_running_loop().time()
+        last_reason = "No preview evaluations observed"
+
+        filter_expr = f'jsonPayload.previewSecurityPolicy.priority="{temp_priority}"'
+
+        while True:
+            # Proactively trigger probe so LB logs have preview evaluations to record
+            try:
+                await client.get(probe_url, timeout=5.0)
+            except Exception:
+                pass
+
+            try:
+                res = await logging_adapter.execute_capability(
+                    "logging.query_lb_requests",
+                    {
+                        "filter": filter_expr,
+                        "page_size": 50,
+                        "window_s": int(timeout_s) + 60,
+                    },
+                )
+                entries = res.get("entries", res) if isinstance(res, dict) else res
+                if isinstance(entries, list) and len(entries) >= min_evaluations:
+                    deny_entries = [
+                        e for e in entries
+                        if isinstance(e, dict)
+                        and str(
+                            e.get("jsonPayload", {})
+                            .get("previewSecurityPolicy", {})
+                            .get("outcome", "")
+                        ).upper().startswith("DENY")
+                    ]
+                    if deny_entries:
+                        return False, entries, f"Preview rule would deny {len(deny_entries)} legitimate-class samples"
+                    return True, entries, f"Observed {len(entries)} preview evaluations with 0 DENY outcomes"
+            except Exception as e:
+                logger.debug("Transient error querying preview logs: %s", e)
+
+            elapsed = asyncio.get_running_loop().time() - start_time
+            if elapsed >= timeout_s:
+                break
+            await asyncio.sleep(interval_s)
+
+        return False, [], last_reason
+
     async def _discover_rule_priority(
         self,
         client: httpx.AsyncClient,
@@ -725,44 +807,6 @@ class CloudArmorExecutor(BaseExecutor):
                     )
                 )
 
-                # Query LB logs for previewSecurityPolicy outcomes if logging adapter available on ctx
-                logging_adapter = None
-                if hasattr(ctx, "adapters") and isinstance(ctx.adapters, list):
-                    for adp in ctx.adapters:
-                        if getattr(adp, "family", "") == "logging" or "obs.query_logs_scoped" in getattr(adp, "supported_capabilities", []):
-                            logging_adapter = adp
-                            break
-
-                if logging_adapter:
-                    try:
-                        log_entries = await logging_adapter.execute_capability(
-                            "obs.query_logs_scoped",
-                            {
-                                "filter": f'jsonPayload.previewSecurityPolicy.priority="{temp_priority}"',
-                                "page_size": 20,
-                            },
-                        )
-                        if isinstance(log_entries, list) and log_entries:
-                            deny_count = sum(
-                                1
-                                for e in log_entries
-                                if isinstance(e, dict)
-                                and e.get("jsonPayload", {}).get("previewSecurityPolicy", {}).get("outcome") == "DENY"
-                            )
-                            checks.append(
-                                VerificationCheck(
-                                    check="preview_mode_lb_logs_observed",
-                                    passed=(deny_count == 0),
-                                    evidence={
-                                        "entries_count": len(log_entries),
-                                        "would_deny_count": deny_count,
-                                        "temp_priority": temp_priority,
-                                    },
-                                )
-                            )
-                    except Exception as log_err:
-                        logger.debug("Failed querying LB logs for preview rule: %s", log_err)
-
                 if not temp_ok:
                     rm_op = await self._remove_rule(client, project_id, security_policy, temp_priority, headers)
                     await self._wait_for_global_operation(client, project_id, rm_op, headers)
@@ -775,6 +819,57 @@ class CloudArmorExecutor(BaseExecutor):
                         reverted=True,
                         error=f"Temp preview rule {temp_priority} verification failed",
                     )
+
+                # Gate on preview LB logs (Plan §3.4, Verifier-Core #140)
+                logging_adapter = self._find_logging_adapter(ctx)
+                if not logging_adapter and env_mode == "gcp":
+                    # Fail closed: live preview requires logging adapter to observe outcomes
+                    rm_op = await self._remove_rule(client, project_id, security_policy, temp_priority, headers)
+                    await self._wait_for_global_operation(client, project_id, rm_op, headers)
+                    temp_priority = None
+                    return ExecutionResult(
+                        ok=False,
+                        before=before,
+                        after={},
+                        verification=checks,
+                        reverted=True,
+                        error="Preview-first rollout aborted: no logging adapter exposing 'logging.query_lb_requests' found on ctx",
+                    )
+
+                if logging_adapter:
+                    preview_passed, log_entries, reason = await self._poll_preview_logs(
+                        logging_adapter=logging_adapter,
+                        client=client,
+                        probe_url=effective_probe_url,
+                        temp_priority=temp_priority,
+                        env_mode=env_mode,
+                        timeout_s=float(args.get("preview_window_s", 300.0)),
+                        min_evaluations=int(args.get("min_preview_evaluations", 1)),
+                    )
+                    checks.append(
+                        VerificationCheck(
+                            check="preview_mode_lb_logs_observed",
+                            passed=preview_passed,
+                            evidence={
+                                "evaluations_observed": len(log_entries),
+                                "temp_priority": temp_priority,
+                                "details": reason,
+                            },
+                        )
+                    )
+                    if not preview_passed:
+                        logger.warning("Preview observation gate failed: %s; cleaning up temp rule %s", reason, temp_priority)
+                        rm_op = await self._remove_rule(client, project_id, security_policy, temp_priority, headers)
+                        await self._wait_for_global_operation(client, project_id, rm_op, headers)
+                        temp_priority = None
+                        return ExecutionResult(
+                            ok=False,
+                            before=before,
+                            after={"temp_priority": temp_priority},
+                            verification=checks,
+                            reverted=True,
+                            error=f"Preview observation gate failed: {reason}",
+                        )
 
             # Direct patch / Enforce: patch rule (priority) with new_expr and preview=False
             enforce_patch = {
