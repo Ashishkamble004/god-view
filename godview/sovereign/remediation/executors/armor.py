@@ -16,6 +16,8 @@ import os
 import re
 import socket
 import urllib.parse
+import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlparse
 
@@ -365,27 +367,43 @@ class CloudArmorExecutor(BaseExecutor):
         probe_url: str,
         real_priority: int,
         temp_priority: int,
+        t0: datetime | None,
         env_mode: str,
         timeout_s: float = 300.0,
         interval_s: float = 15.0,
-        min_evaluations: int = 1,
+        min_evaluations: int = 3,
+        min_polls: int = 2,
     ) -> tuple[bool, list[dict[str, Any]], str]:
-        """Poll LB logs during preview window to verify relaxed rule allows currently blocked traffic (Verifier-Live #144, Verifier-Core #145)."""
+        """Poll LB logs during preview window to verify relaxed rule allows currently blocked traffic (Verifier-Live #144, Verifier-Core #145, #151)."""
         is_mock = isinstance(getattr(client, "_transport", None), httpx.MockTransport)
         if env_mode == "hermetic" or is_mock:
             timeout_s = min(timeout_s, 2.0)
             interval_s = 0.05
 
         start_time = asyncio.get_running_loop().time()
-        last_reason = "No enforced DENY evaluations observed in the window"
+        last_reason = "No post-t0 enforced DENY evaluations observed in the window"
 
-        # Query entries denied by current rule (1000)
-        filter_expr = f'jsonPayload.enforcedSecurityPolicy.priority="{real_priority}"'
+        effective_t0 = t0 or datetime.now(UTC)
+        t0_iso = effective_t0.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # Tag canary probes with a unique nonce to prove edge live evaluation post-t0
+        canary_nonce = f"gv-{uuid.uuid4().hex[:8]}"
+        sep = "&" if "?" in probe_url else "?"
+        nonce_probe_url = f"{probe_url}{sep}gv={canary_nonce}"
+
+        # Query entries denied by current rule (real_priority) post-t0
+        filter_expr = (
+            f'jsonPayload.enforcedSecurityPolicy.priority="{real_priority}" AND '
+            f'timestamp>="{t0_iso}"'
+        )
+
+        poll_count = 0
 
         while True:
-            # Proactively trigger probe so current rule (real_priority) produces enforced DENY entries in LB logs
+            poll_count += 1
+            # Proactively trigger nonce probe so current rule (real_priority) produces post-t0 enforced DENY entries in LB logs
             try:
-                await client.get(probe_url, timeout=5.0)
+                await client.get(nonce_probe_url, timeout=5.0)
             except Exception:
                 pass
 
@@ -402,11 +420,22 @@ class CloudArmorExecutor(BaseExecutor):
                 if isinstance(entries, list) and entries:
                     would_be_allowed_count = 0
                     would_still_deny_count = 0
+                    nonce_confirmed = False
 
                     for e in entries:
                         if not isinstance(e, dict):
                             continue
+
+                        # Check timestamp strictly post-t0
+                        entry_ts = str(e.get("timestamp", ""))
+                        if entry_ts and entry_ts < t0_iso:
+                            continue
+
                         jp = e.get("jsonPayload", {})
+                        hr = e.get("httpRequest", {})
+                        req_url = str(jp.get("requestUrl") or hr.get("requestUrl") or "")
+                        has_nonce = canary_nonce in req_url
+
                         enforced = jp.get("enforcedSecurityPolicy", {})
                         enforced_pri = str(enforced.get("priority", jp.get("enforcedSecurityPolicyPriority", "")))
                         enforced_outcome = str(enforced.get("outcome", jp.get("enforcedSecurityPolicyOutcome", ""))).upper()
@@ -419,12 +448,23 @@ class CloudArmorExecutor(BaseExecutor):
                             else:
                                 # Temp rule with relaxed sensitivity did not match -> would be allowed!
                                 would_be_allowed_count += 1
+                                if has_nonce:
+                                    nonce_confirmed = True
 
                     if would_still_deny_count > 0:
                         return False, entries, f"Temp preview rule {temp_priority} would still DENY {would_still_deny_count} samples currently blocked by rule {real_priority}"
 
-                    if would_be_allowed_count >= min_evaluations:
-                        return True, entries, f"Observed {would_be_allowed_count} samples blocked by rule {real_priority} that would be allowed under relaxed rule {temp_priority} (0 preview DENYs)"
+                    if (
+                        would_be_allowed_count >= min_evaluations
+                        and nonce_confirmed
+                        and poll_count >= min_polls
+                    ):
+                        return (
+                            True,
+                            entries,
+                            f"Observed {would_be_allowed_count} samples (incl. verified post-t0 canary nonce '{canary_nonce}') "
+                            f"blocked by rule {real_priority} that would be allowed under relaxed rule {temp_priority} (0 preview DENYs across {poll_count} polls)",
+                        )
 
             except Exception as e:
                 logger.debug("Transient error querying preview logs: %s", e)
@@ -853,15 +893,20 @@ class CloudArmorExecutor(BaseExecutor):
                     )
 
                 if logging_adapter:
+                    # Record t0 = operation completion time plus propagation margin (~60-90s in GCP mode, 0s in hermetic/mock)
+                    margin_s = 60.0 if env_mode == "gcp" else 0.0
+                    t0 = datetime.now(UTC) + timedelta(seconds=margin_s)
                     preview_passed, log_entries, reason = await self._poll_preview_logs(
                         logging_adapter=logging_adapter,
                         client=client,
                         probe_url=effective_probe_url,
                         real_priority=priority,
                         temp_priority=temp_priority,
+                        t0=t0,
                         env_mode=env_mode,
                         timeout_s=float(args.get("preview_window_s", 300.0)),
-                        min_evaluations=int(args.get("min_preview_evaluations", 1)),
+                        min_evaluations=int(args.get("min_preview_evaluations", 3)),
+                        min_polls=int(args.get("min_preview_polls", 2)),
                     )
                     checks.append(
                         VerificationCheck(

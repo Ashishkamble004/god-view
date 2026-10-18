@@ -74,16 +74,22 @@ async def test_armor_executor_set_waf_sensitivity_preview_first_and_verify(
         ],
     }
 
+    captured_probe_urls: list[str] = []
+
     class MockLoggingAdapter:
         def capabilities(self) -> dict[str, Any]:
             return {"logging.query_lb_requests": {}}
 
         async def execute_capability(self, cap_id: str, args: dict[str, Any]) -> list[dict[str, Any]]:
-            # Enforced DENY on rule 1000 with absent previewSecurityPolicy = allowed under temp rule (Verifier #144, #145)
+            # Return post-t0 entries tagged with the canary nonce
+            latest_url = captured_probe_urls[-1] if captured_probe_urls else "https://api.example.com/test-probe"
+            now_iso = "2099-01-01T00:00:00Z"
             return [
                 {
-                    "httpRequest": {"requestUrl": "https://api.example.com/test-probe"},
+                    "timestamp": now_iso,
+                    "httpRequest": {"requestUrl": latest_url},
                     "jsonPayload": {
+                        "requestUrl": latest_url,
                         "enforcedSecurityPolicy": {
                             "name": "edge-security-policy",
                             "priority": 1000,
@@ -91,6 +97,7 @@ async def test_armor_executor_set_waf_sensitivity_preview_first_and_verify(
                         },
                     },
                 }
+                for _ in range(3)
             ]
 
     class MockContext:
@@ -142,6 +149,7 @@ async def test_armor_executor_set_waf_sensitivity_preview_first_and_verify(
 
         # probe
         if "test-probe" in url:
+            captured_probe_urls.append(url)
             return httpx.Response(422, json={"detail": "validation error"})
 
         return httpx.Response(404)
@@ -322,6 +330,105 @@ async def test_armor_executor_preview_gate_aborts_on_no_evaluations(
         async def execute_capability(self, cap_id: str, args: dict[str, Any]) -> list[dict[str, Any]]:
             # Empty list = no evaluations observed
             return []
+
+    class MockContext:
+        def __init__(self) -> None:
+            self.adapters = [MockLoggingAdapter()]
+
+    def handle_request(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if url.endswith("/securityPolicies/edge-security-policy"):
+            return httpx.Response(200, json=policy_data)
+        if "addRule" in url:
+            body = json.loads(request.content)
+            temp_rules[body["priority"]] = body
+            return httpx.Response(200, json={"status": "DONE", "name": "op-add"})
+        if "removeRule" in url:
+            parsed = urllib.parse.urlsplit(url)
+            qs = urllib.parse.parse_qs(parsed.query)
+            pri = int(qs["priority"][0])
+            removed_rules.append(pri)
+            temp_rules.pop(pri, None)
+            return httpx.Response(200, json={"status": "DONE", "name": "op-rm"})
+        if "getRule" in url:
+            parsed = urllib.parse.urlsplit(url)
+            qs = urllib.parse.parse_qs(parsed.query)
+            pri = int(qs["priority"][0])
+            if pri == 1000:
+                return httpx.Response(200, json=rule_state)
+            if pri in temp_rules:
+                return httpx.Response(200, json=temp_rules[pri])
+            return httpx.Response(404)
+        if "patchRule" in url:
+            body = json.loads(request.content)
+            patch_history.append(body)
+            return httpx.Response(200, json=rule_state)
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handle_request)
+    async with httpx.AsyncClient(transport=transport) as mock_client:
+        executor = CloudArmorExecutor(http_client=mock_client)
+
+        result = await executor.set_waf_sensitivity(
+            ctx=MockContext(),
+            args={
+                "project_id": "proj-test",
+                "security_policy": "edge-security-policy",
+                "priority": 1000,
+                "sensitivity": 1,
+                "preview_first": True,
+                "probe_url": "https://api.example.com/test-probe",
+            },
+            target_resource="edge-security-policy",
+        )
+
+        assert result.ok is False
+        assert result.reverted is True
+        assert "preview observation gate failed" in result.error.lower()
+        # Real rule was NEVER touched
+        assert len(patch_history) == 0
+        # Temp preview rule was cleaned up
+        assert removed_rules == [900]
+
+
+@pytest.mark.unit
+async def test_armor_executor_preview_gate_aborts_on_pre_t0_stale_logs(
+    remediation_fixtures: dict[str, Any],
+) -> None:
+    """Verifier-core #151: preview gate must abort without patching real rule if only pre-t0 stale denies exist."""
+    ca_fixture = remediation_fixtures["cloud_armor"]
+    rule_state = dict(ca_fixture["rule_1000"])
+    temp_rules: dict[int, dict[str, Any]] = {}
+    patch_history: list[dict[str, Any]] = []
+    removed_rules: list[int] = []
+
+    policy_data = {
+        "name": "edge-security-policy",
+        "rules": [
+            {"priority": 100, "action": "deny(403)", "description": "emergency kill switch", "match": {"versionedExpr": "SRC_IPS_V1", "config": {"srcIpRanges": ["*"]}}},
+            rule_state,
+        ],
+    }
+
+    class MockLoggingAdapter:
+        def capabilities(self) -> dict[str, Any]:
+            return {"logging.query_lb_requests": {}}
+
+        async def execute_capability(self, cap_id: str, args: dict[str, Any]) -> list[dict[str, Any]]:
+            # Pre-t0 stale entries (year 2020) that predate t0
+            return [
+                {
+                    "timestamp": "2020-01-01T00:00:00Z",
+                    "httpRequest": {"requestUrl": "https://api.example.com/test-probe"},
+                    "jsonPayload": {
+                        "enforcedSecurityPolicy": {
+                            "name": "edge-security-policy",
+                            "priority": 1000,
+                            "outcome": "DENY",
+                        },
+                    },
+                }
+            ]
 
     class MockContext:
         def __init__(self) -> None:
