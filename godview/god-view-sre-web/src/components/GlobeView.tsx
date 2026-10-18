@@ -1115,52 +1115,54 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
           <div className="relative h-full w-full" data-testid="globe-3d-canvas">
             <canvas ref={canvasRef} className="h-full w-full block" />
 
-            {/* Stage Overlay: TierFilter Floating Pill (Top-Left) */}
-            <div className="absolute top-4 left-6 z-20 flex flex-wrap items-center gap-1.5 rounded-full border border-slate-700/50 bg-[#081a33]/90 px-3 py-1.5 shadow-xl backdrop-blur-md">
-              <span className="mr-1 text-[11px] font-semibold text-slate-400">
-                Tiers
-              </span>
-              {(
-                ['edge', 'compute', 'data', 'messaging', 'platform'] as TopologyTier[]
-              ).map((tier) => {
-                const active = activeTierFilters.has(tier);
-                return (
-                  <button
-                    key={tier}
-                    onClick={() => toggleTierFilter(tier)}
-                    className={`flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs transition ${
-                      active
-                        ? 'bg-blue-600 font-semibold text-white shadow-sm'
-                        : 'bg-slate-800/80 text-slate-300 hover:bg-slate-700 hover:text-white'
-                    }`}
-                  >
-                    <span
-                      className="h-1.5 w-1.5 rounded-full"
-                      style={{ backgroundColor: TIER_COLORS[tier] }}
-                    />
-                    <span className="capitalize">{tier}</span>
-                  </button>
-                );
-              })}
-            </div>
-
-            {/* Stage Overlay: Active Journey Filter Pill (Top-Center, stacked below tier chips) */}
-            {activeJourney && (
-              <div className="absolute top-14 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 rounded-full border border-amber-500/60 bg-[#1f1600]/90 px-4 py-1.5 text-xs text-amber-200 shadow-xl backdrop-blur-md">
-                <Compass className="h-3.5 w-3.5 text-amber-400 animate-spin" />
-                <span>
-                  Journey path:{' '}
-                  <strong className="text-white">{activeJourney}</strong>
+            {/* Stage Overlay: TierFilter & Active Journey Floating Pills (Top-Left, Clear of Globe Nodes) */}
+            <div className="absolute top-4 left-6 z-20 flex flex-wrap items-center gap-2">
+              <div className="flex flex-wrap items-center gap-1.5 rounded-full border border-slate-700/50 bg-[#081a33]/90 px-3 py-1.5 shadow-xl backdrop-blur-md">
+                <span className="mr-1 text-[11px] font-semibold text-slate-400">
+                  Tiers
                 </span>
-                <button
-                  onClick={() => setActiveJourney(null)}
-                  className="rounded-full p-0.5 hover:bg-amber-900/60 text-amber-300"
-                  title="Clear Journey Filter"
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
+                {(
+                  ['edge', 'compute', 'data', 'messaging', 'platform'] as TopologyTier[]
+                ).map((tier) => {
+                  const active = activeTierFilters.has(tier);
+                  return (
+                    <button
+                      key={tier}
+                      onClick={() => toggleTierFilter(tier)}
+                      className={`flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs transition ${
+                        active
+                          ? 'bg-blue-600 font-semibold text-white shadow-sm'
+                          : 'bg-slate-800/80 text-slate-300 hover:bg-slate-700 hover:text-white'
+                      }`}
+                    >
+                      <span
+                        className="h-1.5 w-1.5 rounded-full"
+                        style={{ backgroundColor: TIER_COLORS[tier] }}
+                      />
+                      <span className="capitalize">{tier}</span>
+                    </button>
+                  );
+                })}
               </div>
-            )}
+
+              {/* Stage Overlay: Active Journey Filter Pill (Inline Top-Left, High Contrast, Zero Occlusion) */}
+              {activeJourney && (
+                <div className="flex items-center gap-2 rounded-full border border-amber-500/70 bg-[#1f1600]/95 px-3.5 py-1.5 text-xs text-amber-200 shadow-xl backdrop-blur-md">
+                  <Compass className="h-3.5 w-3.5 text-amber-400 animate-spin" />
+                  <span className="text-amber-100 font-medium">
+                    <span className="text-amber-300 font-normal">Journey:</span>{' '}
+                    <strong className="text-white font-semibold">{activeJourney}</strong>
+                  </span>
+                  <button
+                    onClick={() => setActiveJourney(null)}
+                    className="rounded-full p-0.5 hover:bg-amber-900/60 text-amber-300 hover:text-white transition"
+                    title="Clear Journey Filter"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              )}
+            </div>
 
             {/* Stage Overlay: Floating IncidentBanner (Bottom-Right, Clear Above MapControls) */}
             {activeIncidentsCount != null && activeIncidentsCount > 0 && !incidentBannerDismissed && (

@@ -75,7 +75,7 @@ describe('God-View Cockpit (URL 3)', () => {
     expect(screen.getAllByText(/8,640/).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/0\.4%/).length).toBeGreaterThan(0);
     expect(
-      screen.getByText(/allocation decision requires a resource allocation ratio/i)
+      screen.getByText(/dispatch decision requires an active client rate limit/i)
     ).toBeInTheDocument();
   });
 
@@ -292,5 +292,29 @@ describe('God-View Cockpit (URL 3)', () => {
     render(<App />);
     expect(await screen.findByText(/Sovereign control plane unreachable/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Retry Connection/i })).toBeInTheDocument();
+  });
+
+  it('renders graceful per-slice telemetry not measured cards when /court or /chaos/drills fail', async () => {
+    resetMockCockpitState(42);
+    server.use(
+      http.get('/api/v1/court', () =>
+        HttpResponse.json({ error: 'Internal server error' }, { status: 500 })
+      ),
+      http.get('/api/v1/chaos/drills', () =>
+        HttpResponse.json({ error: 'Internal server error' }, { status: 500 })
+      )
+    );
+
+    window.location.hash = '#organism';
+    const { unmount } = render(<App />);
+
+    expect(await screen.findByText(/Court Telemetry Not Measured Yet/i)).toBeInTheDocument();
+
+    unmount();
+    window.location.hash = '#controls';
+    render(<App />);
+
+    expect(await screen.findByText(/Chaos Drills Telemetry Not Measured Yet/i)).toBeInTheDocument();
+    expect(screen.getByText(/Traffic & Autonomy Kill Switch/i)).toBeInTheDocument();
   });
 });

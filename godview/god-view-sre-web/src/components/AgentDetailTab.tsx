@@ -37,22 +37,8 @@ export const AgentDetailTab: React.FC<AgentDetailTabProps> = ({
   onControlAgent,
   busyKey,
 }) => {
-  if (!agents || agents.length === 0) {
-    return (
-      <Card className="p-8 text-center">
-        <AlertTriangle className="mx-auto h-8 w-8 text-amber-500" />
-        <h3 className="mt-3 text-base font-semibold text-slate-900">
-          Agent Telemetry Not Measured Yet
-        </h3>
-        <p className="mt-1 text-xs text-slate-500 max-w-md mx-auto">
-          The Sovereign control plane <code>/api/v1/court</code> endpoint returned no data or is currently unreachable.
-        </p>
-      </Card>
-    );
-  }
-
   const activeAgent =
-    agents.find((a) => a.id === selectedAgentId) ?? agents[0] ?? null;
+    agents?.find((a) => a.id === selectedAgentId) ?? agents?.[0] ?? null;
 
   const [harnessData, setHarnessData] = useState<HarnessTreeResponse | null>(null);
   const [harnessLoading, setHarnessLoading] = useState<boolean>(false);
@@ -81,6 +67,33 @@ export const AgentDetailTab: React.FC<AgentDetailTabProps> = ({
       cancelled = true;
     };
   }, [activeAgent?.id]);
+
+  if (!agents) {
+    return (
+      <Card className="p-8 text-center">
+        <AlertTriangle className="mx-auto h-8 w-8 text-amber-500" />
+        <h3 className="mt-3 text-base font-semibold text-slate-900">
+          Agent Telemetry Not Measured Yet
+        </h3>
+        <p className="mt-1 text-xs text-slate-500 max-w-md mx-auto">
+          The Sovereign control plane <code>/api/v1/court</code> endpoint returned no data or is currently unreachable.
+        </p>
+      </Card>
+    );
+  }
+
+  if (agents.length === 0) {
+    return (
+      <Card className="p-8 text-center">
+        <h3 className="mt-3 text-base font-semibold text-slate-900">
+          No Court Agents Configured
+        </h3>
+        <p className="mt-1 text-xs text-slate-500 max-w-md mx-auto">
+          There are currently no active court agents registered in the Sovereign control plane.
+        </p>
+      </Card>
+    );
+  }
 
   if (!activeAgent) {
     return (

@@ -49,6 +49,13 @@ export const InvariantsTab: React.FC<InvariantsTabProps> = ({
   onCompileSentinel,
   busyKey,
 }) => {
+  const [statusFilter, setStatusFilter] = useState<'all' | InvariantStatus>(
+    'all'
+  );
+  const [selectedId, setSelectedId] = useState<string>(
+    invariants?.[0]?.id ?? ''
+  );
+
   if (!invariants) {
     return (
       <Card className="p-8 text-center">
@@ -64,12 +71,6 @@ export const InvariantsTab: React.FC<InvariantsTabProps> = ({
   }
 
   const safeSentinels = sentinels || [];
-  const [statusFilter, setStatusFilter] = useState<'all' | InvariantStatus>(
-    'all'
-  );
-  const [selectedId, setSelectedId] = useState<string>(
-    invariants[0]?.id ?? ''
-  );
 
   const filtered =
     statusFilter === 'all'

@@ -37,6 +37,8 @@ export const ApprovalsTab: React.FC<ApprovalsTabProps> = ({
   onSelectAgent,
   busyKey,
 }) => {
+  const [filter, setFilter] = useState<'all' | ApprovalDecisionStatus>('all');
+
   if (!approvals) {
     return (
       <Card className="p-8 text-center">
@@ -50,8 +52,6 @@ export const ApprovalsTab: React.FC<ApprovalsTabProps> = ({
       </Card>
     );
   }
-
-  const [filter, setFilter] = useState<'all' | ApprovalDecisionStatus>('all');
 
   const filtered =
     filter === 'all'

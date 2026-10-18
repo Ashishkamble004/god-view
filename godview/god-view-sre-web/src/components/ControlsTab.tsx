@@ -65,8 +65,9 @@ export const ControlsTab: React.FC<ControlsTabProps> = ({
   }
 
   const op = perceive.operator_state;
-  const businessDrills = drills.filter((d) => d.fault_class === 'BUSINESS');
-  const infraDrills = drills.filter((d) => d.fault_class === 'INFRA');
+  const safeDrills = drills || [];
+  const businessDrills = safeDrills.filter((d) => d.fault_class === 'BUSINESS');
+  const infraDrills = safeDrills.filter((d) => d.fault_class === 'INFRA');
 
   const renderDrillAction = (drill: ChaosDrill) => {
     const isBusy = busyKey === `drill:${drill.drill_id}`;
@@ -301,7 +302,7 @@ export const ControlsTab: React.FC<ControlsTabProps> = ({
               }
             />
             <p className="mt-2.5 text-xs text-slate-600">
-              Scales GKE deployments to 0, stops settlement VM, sets Cloud SQL <code className="font-mono">activation_policy=NEVER</code>, and throttles sentinels to 60s. Wake takes ~5–8 min.
+              Scales GKE deployments to 0, stops batch worker VM, sets Cloud SQL <code className="font-mono">activation_policy=NEVER</code>, and throttles sentinels to 60s. Wake takes ~5–8 min.
             </p>
           </div>
           <div className="mt-4 flex items-center gap-2">
@@ -370,96 +371,110 @@ export const ControlsTab: React.FC<ControlsTabProps> = ({
 
       {/* Opt-In Chaos Drills (5 Business-Logic + 3 Infra) */}
       <div className="grid grid-cols-1 items-start gap-6 xl:grid-cols-12">
-        <Card className="p-4 xl:col-span-7">
-          <SectionHeader
-            title="Business-Logic Chaos Drills (5 Drills — Infra Golden Signals Stay Healthy)"
-            subtitle="Opt-in proving-ground drills proving God-View catches silent business corruption while HTTP 200 and P95 stay green"
-          />
-          <div className="mt-3 space-y-3">
-            {businessDrills.map((drill) => (
-              <div
-                key={drill.drill_id}
-                className="rounded border border-slate-200 bg-slate-50 p-3.5 text-xs"
-              >
-                <div className="flex flex-wrap items-start justify-between gap-2">
-                  <div>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-semibold text-slate-900">
-                        {drill.title}
-                      </span>
-                      <Badge variant="success">Infra signals: healthy</Badge>
-                      <Badge variant="outline" className="num-tabular">
-                        Target {drill.mttd_target}
-                      </Badge>
-                      {drill.is_active && (
-                        <Badge variant="warning" dot>
-                          Active drill
-                        </Badge>
-                      )}
+        {!drills ? (
+          <Card className="p-8 text-center xl:col-span-12">
+            <AlertTriangle className="mx-auto h-8 w-8 text-amber-500" />
+            <h3 className="mt-3 text-base font-semibold text-slate-900">
+              Chaos Drills Telemetry Not Measured Yet
+            </h3>
+            <p className="mt-1 text-xs text-slate-500 max-w-md mx-auto">
+              The Sovereign control plane <code>/api/v1/chaos/drills</code> endpoint returned no data or is currently unreachable.
+            </p>
+          </Card>
+        ) : (
+          <>
+            <Card className="p-4 xl:col-span-7">
+              <SectionHeader
+                title="Business-Logic Chaos Drills (5 Drills — Infra Golden Signals Stay Healthy)"
+                subtitle="Opt-in proving-ground drills proving God-View catches silent business corruption while HTTP 200 and P95 stay green"
+              />
+              <div className="mt-3 space-y-3">
+                {businessDrills.map((drill) => (
+                  <div
+                    key={drill.drill_id}
+                    className="rounded border border-slate-200 bg-slate-50 p-3.5 text-xs"
+                  >
+                    <div className="flex flex-wrap items-start justify-between gap-2">
+                      <div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-semibold text-slate-900">
+                            {drill.title}
+                          </span>
+                          <Badge variant="success">Infra signals: healthy</Badge>
+                          <Badge variant="outline" className="num-tabular">
+                            Target {drill.mttd_target}
+                          </Badge>
+                          {drill.is_active && (
+                            <Badge variant="warning" dot>
+                              Active drill
+                            </Badge>
+                          )}
+                        </div>
+                        <p className="mt-1 font-mono text-slate-600">
+                          id: {drill.drill_id} · target: {drill.target_service}
+                        </p>
+                        <p className="mt-1 text-slate-700">
+                          Expected Detection: {drill.expected_detection}
+                        </p>
+                      </div>
+
+                      <div>{renderDrillAction(drill)}</div>
                     </div>
-                    <p className="mt-1 font-mono text-slate-600">
-                      id: {drill.drill_id} · target: {drill.target_service}
-                    </p>
-                    <p className="mt-1 text-slate-700">
-                      Expected Detection: {drill.expected_detection}
-                    </p>
                   </div>
-
-                  <div>{renderDrillAction(drill)}</div>
-                </div>
+                ))}
               </div>
-            ))}
-          </div>
-        </Card>
+            </Card>
 
-        <Card className="p-4 xl:col-span-5">
-          <SectionHeader
-            title="Infrastructure & Fate-Isolation Drills (3 Drills)"
-            subtitle="Validates L3 autonomous remediation and Sovereign fate isolation"
-          />
-          <div className="mt-3 space-y-3">
-            {infraDrills.map((drill) => (
-              <div
-                key={drill.drill_id}
-                className="rounded border border-slate-200 bg-slate-50 p-3.5 text-xs"
-              >
-                <div className="flex flex-wrap items-start justify-between gap-2">
-                  <div>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-semibold text-slate-900">
-                        {drill.title}
-                      </span>
-                      <Badge
-                        variant={
-                          drill.infra_golden_signals === 'red'
-                            ? 'danger'
-                            : 'success'
-                        }
-                      >
-                        {drill.infra_golden_signals === 'red'
-                          ? 'Infra signals: degraded'
-                          : 'Infra signals: healthy'}
-                      </Badge>
-                      {drill.is_active && (
-                        <Badge variant="warning" dot>
-                          Active drill
-                        </Badge>
-                      )}
+            <Card className="p-4 xl:col-span-5">
+              <SectionHeader
+                title="Infrastructure & Fate-Isolation Drills (3 Drills)"
+                subtitle="Validates L3 autonomous remediation and Sovereign fate isolation"
+              />
+              <div className="mt-3 space-y-3">
+                {infraDrills.map((drill) => (
+                  <div
+                    key={drill.drill_id}
+                    className="rounded border border-slate-200 bg-slate-50 p-3.5 text-xs"
+                  >
+                    <div className="flex flex-wrap items-start justify-between gap-2">
+                      <div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-semibold text-slate-900">
+                            {drill.title}
+                          </span>
+                          <Badge
+                            variant={
+                              drill.infra_golden_signals === 'red'
+                                ? 'danger'
+                                : 'success'
+                            }
+                          >
+                            {drill.infra_golden_signals === 'red'
+                              ? 'Infra signals: degraded'
+                              : 'Infra signals: healthy'}
+                          </Badge>
+                          {drill.is_active && (
+                            <Badge variant="warning" dot>
+                              Active drill
+                            </Badge>
+                          )}
+                        </div>
+                        <p className="mt-1 font-mono text-slate-600">
+                          id: {drill.drill_id} · target: {drill.target_service}
+                        </p>
+                        <p className="mt-1 text-slate-700">
+                          {drill.expected_detection} ({drill.mttd_target})
+                        </p>
+                      </div>
+
+                      <div>{renderDrillAction(drill)}</div>
                     </div>
-                    <p className="mt-1 font-mono text-slate-600">
-                      id: {drill.drill_id} · target: {drill.target_service}
-                    </p>
-                    <p className="mt-1 text-slate-700">
-                      {drill.expected_detection} ({drill.mttd_target})
-                    </p>
                   </div>
-
-                  <div>{renderDrillAction(drill)}</div>
-                </div>
+                ))}
               </div>
-            ))}
-          </div>
-        </Card>
+            </Card>
+          </>
+        )}
       </div>
     </div>
   );

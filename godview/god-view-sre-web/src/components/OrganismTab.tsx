@@ -86,10 +86,23 @@ export const OrganismTab: React.FC<OrganismTabProps> = ({
     );
   }
 
-  const safeCourt = court || [];
-  const warmCount = safeCourt.filter((a) => a.warmth_min_instances === 1).length;
-  const totalTokensToday = safeCourt.reduce((acc, a) => acc + a.tokens_spent_today, 0);
-  const totalAgentUsdToday = safeCourt.reduce(
+  if (!court) {
+    return (
+      <Card className="p-8 text-center">
+        <AlertTriangle className="mx-auto h-8 w-8 text-amber-500" />
+        <h3 className="mt-3 text-base font-semibold text-slate-900">
+          Court Telemetry Not Measured Yet
+        </h3>
+        <p className="mt-1 text-xs text-slate-500 max-w-md mx-auto">
+          The Sovereign control plane <code>/api/v1/court</code> endpoint returned no data or is currently unreachable.
+        </p>
+      </Card>
+    );
+  }
+
+  const warmCount = court.filter((a) => a.warmth_min_instances === 1).length;
+  const totalTokensToday = court.reduce((acc, a) => acc + a.tokens_spent_today, 0);
+  const totalAgentUsdToday = court.reduce(
     (acc, a) => acc + a.tokens_spent_today_usd,
     0
   );
@@ -143,10 +156,10 @@ export const OrganismTab: React.FC<OrganismTabProps> = ({
               <span className="text-xs text-slate-500">
                 Spawned Court &amp; Warmth
               </span>
-              <Badge variant="secondary">{safeCourt.length} agents</Badge>
+              <Badge variant="secondary">{court.length} agents</Badge>
             </div>
             <p className="mt-2 text-xl font-semibold text-slate-900 num-tabular">
-              {warmCount} Warm / {safeCourt.length - warmCount} Cold
+              {warmCount} Warm / {court.length - warmCount} Cold
             </p>
           </div>
           <p className="mt-2 text-xs text-slate-600">
@@ -380,7 +393,7 @@ export const OrganismTab: React.FC<OrganismTabProps> = ({
 
               {AGENT_TYPES_ORDER.map((typeKey) => {
                 const meta = AGENT_TYPE_META[typeKey];
-                const agentsOfType = safeCourt.filter((a) => a.agent_type === typeKey);
+                const agentsOfType = court.filter((a) => a.agent_type === typeKey);
                 const primaryAgent = agentsOfType[0];
                 const isWarm = agentsOfType.some(
                   (a) => a.warmth_min_instances === 1
@@ -512,7 +525,13 @@ export const OrganismTab: React.FC<OrganismTabProps> = ({
         />
 
         <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-2">
-          {court.map((agent) => {
+          {court.length === 0 ? (
+            <Card className="p-8 text-center lg:col-span-2">
+              <h4 className="text-sm font-semibold text-slate-700">No Court Agents Configured</h4>
+              <p className="mt-1 text-xs text-slate-500">The estate has no active court agents registered in the Sovereign control plane.</p>
+            </Card>
+          ) : (
+            court.map((agent) => {
             const pctSpent = Math.min(
               100,
               Math.round(
@@ -693,7 +712,7 @@ export const OrganismTab: React.FC<OrganismTabProps> = ({
                 </div>
               </Card>
             );
-          })}
+          }))}
         </div>
       </div>
 
