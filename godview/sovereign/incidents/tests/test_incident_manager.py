@@ -313,3 +313,47 @@ async def test_honest_evidence_pack_and_zero_fake_defaults() -> None:
     assert evp_dict["recall"]["episodic"] == []
     assert evp_dict["recall"]["skills"] == []
     assert inc.symptom_embedding is None
+
+
+@pytest.mark.unit
+async def test_llm_client_embed_signature_unwrapping() -> None:
+    """Verifies that LlmClient.embed(texts: Sequence[str]) -> list[list[float]] unwraps to 1D list[float] on IncidentDoc."""
+    fs = InMemoryFirestore()
+    now = datetime(2026, 10, 17, 12, 0, 0, tzinfo=UTC)
+
+    dummy_vector = [0.1] * 768
+
+    class FakeLlmClient:
+        def __init__(self) -> None:
+            self.calls: list[Any] = []
+
+        async def embed(self, texts: list[str]) -> list[list[float]]:
+            self.calls.append(texts)
+            # True LlmClient.embed signature: accepts list of strings, returns list of vectors
+            assert isinstance(texts, list)
+            assert all(isinstance(t, str) for t in texts)
+            return [dummy_vector for _ in texts]
+
+    fake_llm = FakeLlmClient()
+
+    class MockContext:
+        def __init__(self) -> None:
+            self.llm = fake_llm
+
+    mgr = IncidentManager(firestore=fs, ctx=MockContext())
+    snt = _make_dummy_sentinel(source_ref="svc-test")
+    eval_b = SentinelEvaluation(
+        observed=1.0,
+        breached=True,
+        signature="waf_anomaly",
+        resource_id="svc-test",
+    )
+
+    inc, opened = await mgr.record_breach(snt, eval_b, now)
+    assert opened is True
+    assert inc.symptom_embedding == dummy_vector
+    assert isinstance(inc.symptom_embedding, list)
+    assert isinstance(inc.symptom_embedding[0], float)
+    # Ensure embed was called with list[str], not raw str
+    assert len(fake_llm.calls) >= 1
+    assert isinstance(fake_llm.calls[0], list)

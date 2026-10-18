@@ -573,3 +573,116 @@ async def test_t2_asset_discovery_from_api_response() -> None:
     assert res.breached is True
     assert res.signature == "probe_asset_404"
     assert "/assets/catalog/sample.png" in res.resource_id
+
+
+@pytest.mark.unit
+async def test_compile_universal_sentinels_with_lb_frontend_and_env_id() -> None:
+    """Verifies that compile_universal_sentinels extracts env_id, generates host-specific sentinels, and rejects private IPs."""
+    services = [
+        DiscoveredServiceDoc(
+            name="fe-ingress-rule",
+            kind="lb_frontend",
+            env_id="cloud-prod-env",
+            adapter_family="gcp",
+            locator="http://192.168.1.5",
+            routes=[
+                {"host": "api.example.com", "path": "/*"},
+                {"host": "app.example.com", "path": "/*"},
+                {"host": "192.168.1.5", "path": "/*"},
+                {"host": "compute.googleapis.com", "path": "/*"},
+            ],
+            first_seen="2026-10-17T00:00:00Z",
+            last_seen="2026-10-17T12:00:00Z",
+        ),
+        DiscoveredServiceDoc(
+            name="edge-waf-policy",
+            kind="security_policy",
+            env_id="cloud-prod-env",
+            adapter_family="gcp",
+            locator="projects/test/global/securityPolicies/edge-waf-policy",
+            first_seen="2026-10-17T00:00:00Z",
+            last_seen="2026-10-17T12:00:00Z",
+        ),
+        DiscoveredServiceDoc(
+            name="compute-worker",
+            kind="cloud_run",
+            env_id="cloud-prod-env",
+            adapter_family="gcp",
+            locator="projects/test/locations/us-central1/services/compute-worker",
+            first_seen="2026-10-17T00:00:00Z",
+            last_seen="2026-10-17T12:00:00Z",
+        ),
+    ]
+
+    compiled = compile_universal_sentinels(services)
+
+    # 1. Target agent ID must reflect discovered env_id
+    lb_sentinels = [s for s in compiled if s.sentinel_class == "lb_requests"]
+    assert len(lb_sentinels) >= 2
+    for s in lb_sentinels:
+        assert s.target_agent_id == "platform__cloud-prod-env"
+
+    # 2. Security policy sentinel has policy filter
+    policy_snt = next(s for s in lb_sentinels if "edge-waf-policy" in s.sentinel_id)
+    assert policy_snt.check.spec.get("security_policy") == "edge-waf-policy"
+
+    # 3. Frontend produces per-host LB request sentinels
+    fe_host_snts = [s for s in lb_sentinels if s.check.spec.get("host") in ("api.example.com", "app.example.com")]
+    assert len(fe_host_snts) == 2
+
+    # 4. Probes MUST include public hosts and MUST NOT include private IP or googleapis.com
+    probe_sentinels = [s for s in compiled if s.sentinel_class == "probe"]
+    probe_urls = {s.source_ref for s in probe_sentinels}
+    assert "https://api.example.com/" in probe_urls
+    assert "https://app.example.com/" in probe_urls
+    assert not any("192.168.1.5" in u for u in probe_urls)
+    assert not any("googleapis.com" in u for u in probe_urls)
+
+    # 5. Cloud Run posture sentinel has no opinionated baseline
+    posture_worker = next(s for s in compiled if s.sentinel_id == "snt-posture-compute-worker")
+    assert posture_worker.check.spec.get("baseline") == {}
+
+
+@pytest.mark.unit
+async def test_golden_signals_dict_metric_points() -> None:
+    """Verifies that GoldenSignalsEvaluator handles Cloud Monitoring dict point structures."""
+    invoker = CapabilityInvoker()
+
+    # Cloud Monitoring timeseries returning dict values for doubleValue and int64Value
+    mock_ts = [
+        {
+            "metric": {"type": "run.googleapis.com/request_latencies"},
+            "points": [{"value": {"doubleValue": 7200.0}}],
+        },
+        {
+            "metric": {
+                "type": "run.googleapis.com/request_count",
+                "labels": {"response_code_class": "5xx"},
+            },
+            "points": [{"value": {"int64Value": "50"}}],
+        },
+        {
+            "metric": {
+                "type": "run.googleapis.com/request_count",
+                "labels": {"response_code_class": "2xx"},
+            },
+            "points": [{"value": {"int64Value": "50"}}],
+        },
+    ]
+
+    invoker.register_handler("monitoring.query_timeseries", lambda args: mock_ts)
+    ctx = EvaluatorContext(invoker=invoker)
+
+    snt = build_golden_signals_sentinel(
+        "compute-worker",
+        p95_threshold_ms=5000.0,
+        error_rate_threshold=0.05,
+    )
+    evaluator = get_evaluator("golden_signals")
+    res = await evaluator.evaluate(snt, ctx)
+
+    assert res.breached is True
+    assert res.observed == 7200.0
+    assert res.details.get("error_count_5xx") == 50
+    assert res.details.get("total_requests") == 100
+    assert res.details.get("error_rate") == 0.5

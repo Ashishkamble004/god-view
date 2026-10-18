@@ -72,6 +72,9 @@ class LbRequestsEvaluator(BaseSentinelEvaluator):
         window_s = sentinel.check.window_s or sentinel.wake_condition.window_s or 300
         host_filter = spec.get("host")
         path_prefix = spec.get("path_prefix")
+        policy_filter = spec.get("security_policy")
+        if not policy_filter and "policy" in sentinel.source_ref.lower():
+            policy_filter = sentinel.source_ref
         ratio_threshold = spec.get("error_ratio_threshold", 0.05)
         min_denies = spec.get("min_denies", 1)
 
@@ -79,6 +82,8 @@ class LbRequestsEvaluator(BaseSentinelEvaluator):
         filter_parts = ['resource.type="http_load_balancer"']
         if host_filter:
             filter_parts.append(f'httpRequest.requestUrl:"{host_filter}"')
+        elif policy_filter:
+            filter_parts.append(f'jsonPayload.enforcedSecurityPolicy.name="{policy_filter}"')
         filter_str = " AND ".join(filter_parts)
 
         # 1. Query general LB requests via capability (window_s lookback, no 1h stale block)
@@ -109,6 +114,8 @@ class LbRequestsEvaluator(BaseSentinelEvaluator):
         ]
         if host_filter:
             deny_filter_parts.append(f'httpRequest.requestUrl:"{host_filter}"')
+        elif policy_filter:
+            deny_filter_parts.append(f'jsonPayload.enforcedSecurityPolicy.name="{policy_filter}"')
         deny_filter_str = " AND ".join(deny_filter_parts)
 
         deny_entries = await ctx.invoke_capability(
@@ -180,15 +187,18 @@ class LbRequestsEvaluator(BaseSentinelEvaluator):
             ua_lower = ip_uas.get(ip, "").lower()
 
             is_scanner = False
-            # R6 scanner rules
+            # R6 scanner rules: scanner scans >= 20 distinct paths with high miss ratio,
+            # or uses known scanner tools, or probes dotfiles/traversal
             if len(paths) >= 20 and (miss_count / max(1, len(statuses))) >= 0.5:
-                is_scanner = True
-            elif len(statuses) >= 20 and (miss_count / max(1, len(statuses))) >= 0.9:
                 is_scanner = True
             elif any(ua_pat in ua_lower for ua_pat in SCANNER_UA_SUBSTRINGS):
                 is_scanner = True
             elif any(any(t_pat in p for t_pat in TRAVERSAL_PATH_PATTERNS) for p in paths):
                 is_scanner = True
+
+            # If client hits <= 3 paths without scanner UA/traversal, do not treat as scanner
+            if is_scanner and len(paths) <= 3 and not any(ua_pat in ua_lower for ua_pat in SCANNER_UA_SUBSTRINGS):
+                is_scanner = False
 
             if is_scanner:
                 scanner_ips.add(ip)
@@ -198,16 +208,35 @@ class LbRequestsEvaluator(BaseSentinelEvaluator):
         canary_transcript: dict[str, Any] | None = None
         target_canary_host = host_filter
         if not target_canary_host and combined_entries:
-            first_url = str(
-                (combined_entries[0].get("httpRequest") or {}).get("requestUrl")
-                or (combined_entries[0].get("jsonPayload") or {}).get("url")
-                or ""
-            )
-            if first_url:
-                try:
-                    target_canary_host = urlparse(first_url).hostname
-                except Exception:
-                    pass
+            for e in combined_entries:
+                u = str(
+                    (e.get("httpRequest") or {}).get("requestUrl")
+                    or (e.get("jsonPayload") or {}).get("url")
+                    or ""
+                )
+                if u:
+                    try:
+                        h = urlparse(u).hostname
+                        if (
+                            h
+                            and not h.startswith(("10.", "172.", "192.168.", "127.", "0."))
+                            and not h.replace(".", "").isdigit()
+                        ):
+                            target_canary_host = h
+                            break
+                    except Exception:
+                        pass
+            if not target_canary_host:
+                first_url = str(
+                    (combined_entries[0].get("httpRequest") or {}).get("requestUrl")
+                    or (combined_entries[0].get("jsonPayload") or {}).get("url")
+                    or ""
+                )
+                if first_url:
+                    try:
+                        target_canary_host = urlparse(first_url).hostname
+                    except Exception:
+                        pass
 
         if target_canary_host:
             canary_url = f"https://{target_canary_host}/?a=b-c-d"
@@ -322,15 +351,15 @@ class LbRequestsEvaluator(BaseSentinelEvaluator):
                     legit_item += 1.0
 
                 if is_contract and size_ok and has_sess:
-                    legit_item += 0.6
+                    legit_item += 0.8
                 elif is_contract and size_ok:
-                    legit_item += 0.4
+                    legit_item += 0.6
 
                 if is_cb:
                     legit_item += 0.8
 
                 if specificity == "low":
-                    legit_item += 0.3
+                    legit_item += 0.4
                 elif specificity == "high":
                     attack_item += 0.5
 

@@ -79,27 +79,42 @@ class IncidentManager:
 
     async def _get_embedding(self, text: str) -> list[float] | None:
         """Return embedding vector from ctx.llm or provided embed_fn; otherwise None."""
+        def _unwrap(val: Any) -> list[float] | None:
+            if isinstance(val, list) and val:
+                if isinstance(val[0], list):
+                    try:
+                        return [float(x) for x in val[0]]
+                    except (TypeError, ValueError):
+                        return None
+                if isinstance(val[0], (int, float)):
+                    try:
+                        return [float(x) for x in val]
+                    except (TypeError, ValueError):
+                        return None
+            return None
+
         if self._embed_fn is not None:
             try:
                 res = self._embed_fn(text)
                 if inspect.isawaitable(res):
-                    return await res
-                return res
+                    res = await res
+                return _unwrap(res)
             except Exception:
                 return None
         llm = getattr(self._ctx, "llm", None)
         if llm is not None:
             if hasattr(llm, "embed"):
                 try:
-                    res = llm.embed(text)
+                    res = llm.embed([text])
                     if inspect.isawaitable(res):
-                        return await res
-                    return res
+                        res = await res
+                    return _unwrap(res)
                 except Exception:
                     return None
             elif hasattr(llm, "embed_sync"):
                 try:
-                    return llm.embed_sync(text)
+                    res = llm.embed_sync([text])
+                    return _unwrap(res)
                 except Exception:
                     return None
         return None

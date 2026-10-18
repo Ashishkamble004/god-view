@@ -24,6 +24,34 @@ from godview.sovereign.sentinels.evaluators.base import (
 from godview.sovereign.sentinels.models import SentinelEvaluation
 
 
+def _extract_metric_value(val: Any) -> float:
+    """Extract numeric float from primitive or Cloud Monitoring Point value dict."""
+    if isinstance(val, (int, float)):
+        return float(val)
+    if isinstance(val, str):
+        try:
+            return float(val)
+        except ValueError:
+            return 0.0
+    if isinstance(val, dict):
+        if "doubleValue" in val:
+            return float(val["doubleValue"])
+        if "int64Value" in val:
+            return float(val["int64Value"])
+        if "distributionValue" in val:
+            dist = val["distributionValue"]
+            if isinstance(dist, dict):
+                if "mean" in dist:
+                    return float(dist["mean"])
+                if "count" in dist:
+                    return float(dist["count"])
+        for v in val.values():
+            extracted = _extract_metric_value(v)
+            if extracted != 0.0:
+                return extracted
+    return 0.0
+
+
 class GoldenSignalsEvaluator(BaseSentinelEvaluator):
     """Evaluates Cloud Monitoring time-series metrics against adaptive latency and error baselines."""
 
@@ -71,10 +99,10 @@ class GoldenSignalsEvaluator(BaseSentinelEvaluator):
         samples: list[dict[str, Any]] = []
 
         if isinstance(ts_data, dict):
-            p95_ms = float(ts_data.get("p95_ms", 0.0))
-            error_count_5xx = int(ts_data.get("error_count_5xx", 0))
-            total_requests = int(ts_data.get("total_requests", 0))
-            instance_count = int(ts_data.get("instance_count", 1))
+            p95_ms = _extract_metric_value(ts_data.get("p95_ms", 0.0))
+            error_count_5xx = int(_extract_metric_value(ts_data.get("error_count_5xx", 0)))
+            total_requests = int(_extract_metric_value(ts_data.get("total_requests", 0)))
+            instance_count = int(_extract_metric_value(ts_data.get("instance_count", 1)))
             samples = ts_data.get("samples", [])
         elif isinstance(ts_data, list):
             # Parse list of metric points
@@ -82,15 +110,17 @@ class GoldenSignalsEvaluator(BaseSentinelEvaluator):
                 metric_name = str(series.get("metric", {}).get("type", ""))
                 points = series.get("points", [])
                 if "latenc" in metric_name and points:
-                    p95_ms = max(p95_ms, float(points[0].get("value", 0.0)))
+                    p95_ms = max(p95_ms, _extract_metric_value(points[0].get("value", 0.0)))
                 elif "request_count" in metric_name:
-                    resp_code = str(series.get("metric", {}).get("labels", {}).get("response_code_class", ""))
-                    count = sum(int(p.get("value", 0)) for p in points)
+                    resp_code = str(
+                        series.get("metric", {}).get("labels", {}).get("response_code_class", "")
+                    )
+                    count = sum(int(_extract_metric_value(p.get("value", 0))) for p in points)
                     total_requests += count
                     if resp_code == "5xx" or resp_code.startswith("5"):
                         error_count_5xx += count
                 elif "instance_count" in metric_name and points:
-                    instance_count = int(points[0].get("value", 1))
+                    instance_count = int(_extract_metric_value(points[0].get("value", 1)))
 
         error_rate = (error_count_5xx / total_requests) if total_requests > 0 else 0.0
 
@@ -116,6 +146,8 @@ class GoldenSignalsEvaluator(BaseSentinelEvaluator):
                     "p95_ms": round(p95_ms, 2),
                     "threshold_ms": p95_threshold_ms,
                     "error_count_5xx": error_count_5xx,
+                    "total_requests": total_requests,
+                    "error_rate": round(error_rate, 4),
                     "instance_count": instance_count,
                     "reason": f"Latency p95 ({p95_ms:.1f}ms) exceeded threshold ({p95_threshold_ms:.1f}ms)",
                 },

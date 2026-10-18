@@ -32,6 +32,7 @@ def build_lb_requests_sentinel(
     *,
     host: str | None = None,
     path_prefix: str | None = None,
+    security_policy: str | None = None,
     error_ratio_threshold: float = 0.05,
     target_agent_id: str = "platform__env",
     state: SentinelState = "enforced",
@@ -42,6 +43,14 @@ def build_lb_requests_sentinel(
     sentinel_id = f"snt-lb-{clean_id}"
     now_iso = datetime.now(tz=UTC).isoformat()
 
+    spec: dict[str, Any] = {
+        "host": host,
+        "path_prefix": path_prefix,
+        "error_ratio_threshold": error_ratio_threshold,
+    }
+    if security_policy:
+        spec["security_policy"] = security_policy
+
     return SentinelDefinition.model_validate(
         {
             "sentinel_id": sentinel_id,
@@ -50,11 +59,7 @@ def build_lb_requests_sentinel(
             "check": {
                 "dialect": "python",
                 "statement": f"Evaluate Cloud Logging LB requests for {resource_id}",
-                "spec": {
-                    "host": host,
-                    "path_prefix": path_prefix,
-                    "error_ratio_threshold": error_ratio_threshold,
-                },
+                "spec": spec,
                 "window_s": 300,
             },
             "cadence_s": 60,
@@ -89,18 +94,9 @@ def build_posture_sentinel(
     agent_id = target_agent_id or _agent_id_for_service(resource_id, resource_kind)
     now_iso = datetime.now(tz=UTC).isoformat()
 
+    # Do not impose opinionated defaults; allow tfstate or first-seen to establish baseline
+    # so public services and backends don't trigger false positives
     default_baseline: dict[str, Any] = {}
-    if resource_kind == "cloud_run":
-        default_baseline = {
-            "ingress": "internal-and-cloud-load-balancing",
-            "invoker_iam_disabled": False,
-            "all_users": False,
-        }
-    elif resource_kind in ("backend_service", "lb_backend"):
-        # Do not force iap_enabled: True as an opinionated default;
-        # allow tfstate or first-seen to establish baseline so public backends don't false-positive
-        default_baseline = {}
-
     effective_baseline = {**default_baseline, **(baseline or {})}
 
     return SentinelDefinition.model_validate(
@@ -401,16 +397,29 @@ def compile_universal_sentinels(
     compiled: list[SentinelDefinition] = []
     seen_ids: set[str] = set()
 
-    detected_env_id = env_id
+    detected_env_id = env_id if env_id != "env" else ""
     for svc in services:
+        s_env = (
+            svc.get("env_id")
+            if isinstance(svc, dict)
+            else getattr(svc, "env_id", None)
+        )
+        if s_env and s_env != "env":
+            detected_env_id = str(s_env)
+            break
         labels = svc.get("labels") if isinstance(svc, dict) else getattr(svc, "labels", None)
         if isinstance(labels, dict):
-            if labels.get("env_id"):
+            if labels.get("env_id") and labels["env_id"] != "env":
                 detected_env_id = str(labels["env_id"])
                 break
             if labels.get("environment"):
                 detected_env_id = str(labels["environment"])
                 break
+
+    if not detected_env_id:
+        import os
+
+        detected_env_id = os.environ.get("GODVIEW_ENV_ID") or "env"
 
     platform_agent_id = f"platform__{detected_env_id}"
 
@@ -447,22 +456,46 @@ def compile_universal_sentinels(
 
         # 3. Load balancer requests sentinel: compile ONE per security policy or public LB frontend/host (not per backend)
         if kind == "security_policy":
-            add(build_lb_requests_sentinel(name, target_agent_id=platform_agent_id))
+            add(
+                build_lb_requests_sentinel(
+                    name,
+                    security_policy=name,
+                    target_agent_id=platform_agent_id,
+                )
+            )
         elif kind == "lb_frontend":
-            front_host = None
-            if isinstance(svc, dict):
-                front_host = svc.get("host") or svc.get("hostname")
-                if not front_host and svc.get("endpoint"):
+            routes = svc.get("routes") if isinstance(svc, dict) else getattr(svc, "routes", None)
+            hosts: set[str] = set()
+            if isinstance(routes, list):
+                for r in routes:
+                    h = r.get("host") if isinstance(r, dict) else getattr(r, "host", None)
+                    if h and not str(h).startswith("*"):
+                        hosts.add(str(h))
+            for attr in ("endpoint", "locator", "host", "hostname"):
+                v = svc.get(attr) if isinstance(svc, dict) else getattr(svc, attr, None)
+                if v and str(v).startswith(("http://", "https://")):
                     try:
-                        front_host = urllib.parse.urlparse(svc["endpoint"]).hostname
+                        parsed = urllib.parse.urlparse(str(v)).hostname
+                        if parsed and not parsed.startswith("*"):
+                            hosts.add(parsed)
                     except Exception:
                         pass
-            elif hasattr(svc, "endpoint") and svc.endpoint:
-                try:
-                    front_host = urllib.parse.urlparse(svc.endpoint).hostname
-                except Exception:
-                    pass
-            add(build_lb_requests_sentinel(name, host=front_host, target_agent_id=platform_agent_id))
+                elif v and isinstance(v, str) and "." in v and not v.startswith(("http", "projects/")):
+                    hosts.add(v)
+
+            valid_hosts = [
+                h for h in sorted(hosts)
+                if not h.startswith(("10.", "172.", "192.168.", "127.", "0."))
+                and not h.endswith(".googleapis.com")
+                and not h.replace(".", "").isdigit()
+            ]
+
+            if valid_hosts:
+                for h in valid_hosts:
+                    sentinel_res_id = f"{name}_{h}"
+                    add(build_lb_requests_sentinel(sentinel_res_id, host=h, target_agent_id=platform_agent_id))
+            else:
+                add(build_lb_requests_sentinel(name, target_agent_id=platform_agent_id))
 
         # 4. Probe sentinel for public endpoints and probe-safe entrypoints
         candidate_urls: list[str] = []
@@ -475,10 +508,58 @@ def compile_universal_sentinels(
         )
 
         def _is_safe_public_url(u: str, is_public: bool = is_public_entrypoint) -> bool:
-            # Do NOT probe internal-only .run.app URLs unless explicitly on a public entrypoint
-            if ".run.app" in u and not is_public:
+            if not u or not isinstance(u, str):
                 return False
-            return u.startswith(("http://", "https://"))
+            if not u.startswith(("http://", "https://")):
+                return False
+            try:
+                parsed = urllib.parse.urlparse(u)
+                h = (parsed.hostname or "").lower()
+                if not h:
+                    return False
+                # Reject private and loopback IPs
+                if (
+                    h.startswith(("10.", "192.168.", "127.", "0.", "169.254."))
+                    or (h.startswith("172.") and any(h.startswith(f"172.{i}.") for i in range(16, 32)))
+                    or h == "localhost"
+                ):
+                    return False
+                # Reject cloud provider internal APIs and metadata
+                if (
+                    h.endswith(".googleapis.com")
+                    or h == "googleapis.com"
+                    or h.endswith(".internal")
+                    or "metadata.google.internal" in h
+                ):
+                    return False
+                # Do NOT probe internal-only .run.app URLs unless explicitly on a public entrypoint
+                if ".run.app" in h and not is_public:
+                    return False
+                return True
+            except Exception:
+                return False
+
+        # For public entrypoints (lb_frontend, api_gateway), probe their discovered public hosts
+        if kind in ("lb_frontend", "api_gateway", "gateway"):
+            fe_hosts: set[str] = set()
+            raw_routes = svc.get("routes") if isinstance(svc, dict) else getattr(svc, "routes", None)
+            if isinstance(raw_routes, list):
+                for r in raw_routes:
+                    h = r.get("host") if isinstance(r, dict) else getattr(r, "host", None)
+                    if h and not str(h).startswith("*"):
+                        fe_hosts.add(str(h))
+            raw_ep = getattr(svc, "endpoint", None) or (svc.get("endpoint") if isinstance(svc, dict) else None)
+            if raw_ep:
+                try:
+                    parsed_h = urllib.parse.urlparse(str(raw_ep)).hostname
+                    if parsed_h and not parsed_h.startswith("*"):
+                        fe_hosts.add(parsed_h)
+                except Exception:
+                    pass
+            for h in sorted(fe_hosts):
+                fe_url = f"https://{h}/"
+                if _is_safe_public_url(fe_url):
+                    candidate_urls.append(fe_url)
 
         raw_ep = getattr(svc, "endpoint", None) or (svc.get("endpoint") if isinstance(svc, dict) else None)
         if raw_ep and _is_safe_public_url(str(raw_ep)):
@@ -505,6 +586,12 @@ def compile_universal_sentinels(
                 continue
 
             r_url = r.get("url") if isinstance(r, dict) else getattr(r, "url", None)
+            r_host = r.get("host") if isinstance(r, dict) else getattr(r, "host", None)
+            path = r.get("path") if isinstance(r, dict) else getattr(r, "path", None)
+
+            if not r_url and r_host and path and not str(r_host).startswith("*"):
+                r_url = f"https://{r_host}/{str(path).lstrip('/')}"
+
             is_probe_safe = (
                 is_probe_safe_flag
                 or (r_url and not str(r_url).endswith(".run.app") and ".run.app" not in str(r_url))
@@ -512,7 +599,7 @@ def compile_universal_sentinels(
             if r_url and (is_probe_safe or is_public_entrypoint):
                 if _is_safe_public_url(str(r_url)):
                     candidate_urls.append(str(r_url))
-            path = r.get("path") if isinstance(r, dict) else getattr(r, "path", None)
+
             is_asset_path = bool(
                 re.search(
                     r"\.(?:png|jpg|jpeg|svg|webp|ico|gif|css|js)$",
@@ -520,8 +607,15 @@ def compile_universal_sentinels(
                     re.IGNORECASE,
                 )
             ) or str(path or "").startswith("/assets/")
-            if path and is_asset_path and raw_ep:
-                candidate_urls.append(f"{str(raw_ep).rstrip('/')}/{str(path).lstrip('/')}")
+            if path and is_asset_path:
+                if raw_ep:
+                    asset_url = f"{str(raw_ep).rstrip('/')}/{str(path).lstrip('/')}"
+                    if _is_safe_public_url(asset_url):
+                        candidate_urls.append(asset_url)
+                if r_host and not str(r_host).startswith("*"):
+                    host_asset_url = f"https://{r_host}/{str(path).lstrip('/')}"
+                    if _is_safe_public_url(host_asset_url):
+                        candidate_urls.append(host_asset_url)
 
         for target_url in candidate_urls:
             add(build_probe_sentinel(target_url, target_agent_id=platform_agent_id))
