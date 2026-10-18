@@ -3,30 +3,55 @@
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import os
 from collections.abc import Iterable
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
 logger = logging.getLogger("godview.stores.bigquery")
 
 
-def _serialize_bq_row(row: dict[str, Any]) -> dict[str, Any]:
+def _json_default(obj: Any) -> Any:
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    if isinstance(obj, Decimal):
+        return float(obj)
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump()
+    if hasattr(obj, "dict"):
+        return obj.dict()
+    return str(obj)
+
+
+def _serialize_bq_row(row: dict[str, Any], table: str | None = None) -> dict[str, Any]:
     """Serialize row values for BigQuery JSON insertion."""
     out: dict[str, Any] = {}
+    table_clean = (table or "").strip().replace("`", "")
+    is_journeys = table_clean.endswith("journeys")
+
+    # Columns defined as BigQuery JSON type (requires json.dumps for insert_rows_json)
+    json_columns = {"attributes", "numeric_attributes", "kpis", "invariants", "breakdown"}
+    if not is_journeys:
+        json_columns.add("steps")
+
     for k, v in row.items():
-        if isinstance(v, datetime):
+        if v is None:
+            out[k] = None
+        elif k in json_columns and isinstance(v, (dict, list, tuple)):
+            out[k] = json.dumps(v, default=_json_default)
+        elif isinstance(v, (datetime, date)):
             out[k] = v.isoformat()
         elif isinstance(v, Decimal):
             out[k] = float(v)
         elif isinstance(v, dict):
-            out[k] = _serialize_bq_row(v)
+            out[k] = _serialize_bq_row(v, table=table)
         elif isinstance(v, (list, tuple)):
             out[k] = [
-                _serialize_bq_row(item) if isinstance(item, dict)
-                else (item.isoformat() if isinstance(item, datetime)
+                _serialize_bq_row(item, table=table) if isinstance(item, dict)
+                else (item.isoformat() if isinstance(item, (datetime, date))
                 else (float(item) if isinstance(item, Decimal) else item))
                 for item in v
             ]
@@ -80,7 +105,7 @@ class BigQueryLedger:
         serialized_rows: list[dict[str, Any]] = []
         row_ids: list[str] = []
         for r in row_list:
-            serialized = _serialize_bq_row(r)
+            serialized = _serialize_bq_row(r, table=table_short)
             serialized_rows.append(serialized)
             # Derive dedup row_id from primary keys if available
             rid = (

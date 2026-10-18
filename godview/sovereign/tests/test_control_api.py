@@ -693,3 +693,109 @@ def test_cockpit_contracts_simulator_drift_sse_webhooks_and_adapter_dispatch() -
     r_lc_resume = client.post("/v1/lifecycle/tenant-resume", json={"source": "cloud_scheduler"})
     assert r_lc_resume.status_code == 200
     assert r_lc_resume.json()["tenant_paused"] is False
+
+
+@pytest.mark.unit
+def test_bigquery_json_serialization_and_oidc_unique_id_auth() -> None:
+    """Verify BigQuery JSON column serialization and OIDC uniqueId matching without email claim (#191, #193, #194, #196)."""
+    from datetime import UTC, datetime
+    from decimal import Decimal
+    from unittest.mock import MagicMock, patch
+
+    from godview_shared.auth import (
+        _SA_UNIQUE_ID_CACHE,
+        _UNIQUE_ID_TO_EMAIL_CACHE,
+        AuthService,
+        GodViewSettings,
+    )
+    from godview_shared.stores.bigquery_ledger import BigQueryLedger, _serialize_bq_row
+
+    # 1. Test BigQuery JSON column serialization on 'events'
+    now = datetime.now(tz=UTC)
+    raw_event = {
+        "event_id": "evt-001",
+        "event_time": now,
+        "env_id": "env-001",
+        "service": "order-service",
+        "event_type": "ORDER_CREATED",
+        "attributes": {"order_ref": "ord-123", "sub_dict": {"k": "v"}, "time": now},
+        "numeric_attributes": {"amount": Decimal("99.95"), "count": 2},
+    }
+    ser_event = _serialize_bq_row(raw_event, table="events")
+    assert isinstance(ser_event["attributes"], str)
+    decoded_attrs = json.loads(ser_event["attributes"])
+    assert decoded_attrs["order_ref"] == "ord-123"
+    assert decoded_attrs["sub_dict"]["k"] == "v"
+    assert "time" in decoded_attrs
+    assert isinstance(ser_event["numeric_attributes"], str)
+    decoded_num = json.loads(ser_event["numeric_attributes"])
+    assert decoded_num["amount"] == 99.95
+    assert decoded_num["count"] == 2
+
+    # 2. Test BigQuery REPEATED RECORD serialization on 'journeys' (steps must stay list of dicts)
+    raw_journey = {
+        "journey_id": "j-001",
+        "journey_name": "Checkout",
+        "started_at": now,
+        "env_id": "env-001",
+        "steps": [
+            {"seq": 1, "service": "cart", "operation": "add", "at": now, "status": "OK", "duration_ms": 15},
+            {"seq": 2, "service": "payment", "operation": "charge", "at": now, "status": "OK", "duration_ms": Decimal("45")},
+        ],
+    }
+    ser_journey = _serialize_bq_row(raw_journey, table="journeys")
+    assert isinstance(ser_journey["steps"], list)
+    assert len(ser_journey["steps"]) == 2
+    assert isinstance(ser_journey["steps"][0], dict)
+    assert isinstance(ser_journey["steps"][0]["at"], str)
+    assert ser_journey["steps"][1]["duration_ms"] == 45.0
+
+    # 3. Test BigQueryLedger.insert_rows passes JSON strings to client.insert_rows_json
+    mock_client = MagicMock()
+    mock_client.insert_rows_json.return_value = []
+    ledger = BigQueryLedger(project="test-proj", dataset="godview_ledger", client=mock_client)
+    ledger.insert_rows("events", [raw_event])
+    assert mock_client.insert_rows_json.called
+    call_args = mock_client.insert_rows_json.call_args
+    assert call_args[0][0] == "test-proj.godview_ledger.events"
+    passed_rows = call_args[0][1]
+    assert len(passed_rows) == 1
+    assert isinstance(passed_rows[0]["attributes"], str)
+    assert isinstance(passed_rows[0]["numeric_attributes"], str)
+
+    # 4. Test OIDC authentication when token has no email claim but numeric uniqueId matches
+    sa_email = "test-service-sa@test-proj.iam.gserviceaccount.com"
+    sa_uid = "100814363356137958317"
+    _SA_UNIQUE_ID_CACHE[sa_email] = sa_uid
+    _UNIQUE_ID_TO_EMAIL_CACHE[sa_uid] = sa_email
+
+    auth = AuthService(
+        settings=GodViewSettings(env_mode="gcp", service_url="https://godview.example.com"),
+        service_principals=[sa_email],
+    )
+
+    # Mock id_token.verify_oauth2_token returning token without email claim
+    mock_claims_no_email = {
+        "iss": "https://accounts.google.com",
+        "sub": sa_uid,
+        "aud": "https://godview.example.com",
+        "azp": sa_uid,
+    }
+    with patch("google.oauth2.id_token.verify_oauth2_token", return_value=mock_claims_no_email):
+        # Matching uniqueId resolves to allowed email
+        p = auth.verify_google_oidc("mock-token")
+        assert p is not None
+        assert p.email == sa_email
+        assert p.subject == sa_uid
+        assert p.is_service is True
+
+        # Unmatched uniqueId is rejected
+        mock_claims_unknown = {
+            "iss": "https://accounts.google.com",
+            "sub": "999999999999999999999",
+            "aud": "https://godview.example.com",
+        }
+        with patch("google.oauth2.id_token.verify_oauth2_token", return_value=mock_claims_unknown):
+            p_rejected = auth.verify_google_oidc("mock-token")
+            assert p_rejected is None
+

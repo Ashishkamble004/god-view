@@ -60,6 +60,65 @@ def _fetch_metadata(path: str) -> str | None:
         return None
 
 
+_SA_UNIQUE_ID_CACHE: dict[str, str] = {}  # email -> uniqueId
+_UNIQUE_ID_TO_EMAIL_CACHE: dict[str, str] = {}  # uniqueId -> email
+
+
+def _resolve_sa_unique_id(sa_email: str) -> str | None:
+    """Resolve a service account email to its numeric uniqueId via IAM serviceAccounts.get."""
+    if not sa_email or "@" not in sa_email:
+        return None
+    if sa_email in _SA_UNIQUE_ID_CACHE:
+        return _SA_UNIQUE_ID_CACHE[sa_email]
+
+    # Check environment variable mappings first if configured
+    # Format: GODVIEW_PRINCIPAL_UNIQUE_IDS="105657632617296969198=godview-runtime-sa@...,..."
+    env_ids = os.environ.get("GODVIEW_PRINCIPAL_UNIQUE_IDS", "")
+    if env_ids:
+        for pair in env_ids.split(","):
+            pair = pair.strip()
+            if "=" in pair:
+                k, v = pair.split("=", 1)
+                k, v = k.strip(), v.strip()
+                if "@" in v:
+                    _UNIQUE_ID_TO_EMAIL_CACHE[k] = v
+                    _SA_UNIQUE_ID_CACHE[v] = k
+                elif "@" in k:
+                    _SA_UNIQUE_ID_CACHE[k] = v
+                    _UNIQUE_ID_TO_EMAIL_CACHE[v] = k
+        if sa_email in _SA_UNIQUE_ID_CACHE:
+            return _SA_UNIQUE_ID_CACHE[sa_email]
+
+    try:
+        import httpx
+        from google.auth import default as google_auth_default
+        from google.auth.transport.requests import Request as GoogleAuthRequest
+
+        credentials, _ = google_auth_default(
+            scopes=["https://www.googleapis.com/auth/cloud-platform"]
+        )
+        auth_req = GoogleAuthRequest()
+        credentials.refresh(auth_req)
+        token = credentials.token
+        if not token:
+            return None
+
+        url = f"https://iam.googleapis.com/v1/projects/-/serviceAccounts/{sa_email}"
+        headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+        with httpx.Client(timeout=5.0) as client:
+            resp = client.get(url, headers=headers)
+            if resp.status_code == 200:
+                data = resp.json()
+                unique_id = str(data.get("uniqueId") or data.get("oauth2ClientId") or "")
+                if unique_id:
+                    _SA_UNIQUE_ID_CACHE[sa_email] = unique_id
+                    _UNIQUE_ID_TO_EMAIL_CACHE[unique_id] = sa_email
+                    return unique_id
+    except Exception as exc:
+        logger.debug("Could not resolve SA uniqueId for %s via IAM: %s", sa_email, exc)
+    return None
+
+
 class AuthService:
     """Authentication and identity verification service."""
 
@@ -373,7 +432,10 @@ class AuthService:
             if iss not in (GOOGLE_OIDC_ISSUER, "accounts.google.com"):
                 return None
 
-            email = claims.get("email", "")
+            email = str(claims.get("email") or "")
+            sub = str(claims.get("sub") or "")
+            azp = str(claims.get("azp") or "")
+            effective_subject = sub or azp
 
             effective_allowed = (
                 allowed_principals
@@ -381,24 +443,50 @@ class AuthService:
                 else self._allowed_service_principals
             )
             # Strict service principal allowlist (Decision #89/#91/#95, Plan §0 fail closed)
-            if effective_allowed:
-                if email not in effective_allowed:
-                    logger.warning(
-                        "OIDC rejected: email %s not in allowed principals %s",
-                        email,
-                        effective_allowed,
-                    )
-                    return None
-            else:
+            if not effective_allowed:
                 logger.warning(
                     "OIDC rejected: no service principal allowlist configured (fail closed, no silent fallback)"
                 )
                 return None
 
-            sub = claims.get("sub", "")
+            # Check email or uniqueId / sub / azp match against allowlist
+            matched = False
+            matched_email = email
+            if email and email in effective_allowed:
+                matched = True
+                matched_email = email
+                if effective_subject:
+                    _UNIQUE_ID_TO_EMAIL_CACHE[effective_subject] = email
+                    _SA_UNIQUE_ID_CACHE[email] = effective_subject
+            elif effective_subject and effective_subject in effective_allowed:
+                matched = True
+                matched_email = _UNIQUE_ID_TO_EMAIL_CACHE.get(effective_subject) or email or effective_subject
+            elif effective_subject:
+                cached_email = _UNIQUE_ID_TO_EMAIL_CACHE.get(effective_subject)
+                if cached_email and cached_email in effective_allowed:
+                    matched = True
+                    matched_email = cached_email
+                else:
+                    for allowed_p in effective_allowed:
+                        if "@" in allowed_p:
+                            uid = _resolve_sa_unique_id(allowed_p)
+                            if uid and uid == effective_subject:
+                                matched = True
+                                matched_email = allowed_p
+                                break
+
+            if not matched:
+                logger.warning(
+                    "OIDC rejected: neither email '%s' nor subject '%s' in allowed principals %s",
+                    email,
+                    effective_subject,
+                    effective_allowed,
+                )
+                return None
+
             aud = claims.get("aud", verified_aud)
             return Principal(
-                email=email,
+                email=matched_email,
                 subject=sub,
                 issuer=iss,
                 audience=aud,
@@ -457,7 +545,13 @@ class AuthService:
                     detail="Unauthorized: valid trace service OIDC token required",
                 )
             if self.settings.env_mode != "hermetic":
-                if trace_allowed and principal.email not in trace_allowed:
+                allowed = (
+                    principal.email in trace_allowed
+                    or principal.subject in trace_allowed
+                    or (principal.subject and _UNIQUE_ID_TO_EMAIL_CACHE.get(principal.subject) in trace_allowed)
+                    or (principal.email and _SA_UNIQUE_ID_CACHE.get(principal.email) in trace_allowed)
+                )
+                if trace_allowed and not allowed:
                     raise HTTPException(
                         status_code=403,
                         detail=f"Forbidden: trace sender {principal.email} not in trace principals",
