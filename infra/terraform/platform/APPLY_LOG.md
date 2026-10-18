@@ -216,6 +216,12 @@
   - **Result**: Deployed v5 Sovereign image (Cloud Build `3b51f364-7851-4d3f-bcdd-15b32b970514`) incorporating runtime-core rev 7 (BigQuery streaming insert json serialization + metadata-server OIDC uniqueId matching) and discovery rev 8 (eliminate post-hoc evidence synthesis + bundle reference validation). Cloud Run deployed revision `god-view-sovereign-00011-trb` (Ready, serving 100%). `/public/healthz` verified 200 OK: `mode=gcp`, real GCP stores (`FirestoreStore`, `BigQueryLedger`, `PubSubBus`, `AgentEngineRuntime`), 15/20 adapters healthy, 50 sentinels registered, and all 4 loop heartbeats active.
   - **Rollback**: `gcloud run services update-traffic god-view-sovereign --to-revisions=god-view-sovereign-00010-9jz=100 --project=general-ak --region=us-central1`
 
+- **2026-10-18T08:08:35Z**
+  - **Command**: `terraform -chdir=infra/terraform/platform apply -input=false $HOME/tmp/bq-events-parent-span-id.tfplan` (target: `module.data.google_bigquery_table.events`)
+  - **Result**: 0 added, 1 changed, 0 destroyed. In-place additive schema update adding nullable `parent_span_id` (STRING) to BigQuery table `godview_ledger.events`. Deletion protection preserved. Verified live via BigQuery client API.
+  - **Rollback**: Schema cannot drop columns in BigQuery once added; no destructive action needed as column is nullable.
+
+
 
 
 
