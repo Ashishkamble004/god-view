@@ -19,6 +19,8 @@ V5_COLLECTIONS: tuple[str, ...] = (
     "proposals",
     "golden_signals",
     "evidence_packs",
+    "posture_baselines",
+    "topology",
 )
 
 ALL_FIRESTORE_COLLECTIONS: tuple[str, ...] = tuple(
