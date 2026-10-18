@@ -1,5 +1,6 @@
 import {
   AlertOctagon,
+  AlertTriangle,
   Moon,
   Pause,
   Play,
@@ -48,6 +49,20 @@ export const ControlsTab: React.FC<ControlsTabProps> = ({
     'Operator emergency traffic & autonomy halt from Cockpit'
   );
   const [armedDrillId, setArmedDrillId] = useState<string | null>(null);
+
+  if (!perceive) {
+    return (
+      <Card className="p-8 text-center">
+        <AlertTriangle className="mx-auto h-8 w-8 text-amber-500" />
+        <h3 className="mt-3 text-base font-semibold text-slate-900">
+          Control Plane Telemetry Not Measured Yet
+        </h3>
+        <p className="mt-1 text-xs text-slate-500 max-w-md mx-auto">
+          The Sovereign control plane <code>/api/v1/perceive</code> endpoint returned no data or is currently unreachable.
+        </p>
+      </Card>
+    );
+  }
 
   const op = perceive.operator_state;
   const businessDrills = drills.filter((d) => d.fault_class === 'BUSINESS');

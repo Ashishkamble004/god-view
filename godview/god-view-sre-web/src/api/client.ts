@@ -106,9 +106,9 @@ function toCockpitError(reason: unknown, endpoint: string): CockpitApiError {
   if (reason instanceof CockpitApiError) return reason;
   if (reason instanceof TypeError) {
     return new CockpitApiError(
-      401,
-      'IAP_SESSION_EXPIRED',
-      'Session expired — Reload to sign in',
+      503,
+      'NETWORK_ERROR',
+      'Network connection to Sovereign control plane failed',
       endpoint
     );
   }
@@ -532,7 +532,6 @@ const KNOWN_SSE_EVENTS = [
   'agent.slept',
   'sentinel.tick',
   'ready',
-  'message',
 ];
 
 export function subscribeCockpitStream(options: SseSubscriptionOptions): () => void {

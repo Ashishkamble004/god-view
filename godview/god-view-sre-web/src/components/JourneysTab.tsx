@@ -1,7 +1,9 @@
+import { Globe } from 'lucide-react';
 import React from 'react';
 import type { JourneyConformanceStatus, JourneyModel } from '../api/types';
 import {
   Badge,
+  Button,
   Card,
   EmptyState,
   SectionHeader,
@@ -138,6 +140,19 @@ export const JourneysTab: React.FC<JourneysTabProps> = ({
         <SectionHeader
           title="Process Map — Directly-Follows Graph (DFG) & Conformance Overlay"
           subtitle={`Intended order mined from ${journey.intended_order_source}. Solid blue/slate edges show conformant transitions; dashed arcs highlight Skipped and Reordered conformance anomalies.`}
+          right={
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => {
+                window.location.hash = `#globe/journey/${encodeURIComponent(journey.name || journey.journey_key)}`;
+              }}
+              className="flex items-center gap-1.5"
+            >
+              <Globe className="h-3.5 w-3.5" />
+              <span>View Path on 3D Globe</span>
+            </Button>
+          }
         />
 
         <div className="mt-4 overflow-x-auto">

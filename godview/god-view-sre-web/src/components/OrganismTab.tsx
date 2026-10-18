@@ -1,4 +1,4 @@
-import { ArrowUpRight, Flame, Radar, RefreshCw, ShieldCheck } from 'lucide-react';
+import { AlertTriangle, ArrowUpRight, Flame, Radar, RefreshCw, ShieldCheck } from 'lucide-react';
 import React from 'react';
 import type { CourtAgent, CourtAgentType, PerceptionReport } from '../api/types';
 import {
@@ -72,9 +72,24 @@ export const OrganismTab: React.FC<OrganismTabProps> = ({
   onRePerceive,
   busyKey,
 }) => {
-  const warmCount = court.filter((a) => a.warmth_min_instances === 1).length;
-  const totalTokensToday = court.reduce((acc, a) => acc + a.tokens_spent_today, 0);
-  const totalAgentUsdToday = court.reduce(
+  if (!perceive) {
+    return (
+      <Card className="p-8 text-center">
+        <AlertTriangle className="mx-auto h-8 w-8 text-amber-500" />
+        <h3 className="mt-3 text-base font-semibold text-slate-900">
+          Perception Telemetry Not Measured Yet
+        </h3>
+        <p className="mt-1 text-xs text-slate-500 max-w-md mx-auto">
+          The Sovereign control plane <code>/api/v1/perceive</code> endpoint returned no data or is currently unreachable.
+        </p>
+      </Card>
+    );
+  }
+
+  const safeCourt = court || [];
+  const warmCount = safeCourt.filter((a) => a.warmth_min_instances === 1).length;
+  const totalTokensToday = safeCourt.reduce((acc, a) => acc + a.tokens_spent_today, 0);
+  const totalAgentUsdToday = safeCourt.reduce(
     (acc, a) => acc + a.tokens_spent_today_usd,
     0
   );

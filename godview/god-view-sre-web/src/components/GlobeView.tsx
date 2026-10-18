@@ -97,6 +97,8 @@ function slerpVector3(v1: THREE.Vector3, v2: THREE.Vector3, t: number): THREE.Ve
   ).normalize();
 }
 
+const GLOBE_RADIUS = 7.8;
+
 export const GlobeView: React.FC<GlobeViewProps> = ({
   initialForce2D = false,
   topology,
@@ -107,7 +109,7 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
   approvals,
   perceive,
   cost: _cost,
-  streamStatus = 'connected',
+  streamStatus = 'polling',
   onSelectNode,
   onSelectIncident,
   onSelectJourney,
@@ -221,7 +223,7 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
     if (!topology || topology.nodes.length === 0) return new Map<string, THREE.Vector3>();
 
     const positions = new Map<string, THREE.Vector3>();
-    const sphereRadius = 9.0;
+    const sphereRadius = GLOBE_RADIUS;
 
     // Group nodes by domain
     const domainGroups: Record<string, TopologyNode[]> = {};
@@ -275,23 +277,19 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
 
   // Incident count
   const activeIncidentsCount = useMemo(() => {
-    if (incidents) {
-      return incidents.filter((i) => (i.outcome as string) === 'investigating' || i.outcome === 'mitigated').length;
-    }
-    return topology?.nodes.filter((n) => n.incidents_open > 0 || n.status === 'red').length || 0;
-  }, [incidents, topology]);
+    if (!incidents) return null;
+    return incidents.filter((i) => i.outcome !== 'resolved').length;
+  }, [incidents]);
 
   // Approvals count
   const pendingApprovalsCount = useMemo(() => {
-    if (approvals) {
-      return approvals.filter((a) => (a as any).status === 'pending' || a.decision === 'pending').length;
-    }
-    return null;
+    if (!approvals) return null;
+    return approvals.filter((a) => (a as any).status === 'pending' || a.decision === 'pending').length;
   }, [approvals]);
 
   // Agent counts
   const totalAgents = court ? court.length : null;
-  const awakeAgents = court ? court.filter((a) => a.warmth_min_instances > 0 || a.last_wake_at != null).length : null;
+  const awakeAgents = court ? court.filter((a) => a.state === 'awake').length : null;
 
   // Selected node
   const selectedNode = useMemo(() => {
@@ -315,7 +313,7 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
     scene.background = new THREE.Color(GLOBE_COLORS.spaceEdge);
 
     const camera = new THREE.PerspectiveCamera(GLOBE_STYLE.cameraFovDeg, width / height, 0.1, 1000);
-    camera.position.set(0, 14, 26);
+    camera.position.set(0, 9, 29);
     camera.lookAt(0, 0, 0);
     cameraRef.current = camera;
 
@@ -362,7 +360,7 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
     scene.add(fillLight);
 
     // 3. Central Sphere & Atmosphere Shell
-    const sphereRadius = 9.0;
+    const sphereRadius = GLOBE_RADIUS;
     const sphereGeo = new THREE.SphereGeometry(sphereRadius, 64, 64);
     const sphereMat = new THREE.MeshLambertMaterial({
       color: GLOBE_COLORS.ocean,
@@ -709,7 +707,7 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
 
   const handleResetCamera = () => {
     if (controlsRef.current && cameraRef.current) {
-      cameraRef.current.position.set(0, 14, 26);
+      cameraRef.current.position.set(0, 9, 29);
       controlsRef.current.target.set(0, 0, 0);
       controlsRef.current.update();
     }
@@ -831,6 +829,45 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
             </div>
           </div>
 
+          {/* Business Journeys Overlay Selector */}
+          <div className="space-y-2 border-t border-slate-100 pt-3">
+            <div className="flex items-center justify-between text-xs text-slate-500">
+              <span className="font-semibold">Business journeys</span>
+              <span className="font-mono text-[11px]">{topology.journeys?.length ?? 0}</span>
+            </div>
+            {topology.journeys && topology.journeys.length > 0 ? (
+              <div className="space-y-1">
+                {topology.journeys.map((j) => {
+                  const isActive = activeJourney === j.name;
+                  return (
+                    <button
+                      key={j.name}
+                      onClick={() => {
+                        const next = isActive ? null : j.name;
+                        setActiveJourney(next);
+                        if (onSelectJourney) {
+                          onSelectJourney(next || '');
+                        }
+                      }}
+                      className={`flex w-full items-center justify-between rounded-md px-2.5 py-1.5 text-xs transition ${
+                        isActive
+                          ? 'bg-blue-50 border border-blue-200 font-semibold text-blue-800'
+                          : 'text-slate-600 hover:bg-slate-50'
+                      }`}
+                    >
+                      <span className="truncate">{j.name}</span>
+                      <span className="font-mono text-[10px] text-slate-400 shrink-0">
+                        {j.steps.length} steps
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="text-xs text-slate-400">No journeys discovered</p>
+            )}
+          </div>
+
           {/* Autonomous Swarm Telemetry */}
           <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-3 text-xs space-y-2.5">
             <div className="flex items-center justify-between text-slate-700">
@@ -863,7 +900,7 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
                 <span className="font-bold text-blue-600">
                   {perceive?.sentinel_cadence_s != null
                     ? `${perceive.sentinel_cadence_s}s`
-                    : '10s'}
+                    : 'Not measured yet'}
                 </span>
               </div>
             </div>
@@ -1126,17 +1163,19 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
             )}
 
             {/* Stage Overlay: Floating IncidentBanner (Bottom-Right, Above MapControls) */}
-            {activeIncidentsCount > 0 && !incidentBannerDismissed && (
-              <div className="absolute bottom-20 right-6 z-20 max-w-sm rounded-xl border border-red-500/40 bg-[#1c0808]/90 p-3.5 text-xs text-slate-200 shadow-2xl backdrop-blur-md">
+            {activeIncidentsCount != null && activeIncidentsCount > 0 && !incidentBannerDismissed && (
+              <div className="absolute bottom-20 right-8 z-20 max-w-xs md:max-w-sm rounded-xl border border-red-500/40 bg-[#1c0808]/90 p-3.5 text-xs text-slate-200 shadow-2xl backdrop-blur-md break-words">
                 <div className="flex items-start justify-between gap-3">
                   <div className="flex items-start gap-2.5">
-                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-red-400" />
+                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-node-incident" style={{ color: 'var(--gv-node-incident)' }} />
                     <div>
                       <h4 className="font-semibold text-red-200">
                         {activeIncidentsCount} Active Incident{activeIncidentsCount > 1 ? 's' : ''} Detected
                       </h4>
-                      <p className="mt-0.5 text-slate-300 leading-snug">
-                        Business invariant breaches active across estate nodes. Swarm autonomous convergence in progress.
+                      <p className="mt-0.5 text-slate-300 leading-snug break-words">
+                        {incidents?.find((i) => i.outcome !== 'resolved')?.symptom_summary
+                          ? incidents.find((i) => i.outcome !== 'resolved')!.symptom_summary
+                          : `${activeIncidentsCount} active incident${activeIncidentsCount > 1 ? 's' : ''} requiring investigation.`}
                       </p>
                     </div>
                   </div>
@@ -1165,8 +1204,10 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
             {/* Stage Overlay: PulseBar (Bottom-Center) */}
             <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20 flex items-center gap-6 rounded-full border border-slate-700/60 bg-[#081a33]/90 px-6 py-2 shadow-2xl backdrop-blur-md num-tabular">
               <div className="flex flex-col items-center text-center">
-                <span className="text-[11px] text-slate-400">Services</span>
-                <span className="font-mono text-base font-bold text-white">
+                <span className="text-[11px] text-on-space-variant" style={{ color: 'var(--gv-on-space-variant)' }}>
+                  Services
+                </span>
+                <span className="font-mono text-base font-bold text-on-space" style={{ color: 'var(--gv-on-space)' }}>
                   {topology.nodes.length}
                 </span>
               </div>
@@ -1179,15 +1220,21 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
                 }}
                 className="group flex flex-col items-center text-center transition hover:opacity-90"
               >
-                <span className="text-[11px] text-slate-400 group-hover:text-slate-300">
+                <span className="text-[11px] group-hover:text-slate-200" style={{ color: 'var(--gv-on-space-variant)' }}>
                   Incidents
                 </span>
                 <span
-                  className={`font-mono text-base font-bold ${
-                    activeIncidentsCount > 0 ? 'text-red-400' : 'text-emerald-400'
-                  }`}
+                  className="font-mono text-base font-bold"
+                  style={{
+                    color:
+                      activeIncidentsCount == null
+                        ? 'var(--gv-color-unknown)'
+                        : activeIncidentsCount > 0
+                        ? 'var(--gv-node-incident)'
+                        : 'var(--gv-node-healthy)',
+                  }}
                 >
-                  {activeIncidentsCount}
+                  {activeIncidentsCount != null ? activeIncidentsCount : 'Not measured yet'}
                 </span>
               </button>
 
@@ -1199,11 +1246,19 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
                 }}
                 className="group flex flex-col items-center text-center transition hover:opacity-90"
               >
-                <span className="text-[11px] text-slate-400 group-hover:text-slate-300">
+                <span className="text-[11px] group-hover:text-slate-200" style={{ color: 'var(--gv-on-space-variant)' }}>
                   Approvals
                 </span>
-                <span className="font-mono text-base font-bold text-amber-400">
-                  {pendingApprovalsCount != null ? pendingApprovalsCount : '—'}
+                <span
+                  className="font-mono text-base font-bold"
+                  style={{
+                    color:
+                      pendingApprovalsCount != null
+                        ? 'var(--gv-node-warning)'
+                        : 'var(--gv-color-unknown)',
+                  }}
+                >
+                  {pendingApprovalsCount != null ? pendingApprovalsCount : 'Not measured yet'}
                 </span>
               </button>
 
@@ -1215,15 +1270,23 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
                 }}
                 className="group flex flex-col items-center text-center transition hover:opacity-90"
               >
-                <span className="text-[11px] text-slate-400 group-hover:text-slate-300">
+                <span className="text-[11px] group-hover:text-slate-200" style={{ color: 'var(--gv-on-space-variant)' }}>
                   Agents awake
                 </span>
-                <span className="font-mono text-base font-bold text-cyan-400">
+                <span
+                  className="font-mono text-base font-bold"
+                  style={{
+                    color:
+                      awakeAgents != null
+                        ? 'var(--gv-node-agent)'
+                        : 'var(--gv-color-unknown)',
+                  }}
+                >
                   {awakeAgents != null && totalAgents != null
                     ? `${awakeAgents}/${totalAgents}`
                     : totalAgents != null
                     ? `${totalAgents}`
-                    : '—'}
+                    : 'Not measured yet'}
                 </span>
               </button>
             </div>
@@ -1558,7 +1621,7 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
                         className="rounded-md border border-slate-200 bg-white p-2 text-xs font-mono space-y-0.5"
                       >
                         <div className="flex items-center justify-between text-[11px] text-blue-700">
-                          <span className="font-semibold uppercase">{ev.kind}</span>
+                          <span className="font-semibold">{ev.kind}</span>
                           <span className="text-slate-400">{ev.ref}</span>
                         </div>
                         <p className="text-[11px] text-slate-600 truncate">{ev.excerpt}</p>

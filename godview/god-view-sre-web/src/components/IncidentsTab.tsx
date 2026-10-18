@@ -314,19 +314,19 @@ export const IncidentsTab: React.FC<IncidentsTabProps> = ({
             <span className="text-slate-500">Convergence Score</span>
             <p className="mt-0.5 text-sm font-semibold text-slate-900">
               {activeIncident.convergence.consensus.toFixed(2)} (
-              {Math.round(activeIncident.convergence.consensus * 100)}% ≥ 85%)
+              {Math.round(activeIncident.convergence.consensus * 100)}%)
             </p>
           </div>
           <div>
             <span className="text-slate-500">Swarm Rounds</span>
             <p className="mt-0.5 text-sm font-semibold text-slate-900">
-              {activeIncident.convergence.rounds} / 4 rounds
+              {activeIncident.convergence.rounds} rounds
             </p>
           </div>
           <div>
             <span className="text-slate-500">Time to Converge (MTTI)</span>
             <p className="mt-0.5 text-sm font-semibold text-slate-900">
-              {activeIncident.convergence.seconds}s (SLO ≤ 60s)
+              {activeIncident.convergence.seconds}s
             </p>
           </div>
           <div>

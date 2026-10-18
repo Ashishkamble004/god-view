@@ -411,7 +411,7 @@ export const InvariantsTab: React.FC<InvariantsTabProps> = ({
 
               {/* INVARIANT.md Body rendered with react-markdown */}
               <div className="mt-4">
-                <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                <p className="text-xs font-semibold text-slate-500">
                   INVARIANT.md Body (Rendered Markdown)
                 </p>
                 <div className="mt-1.5 space-y-2 rounded border border-slate-200 bg-slate-50 p-3.5 text-xs leading-relaxed text-slate-800">
@@ -421,7 +421,7 @@ export const InvariantsTab: React.FC<InvariantsTabProps> = ({
 
               {/* Status Transition History */}
               <div className="mt-4">
-                <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+                <p className="text-xs font-semibold text-slate-500">
                   Promotion &amp; Audit History
                 </p>
                 {activeInvariant.history.length === 0 ? (

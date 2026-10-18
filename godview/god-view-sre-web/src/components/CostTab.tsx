@@ -1,3 +1,4 @@
+import { AlertTriangle } from 'lucide-react';
 import React from 'react';
 import type { CostAndDriftOverview, CourtAgent } from '../api/types';
 import {
@@ -29,6 +30,20 @@ export const CostTab: React.FC<CostTabProps> = ({
   onSelectAgent,
   busyKey,
 }) => {
+  if (!cost) {
+    return (
+      <Card className="p-8 text-center">
+        <AlertTriangle className="mx-auto h-8 w-8 text-amber-500" />
+        <h3 className="mt-3 text-base font-semibold text-slate-900">
+          Cost &amp; Drift Telemetry Not Measured Yet
+        </h3>
+        <p className="mt-1 text-xs text-slate-500 max-w-md mx-auto">
+          The Sovereign control plane <code>/api/v1/cost</code> endpoint returned no data or is currently unreachable.
+        </p>
+      </Card>
+    );
+  }
+
   const totalSavingsMonthly = cost.cost_findings
     .filter((f) => f.status === 'open')
     .reduce((acc, f) => acc + f.monthly_usd_estimate, 0);
@@ -95,7 +110,7 @@ export const CostTab: React.FC<CostTabProps> = ({
 
       {/* Cost Findings + Per-Agent Budget Governor */}
       <div className="grid grid-cols-1 items-start gap-6 xl:grid-cols-12">
-        <Card className="p-4 xl:col-span-7">
+        <Card className="p-4 xl:col-span-6">
           <SectionHeader
             title="Platform Agent Cost Intelligence Findings (cost_findings)"
             subtitle={cost.cost_findings_subtitle}
@@ -149,7 +164,7 @@ export const CostTab: React.FC<CostTabProps> = ({
           </div>
         </Card>
 
-        <Card className="p-4 xl:col-span-5">
+        <Card className="p-4 xl:col-span-6">
           <SectionHeader
             title="Per-Agent Daily Token Budget Ledger"
             subtitle={cost.tier_budgets_summary}
@@ -173,7 +188,7 @@ export const CostTab: React.FC<CostTabProps> = ({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200 num-tabular">
-                {court.map((a) => (
+                {(court || []).map((a) => (
                   <tr key={a.id} className="hover:bg-slate-50">
                     <td className="px-3 py-2 font-mono font-semibold text-slate-900 whitespace-nowrap">
                       {a.id}
