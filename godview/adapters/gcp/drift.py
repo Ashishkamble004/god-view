@@ -287,14 +287,25 @@ def resolve_gcp_project_id(
 
 
 def resolve_gcp_bearer_token(explicit_token: str | None = None) -> str:
-    """Resolve GCP OAuth2 Bearer token from explicit argument, environment, or GCE metadata server."""
+    """Resolve GCP OAuth2 Bearer token from explicit argument, environment, ADC, or GCE metadata server."""
     if explicit_token and explicit_token.strip():
         return explicit_token.strip()
     for env_key in ("GOOGLE_OAUTH_ACCESS_TOKEN", "GCP_ACCESS_TOKEN"):
         val = os.environ.get(env_key, "").strip()
         if val:
             return val
-    if os.environ.get("GODVIEW_ENV", "").strip().lower() == "gcp":
+    try:
+        import google.auth
+        import google.auth.transport.requests
+
+        creds, _ = google.auth.default()
+        req = google.auth.transport.requests.Request()
+        creds.refresh(req)
+        if creds.token:
+            return str(creds.token).strip()
+    except Exception:
+        pass
+    if os.environ.get("GODVIEW_ENV", "").strip().lower() == "gcp" or bool(os.environ.get("K_SERVICE")):
         try:
             resp = httpx.get(
                 "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",

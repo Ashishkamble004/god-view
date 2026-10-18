@@ -53,6 +53,7 @@ from godview_shared.contracts import (
     DiscoveredEdgeDoc,
     DiscoveredServiceDoc,
     DiscoveredServiceKind,
+    Posture,
     TrustDecision,
     TrustViolation,
 )
@@ -382,6 +383,10 @@ class CloudAssetInventoryAdapter(_BaseGcpAdapter):
         asset_kind_map: dict[str, DiscoveredServiceKind] = {
             "run.googleapis.com/Service": "cloud_run",
             "container.googleapis.com/Cluster": "gke_workload",
+            "apps/Deployment": "gke_workload",
+            "apps.k8s.io/Deployment": "gke_workload",
+            "k8s.io/Deployment": "gke_workload",
+            "k8s.io/Service": "gke_workload",
             "compute.googleapis.com/Instance": "gce_instance",
             "sqladmin.googleapis.com/Instance": "cloud_sql",
             "storage.googleapis.com/Bucket": "gcs_bucket",
@@ -613,6 +618,44 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
             if is_observer:
                 labels["godview_role"] = "observer"
 
+            # 1. Extract environment variable names for evidence bundle (values stripped)
+            template = svc.get("template", {})
+            containers = template.get("containers", [])
+            env_var_names: list[str] = []
+            for container in containers:
+                for env_entry in container.get("env") or []:
+                    ename = str(env_entry.get("name", "")).strip()
+                    if ename:
+                        env_var_names.append(ename)
+                        labels[f"env_var_{ename}"] = "set"
+            if env_var_names:
+                labels["env_vars"] = ",".join(sorted(set(env_var_names)))
+
+            # 2. Extract and normalize posture for Cloud Run (ingress, iap, invoker_iam)
+            raw_ingress = str(svc.get("ingress", "INGRESS_TRAFFIC_ALL"))
+            invoker_iam_disabled = bool(svc.get("invokerIamDisabled", False))
+            clean_ingress = raw_ingress.lower()
+            if (
+                "load_balancer" in clean_ingress
+                or "internal_and" in clean_ingress
+                or "cloud-load-balancing" in clean_ingress
+            ):
+                norm_ingress = "internal-and-cloud-load-balancing"
+            elif "internal" in clean_ingress:
+                norm_ingress = "internal-only"
+            else:
+                norm_ingress = "all"
+
+            posture = Posture(
+                ingress=norm_ingress,
+                iap=False,
+                invoker_iam=not invoker_iam_disabled,
+                details={
+                    "ingress": raw_ingress,
+                    "invoker_iam_disabled": invoker_iam_disabled,
+                },
+            )
+
             uri = str(svc.get("uri", full_name))
             doc_id = f"{self.env_id}__cloud_run.{short_name}"
             services.append(
@@ -624,6 +667,7 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
                     adapter_family="gcp",
                     locator=uri,
                     labels=labels,
+                    posture=posture,
                     metrics_endpoint=f"{uri.rstrip('/')}/metrics"
                     if uri.startswith("http")
                     else None,
@@ -635,17 +679,16 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
             )
 
             # Discover outbound service dependencies from env var references
-            template = svc.get("template", {})
-            containers = template.get("containers", [])
             for container in containers:
                 for env_entry in container.get("env") or []:
                     env_val = str(env_entry.get("value", ""))
-                    if not env_val:
+                    ename = str(env_entry.get("name", ""))
+                    if not env_val and not ename:
                         continue
                     target_name: str | None = None
                     if env_val.startswith(("http://", "https://")):
                         parsed = urlparse(env_val)
-                        host = parsed.hostname or ""
+                        host = (parsed.hostname or "").lower()
                         if host in service_lookup:
                             target_name = service_lookup[host]
                         elif ".run.app" in host:
@@ -659,11 +702,23 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
                                 target_name = "-".join(parts[:-2]) if len(parts) >= 3 and len(parts[-2]) >= 8 else parts[0]
                         else:
                             for sn in service_lookup.values():
-                                if host == sn or host.startswith(f"{sn}:"):
+                                if host == sn or host.startswith(f"{sn}:") or host.startswith(f"{sn}."):
                                     target_name = sn
                                     break
+                    elif ":" in env_val and not env_val.startswith("{"):
+                        host = env_val.split(":")[0].lower()
+                        if host in service_lookup:
+                            target_name = service_lookup[host]
                     elif env_val in service_lookup:
                         target_name = service_lookup[env_val]
+
+                    # Also check if env var name references a known service
+                    if not target_name and (ename.endswith("_URL") or ename.endswith("_SERVICE")):
+                        norm_var = ename.lower().replace("_", "-")
+                        for sn in service_lookup.values():
+                            if sn in norm_var:
+                                target_name = sn
+                                break
 
                     if target_name and target_name != short_name:
                         target_id = f"{self.env_id}__cloud_run.{target_name}"
@@ -1188,9 +1243,15 @@ class GkeAdapter(_BaseGcpAdapter):
 
         now_iso = datetime.now(tz=UTC).isoformat()
         services: list[DiscoveredServiceDoc] = []
+        edges: list[DiscoveredEdgeDoc] = []
+
+        seen_service_names: set[str] = set()
+        primary_cl_id: str | None = None
 
         for cl in clusters:
             cl_name = str(cl.get("name", ""))
+            if not cl_name:
+                continue
             labels = dict(cl.get("resourceLabels") or {})
             is_observer = (
                 labels.get("godview_role") == "observer"
@@ -1198,9 +1259,13 @@ class GkeAdapter(_BaseGcpAdapter):
             )
             if is_observer:
                 labels["godview_role"] = "observer"
+            cl_doc_id = f"{self.env_id}__gke_workload.{cl_name}"
+            if not primary_cl_id:
+                primary_cl_id = cl_doc_id
+            seen_service_names.add(cl_name)
             services.append(
                 DiscoveredServiceDoc(
-                    doc_id=f"{self.env_id}__gke_workload.{cl_name}",
+                    doc_id=cl_doc_id,
                     env_id=self.env_id,
                     name=cl_name,
                     kind="gke_workload",
@@ -1213,9 +1278,80 @@ class GkeAdapter(_BaseGcpAdapter):
                     status="active",
                 )
             )
+
+        # Discover GKE deployments/workloads from Compute Engine NEGs
+        raw_negs: list[dict[str, Any]] = []
+        if self._fixtures and "negs" in self._fixtures:
+            raw_negs.extend(self._fixtures["negs"])
+        else:
+            try:
+                neg_url = f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/aggregated/networkEndpointGroups"
+                raw_negs = await self._fetch_paginated(neg_url, "items")
+            except Exception:
+                for reg in (self.regions or [self.region]):
+                    try:
+                        reg_url = f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/regions/{reg}/networkEndpointGroups"
+                        raw_negs.extend(await self._fetch_paginated(reg_url, "items"))
+                    except Exception:
+                        pass
+
+        for neg in raw_negs:
+            neg_name = str(neg.get("name", ""))
+            if not neg_name:
+                continue
+            if "k8s" in neg_name.lower():
+                dep_name = neg_name
+                dep_name = re.sub(r"^k8s[12]?-", "", dep_name)
+                dep_name = re.sub(r"^[a-z0-9]{8}-", "", dep_name)
+                dep_name = re.sub(
+                    r"^(?:us|europe|asia|australia|northamerica|southamerica)-[a-z0-9]+(?:-[a-z])?-",
+                    "",
+                    dep_name,
+                )
+                dep_name = re.sub(r"^(?:default|prod|staging|kube-system)-", "", dep_name)
+                dep_name = re.sub(r"-\d+-[a-z0-9]+$", "", dep_name)
+                dep_name = re.sub(r"-[a-z0-9]{8,}$", "", dep_name).strip()
+
+                if dep_name and dep_name not in seen_service_names:
+                    seen_service_names.add(dep_name)
+                    dep_doc_id = f"{self.env_id}__gke_workload.{dep_name}"
+                    services.append(
+                        DiscoveredServiceDoc(
+                            doc_id=dep_doc_id,
+                            env_id=self.env_id,
+                            name=dep_name,
+                            kind="gke_workload",
+                            adapter_family="gcp",
+                            locator=f"gke://workload/{dep_name}",
+                            labels={"managed_by": "gke", "neg_name": neg_name},
+                            classification="journey_linked",
+                            first_seen=now_iso,
+                            last_seen=now_iso,
+                            status="active",
+                        )
+                    )
+                    if primary_cl_id:
+                        edges.append(
+                            DiscoveredEdgeDoc(
+                                doc_id=f"{primary_cl_id}__to__{dep_doc_id}",
+                                src=primary_cl_id,
+                                dst=dep_doc_id,
+                                protocol="k8s",
+                                evidence="k8s_neg",
+                                evidence_kind="config",
+                                confidence=1.0,
+                                first_seen=now_iso,
+                                last_seen=now_iso,
+                            )
+                        )
+
         return DiscoveryResult(
             services=services,
-            evidence={"clusters_count": len(clusters)},
+            edges=edges,
+            evidence={
+                "clusters_count": len(clusters),
+                "workloads_count": len(services) - len(clusters),
+            },
         )
 
     def senses(self) -> list[SenseCategory]:

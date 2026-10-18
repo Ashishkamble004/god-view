@@ -7,6 +7,7 @@ evidence-only business context inference, canonical topology graph, and zero pla
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from collections.abc import Sequence
@@ -100,6 +101,7 @@ class PerceptionOrgan:
         llm: Any | None = None,
         inferencer: BusinessContextInferencer | None = None,
         topology_builder: TopologyBuilder | None = None,
+        context: Any | None = None,
     ) -> None:
         self._firestore = firestore
         self._pubsub = pubsub
@@ -110,6 +112,7 @@ class PerceptionOrgan:
         self._inferencer = inferencer or BusinessContextInferencer(llm=llm, firestore=firestore)
         self._env_id = resolve_env_id(self._settings)
         self._topology_builder = topology_builder or TopologyBuilder(env_id=self._env_id)
+        self._context = context
         self._last_report: PerceptionReport | None = None
         self._last_topology: TopologyReport | None = None
 
@@ -199,7 +202,7 @@ class PerceptionOrgan:
         if hasattr(self._topology_builder, "env_id"):
             self._topology_builder.env_id = env_id
 
-        # Step 4: Classify resources and infer business context from evidence
+        # Step 4: Classify resources and prepare service documents
         edge_nodes: set[str] = set()
         for e in discovered_edges:
             edge_nodes.add(e.src)
@@ -211,7 +214,16 @@ class PerceptionOrgan:
                 continue
             filtered_services.append(svc)
 
+        # Propagate API Gateway routes to downstream backend services
+        gateway_routes_by_backend: dict[str, list[dict[str, Any]]] = {}
+        for s in filtered_services:
+            if s.kind == "api_gateway" and s.routes:
+                for e in discovered_edges:
+                    if e.src == s.doc_id:
+                        gateway_routes_by_backend.setdefault(e.dst, []).extend(s.routes)
+
         seen_service_doc_ids: set[str] = set()
+        services_to_persist: list[DiscoveredServiceDoc] = []
         for svc in filtered_services:
             doc_id = svc.doc_id or f"{svc.env_id}__{svc.kind}.{svc.name}"
             seen_service_doc_ids.add(doc_id)
@@ -225,39 +237,19 @@ class PerceptionOrgan:
             if is_observer:
                 svc.labels["godview_role"] = "observer"
 
-            # Check if business context already exists or can be inferred
+            # Attach propagated gateway routes if service has no routes of its own
+            if not svc.routes and doc_id in gateway_routes_by_backend:
+                svc.routes = list(gateway_routes_by_backend[doc_id])
+
+            # Check if business context already exists in service or Firestore
             business_ctx = svc.business_context
-            if business_ctx is None and self._inferencer is not None:
-                # Check stored doc first for cached business context
-                existing_doc = self._firestore.get("discovered_services", doc_id) if hasattr(self._firestore, "get") else None
+            if business_ctx is None and hasattr(self._firestore, "get"):
+                existing_doc = self._firestore.get("discovered_services", doc_id)
                 if existing_doc and existing_doc.get("business_context"):
                     try:
                         business_ctx = BusinessContext(**existing_doc["business_context"])
                     except Exception:
                         business_ctx = None
-
-                if business_ctx is None:
-                    try:
-                        business_ctx = await self._inferencer.infer_service_context(
-                            svc, discovered_edges
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            "Business context inference failed for '%s': %s",
-                            svc.name,
-                            exc,
-                        )
-
-            embedding = svc.purpose_embedding
-            if embedding is None and self._llm is not None and hasattr(self._llm, "embed"):
-                embed_text = (business_ctx.role_summary if business_ctx else "") or (svc.inferred_role or "")
-                if embed_text:
-                    try:
-                        vecs = await self._llm.embed([embed_text])
-                        if vecs and len(vecs[0]) == 768:
-                            embedding = vecs[0]
-                    except Exception:
-                        embedding = None
 
             existing = self._firestore.get("discovered_services", doc_id) if hasattr(self._firestore, "get") else None
             updated_doc = svc.model_copy(
@@ -266,12 +258,12 @@ class PerceptionOrgan:
                     "classification": classification,
                     "inferred_role": svc.inferred_role,
                     "role_confidence": svc.role_confidence,
-                    "purpose_embedding": embedding,
                     "business_context": business_ctx,
                     "status": "active",
                     "last_seen": now_iso,
                 }
             )
+            services_to_persist.append(updated_doc)
             if hasattr(self._firestore, "set"):
                 self._firestore.set(
                     "discovered_services",
@@ -289,6 +281,24 @@ class PerceptionOrgan:
                         "name": svc.name,
                         "kind": svc.kind,
                     },
+                )
+
+        # Persist discovered edges & entities IMMEDIATELY (never blocked by LLM)
+        if hasattr(self._firestore, "set"):
+            for edge in discovered_edges:
+                edge_id = edge.doc_id or f"{edge.src}__to__{edge.dst}"
+                self._firestore.set(
+                    "discovered_edges",
+                    edge_id,
+                    edge.model_copy(update={"doc_id": edge_id}).model_dump(mode="json"),
+                )
+
+            for ent in discovered_entities:
+                ent_id = ent.doc_id or f"{env_id}__{ent.name}"
+                self._firestore.set(
+                    "discovered_entities",
+                    ent_id,
+                    ent.model_copy(update={"doc_id": ent_id}).model_dump(mode="json"),
                 )
 
         # Step 6: Continuous re-perception diff — mark disappeared services as 'gone'
@@ -323,25 +333,7 @@ class PerceptionOrgan:
                             },
                         )
 
-        # Persist discovered edges & entities
-        if hasattr(self._firestore, "set"):
-            for edge in discovered_edges:
-                edge_id = edge.doc_id or f"{edge.src}__to__{edge.dst}"
-                self._firestore.set(
-                    "discovered_edges",
-                    edge_id,
-                    edge.model_copy(update={"doc_id": edge_id}).model_dump(mode="json"),
-                )
-
-            for ent in discovered_entities:
-                ent_id = ent.doc_id or f"{env_id}__{ent.name}"
-                self._firestore.set(
-                    "discovered_entities",
-                    ent_id,
-                    ent.model_copy(update={"doc_id": ent_id}).model_dump(mode="json"),
-                )
-
-        # Persist journeys from real state-machine entities or inferred trace DAGs (zero placeholder flow)
+        # Persist state-machine journeys immediately
         journey_keys: list[str] = []
         if hasattr(self._firestore, "set"):
             for ent in discovered_entities:
@@ -359,20 +351,11 @@ class PerceptionOrgan:
                     )
                     self._firestore.set("journeys", j_key, j_doc.model_dump(mode="json"))
 
-            if self._inferencer is not None:
-                inferred_journeys = await self._inferencer.infer_journeys_from_topology(
-                    filtered_services, discovered_edges
-                )
-                for ij in inferred_journeys:
-                    if ij.name not in journey_keys:
-                        journey_keys.append(ij.name)
-                        self._firestore.set("journeys", ij.doc_id, ij.model_dump(mode="json"))
-
         # Step 5: Assemble court spawn plan (evidence-only, zero placeholders)
         spawn_plan: list[dict[str, Any]] = []
         repos_seen: set[str] = set()
 
-        for svc in filtered_services:
+        for svc in services_to_persist:
             doc_id = svc.doc_id or f"{svc.env_id}__{svc.kind}.{svc.name}"
             stored_svc = (
                 self._firestore.get("discovered_services", doc_id)
@@ -424,7 +407,7 @@ class PerceptionOrgan:
             }
         )
 
-        # Build canonical topology report for cockpit with real incidents and golden signals
+        # Build canonical topology report for cockpit immediately
         stored_journeys: list[JourneyDoc] = []
         incidents_by_node: dict[str, list[dict[str, Any]]] = {}
         golden_by_node: dict[str, dict[str, Any]] = {}
@@ -450,7 +433,7 @@ class PerceptionOrgan:
                     golden_by_node[node] = g
 
         topology_report = self._topology_builder.build(
-            services=filtered_services,
+            services=services_to_persist,
             edges=discovered_edges,
             journeys=stored_journeys,
             incidents=incidents_by_node,
@@ -464,7 +447,7 @@ class PerceptionOrgan:
             identity=identity,
             adapter_health=health_reports,
             agent_registry_discovered=agent_registry_discovered,
-            services_count=len(filtered_services),
+            services_count=len(services_to_persist),
             edges_count=len(discovered_edges),
             entities_count=len(discovered_entities),
             journeys_count=len(journey_keys),
@@ -472,6 +455,102 @@ class PerceptionOrgan:
             vanished_service_ids=vanished_ids,
         )
         self._last_report = report
+
+        # Update context timestamps & auto-register sentinels immediately at end of Phase 1
+        now_dt = datetime.now(tz=UTC)
+        if self._context is not None:
+            if hasattr(self._context, "last_perception_at"):
+                self._context.last_perception_at = now_dt
+            if hasattr(self._context, "loop_heartbeats") and isinstance(self._context.loop_heartbeats, dict):
+                self._context.loop_heartbeats["perception"] = now_dt
+            engine = getattr(self._context, "sentinel_engine", None)
+            if engine is not None and hasattr(engine, "register_sentinel"):
+                from godview.sovereign.sentinels.pack import compile_universal_sentinels
+                try:
+                    new_sentinels = compile_universal_sentinels(
+                        services=services_to_persist, edges=discovered_edges
+                    )
+                    for snt in new_sentinels:
+                        existing = (
+                            self._firestore.get("sentinels", snt.sentinel_id)
+                            if hasattr(self._firestore, "get")
+                            else None
+                        )
+                        if existing is None:
+                            engine.register_sentinel(snt)
+                except Exception as snt_exc:
+                    logger.warning("Failed to auto-register universal sentinels: %s", snt_exc)
+
+        # Phase 2: Run business context inference with bounded concurrency (never blocking initial discovery)
+        if self._inferencer is not None:
+            services_needing_inference = [
+                s for s in services_to_persist
+                if s.business_context is None
+                or getattr(s.business_context, "confidence", 0.0) == 0.0
+            ]
+            if services_needing_inference:
+                sem = asyncio.Semaphore(5)
+
+                async def _infer_one(svc: DiscoveredServiceDoc) -> None:
+                    async with sem:
+                        try:
+                            ctx_res = await self._inferencer.infer_service_context(
+                                svc, discovered_edges
+                            )
+                            if ctx_res:
+                                svc.business_context = ctx_res
+                                if hasattr(self._firestore, "set"):
+                                    self._firestore.set(
+                                        "discovered_services",
+                                        svc.doc_id,
+                                        {"business_context": ctx_res.model_dump(mode="json")},
+                                        merge=True,
+                                    )
+                        except Exception as exc:
+                            logger.warning("Async inference failed for '%s': %s", svc.name, exc)
+                        finally:
+                            if (
+                                self._context is not None
+                                and hasattr(self._context, "loop_heartbeats")
+                                and isinstance(self._context.loop_heartbeats, dict)
+                            ):
+                                self._context.loop_heartbeats["perception"] = datetime.now(tz=UTC)
+
+                await asyncio.gather(*[_infer_one(s) for s in services_needing_inference], return_exceptions=True)
+
+            # Infer journeys from trace DAGs if traces exist
+            try:
+                inferred_journeys = await self._inferencer.infer_journeys_from_topology(
+                    services_to_persist, discovered_edges
+                )
+                new_inferred = []
+                for ij in inferred_journeys:
+                    if ij.name not in journey_keys:
+                        journey_keys.append(ij.name)
+                        new_inferred.append(ij)
+                        if hasattr(self._firestore, "set"):
+                            self._firestore.set("journeys", ij.doc_id, ij.model_dump(mode="json"))
+                if new_inferred:
+                    stored_journeys.extend(new_inferred)
+                    self._last_topology = self._topology_builder.build(
+                        services=services_to_persist,
+                        edges=discovered_edges,
+                        journeys=stored_journeys,
+                        incidents=incidents_by_node,
+                        golden_signals=golden_by_node,
+                    )
+                    report.journeys_count = len(journey_keys)
+                    self._last_report = report
+            except Exception as exc:
+                logger.warning("Journey trace DAG inference failed: %s", exc)
+
+        if self._context is not None:
+            now_dt = datetime.now(tz=UTC)
+            if hasattr(self._context, "last_perception_at"):
+                self._context.last_perception_at = now_dt
+            if hasattr(self._context, "loop_heartbeats") and isinstance(self._context.loop_heartbeats, dict):
+                self._context.loop_heartbeats["perception"] = now_dt
+
         return report
 
 
@@ -512,16 +591,21 @@ def install(ctx: Any) -> None:
         llm=llm,
         inferencer=inferencer,
         topology_builder=builder,
+        context=ctx,
     )
     if hasattr(ctx, "__dict__"):
         ctx.perception = organ
 
     # Register perception hook on ctx.hooks.perception_tick idempotently
     if hasattr(ctx, "hooks") and hasattr(ctx.hooks, "perception_tick"):
-        async def _organ_perceive_hook() -> None:
-            await organ.perceive()
+        async def _organ_perceive_hook() -> PerceptionReport:
+            rep = await organ.perceive()
+            now_dt = datetime.now(tz=UTC)
             if hasattr(ctx, "last_perception_at"):
-                ctx.last_perception_at = datetime.now(tz=UTC)
+                ctx.last_perception_at = now_dt
+            if hasattr(ctx, "loop_heartbeats") and isinstance(ctx.loop_heartbeats, dict):
+                ctx.loop_heartbeats["perception"] = now_dt
+            return rep
 
         existing_names = {getattr(fn, "__name__", "") for fn in ctx.hooks.perception_tick}
         if "_organ_perceive_hook" not in existing_names:

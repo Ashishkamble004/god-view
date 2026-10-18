@@ -111,11 +111,39 @@ class ApiGatewayAdapter(SenseAdapter):
         return results
 
     async def _fetch_gateways(self) -> list[dict[str, Any]]:
-        url = (
-            f"https://apigateway.googleapis.com/v1/projects/{self.project_id}/"
-            f"locations/-/gateways"
-        )
-        return await self._fetch_paginated(url, "gateways")
+        results: list[dict[str, Any]] = []
+        seen_names: set[str] = set()
+
+        # 1. Try wild-card location '-'
+        try:
+            url = f"https://apigateway.googleapis.com/v1/projects/{self.project_id}/locations/-/gateways"
+            for gw in await self._fetch_paginated(url, "gateways"):
+                name = gw.get("name")
+                if name and name not in seen_names:
+                    seen_names.add(name)
+                    results.append(gw)
+        except Exception:
+            pass
+
+        if results:
+            return results
+
+        # 2. Query configured region and standard GCP locations (API Gateway requires explicit location if '-' not supported)
+        locs = [self.region, "us-central1", "us-east1", "us-west1", "europe-west1", "asia-east1", "global"]
+        for loc in locs:
+            if not loc:
+                continue
+            try:
+                url = f"https://apigateway.googleapis.com/v1/projects/{self.project_id}/locations/{loc}/gateways"
+                for gw in await self._fetch_paginated(url, "gateways"):
+                    name = gw.get("name")
+                    if name and name not in seen_names:
+                        seen_names.add(name)
+                        results.append(gw)
+            except Exception:
+                pass
+
+        return results
 
     async def _fetch_api_config(self, api_config_name: str) -> dict[str, Any]:
         """Fetch api config with view=FULL to retrieve OpenAPI spec documents."""
