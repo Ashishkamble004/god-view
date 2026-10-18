@@ -63,6 +63,8 @@ from godview.adapters.gcp.apigateway import ApiGatewayAdapter
 from godview.adapters.gcp.drift import (
     TerraformDriftAdapter,
     UnmanagedResourceError,
+    _impersonate_act_sa_async,
+    _impersonate_act_sa_sync,
     assert_managed_resource,
     assert_valid_mutating_trust,
     build_fixture_http_transport,
@@ -229,8 +231,9 @@ def _assert_ssrf_safe_url(url: str, allow_private: bool = False) -> None:
     try:
         for res in socket.getaddrinfo(host, None):
             _check_ip(ipaddress.ip_address(res[4][0]), allow_private, raw_host)
-    except (socket.gaierror, OSError):
-        pass
+    except (socket.gaierror, OSError) as exc:
+        if not allow_private:
+            raise ValueError(f"SSRF violation: failed to resolve host '{raw_host}': {exc}") from exc
 
 
 class _BaseGcpAdapter(SenseAdapter):
@@ -522,6 +525,50 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
         self._obs_mcp = observability_mcp
         self._fallback_timeseries = fallback_timeseries or []
         self._probe_sender = probe_sender
+        self._discovered_hosts: set[str] = set()
+        if fixtures:
+            for s in fixtures.get("cloud_run_v2", {}).get("services", []):
+                s_name = str(s.get("name", "")).rsplit("/", 1)[-1]
+                if s_name:
+                    self._discovered_hosts.add(f"{s_name}.internal")
+                    self._discovered_hosts.add(f"{s_name}.run.app")
+                for key in ("locator", "uri", "url"):
+                    val = str(s.get(key) or "")
+                    if "://" in val:
+                        h = (urlsplit(val).hostname or "").lower().rstrip(".")
+                        if h:
+                            self._discovered_hosts.add(h)
+            for s in fixtures.get("services", []):
+                s_name = str(s.get("name", "")).rsplit("/", 1)[-1]
+                if s_name:
+                    self._discovered_hosts.add(f"{s_name}.internal")
+                    self._discovered_hosts.add(f"{s_name}.run.app")
+                for key in ("locator", "uri", "url"):
+                    val = str(s.get(key) or "")
+                    if "://" in val:
+                        h = (urlsplit(val).hostname or "").lower().rstrip(".")
+                        if h:
+                            self._discovered_hosts.add(h)
+            trace_dict = (
+                fixtures.get("trace")
+                if isinstance(fixtures.get("trace"), dict)
+                else (
+                    fixtures.get("cloud_trace")
+                    if isinstance(fixtures.get("cloud_trace"), dict)
+                    else {}
+                )
+            )
+            for trace in trace_dict.get("traces", []):
+                for span in trace.get("spans", []):
+                    s_name = span.get("labels", {}).get("service.name")
+                    if s_name:
+                        self._discovered_hosts.add(f"{s_name}.internal")
+                        self._discovered_hosts.add(f"{s_name}.run.app")
+                    for lbl_key, lbl_val in span.get("labels", {}).items():
+                        if "url" in lbl_key.lower() and "://" in str(lbl_val):
+                            h = (urlsplit(str(lbl_val)).hostname or "").lower().rstrip(".")
+                            if h:
+                                self._discovered_hosts.add(h)
 
     async def _fetch_services(self, region: str | None = None) -> list[dict[str, Any]]:
         # Plan §3.2: all regions with locations/- or explicit region
@@ -709,7 +756,8 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
                 if s_name == short or full_name == target_name:
                     ingress = svc.get("ingress", "INGRESS_TRAFFIC_ALL")
                     invoker_iam_disabled = bool(svc.get("invokerIamDisabled", False))
-                    has_all_users = False
+                    has_all_users: bool | None = False
+                    iam_error: str | None = None
                     try:
                         async with self._http_client() as client:
                             iam_resp = await client.get(
@@ -717,20 +765,30 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
                             )
                             if iam_resp.status_code == 200:
                                 policy_data = iam_resp.json()
+                                has_all_users = False
                                 for b in policy_data.get("bindings", []):
                                     if "roles/run.invoker" in b.get("role", ""):
-                                        if "allUsers" in b.get("members", []):
+                                        members = b.get("members", [])
+                                        if "allUsers" in members or "allAuthenticatedUsers" in members:
                                             has_all_users = True
                                             break
-                            elif self._fixtures and "iam_policies" in self._fixtures:
+                            elif self._transport is not None and self._fixtures and "iam_policies" in self._fixtures:
+                                has_all_users = False
                                 for b in self._fixtures["iam_policies"].get(short, {}).get("bindings", []):
-                                    if "roles/run.invoker" in b.get("role", "") and "allUsers" in b.get("members", []):
-                                        has_all_users = True
-                    except Exception:
-                        pass
+                                    if "roles/run.invoker" in b.get("role", ""):
+                                        members = b.get("members", [])
+                                        if "allUsers" in members or "allAuthenticatedUsers" in members:
+                                            has_all_users = True
+                                            break
+                            else:
+                                has_all_users = None
+                                iam_error = f"getIamPolicy HTTP {iam_resp.status_code}: {iam_resp.text[:120]}"
+                    except Exception as exc:
+                        has_all_users = None
+                        iam_error = f"getIamPolicy error: {exc}"
 
                     labels = dict(svc.get("labels") or {})
-                    return {
+                    res_dict: dict[str, Any] = {
                         "service_name": short,
                         "found": True,
                         "ingress": ingress,
@@ -740,6 +798,9 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
                         "iap": False,
                         "waf": None,
                     }
+                    if iam_error is not None:
+                        res_dict["iam_error"] = iam_error
+                    return res_dict
         except Exception as exc:
             return {"service_name": short, "found": False, "error": str(exc), "ingress": "unknown"}
         return {
@@ -870,7 +931,12 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
         body = copy.deepcopy(dict(args.get("body") or {}))
         body["is_ai_generated"] = True
 
-        _assert_ssrf_safe_url(url, allow_private=bool(args.get("allow_private", False)))
+        raw_host = (urlsplit(url).hostname or "").lower()
+        host = raw_host.rstrip(".")
+        discovered = set(self._discovered_hosts) if hasattr(self, "_discovered_hosts") else set()
+        allow_private = (raw_host in discovered or host in discovered)
+
+        _assert_ssrf_safe_url(url, allow_private=allow_private)
 
         # Sanitize caller headers: strip platform credentials, metadata headers, proxy auth, and cookies
         safe_headers: dict[str, str] = {}
@@ -942,7 +1008,10 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
         trust_decision: TrustDecision | None,
     ) -> dict[str, Any]:
         """Synchronous defence-in-depth entrypoint for `run.restore_revision_config`."""
-        assert_valid_mutating_trust("run.restore_revision_config", trust_decision)
+        td = assert_valid_mutating_trust("run.restore_revision_config", trust_decision)
+        if not td.sa_to_impersonate:
+            raise TrustViolation("run.restore_revision_config requires an authorized sa_to_impersonate")
+
         service_name = str(args.get("service_name", ""))
         caller_labels = (
             dict(args["labels"]) if "labels" in args and args["labels"] is not None else None
@@ -956,31 +1025,31 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
             target_region = self.region
 
         short_name = service_name.rsplit("/", 1)[-1]
-        live_labels = None
-        try:
-            with self._sync_http_client() as client:
-                url = f"https://run.googleapis.com/v2/projects/{self.project_id}/locations/{target_region}/services/{short_name}"
-                resp = client.get(url)
-                if resp.status_code == 200:
-                    live_labels = dict(resp.json().get("labels") or {})
-        except Exception:
-            pass
-        if live_labels is None:
-            live_labels = self._lookup_live_service_labels_sync(service_name)
-        assert_managed_resource(caller_labels, service_name, live_labels=live_labels)
-
-        desired_config = dict(args.get("desired_config") or {})
-        previous_config = dict(args.get("previous_config") or {})
-        update_mask = "template.scaling,template.containers,template.maxInstanceRequestConcurrency"
-        patch_url = (
-            f"https://run.googleapis.com/v2/projects/{self.project_id}/"
-            f"locations/{target_region}/services/{short_name}"
-        )
         with self._sync_http_client() as client:
-            resp = client.patch(patch_url, params={"updateMask": update_mask}, json=desired_config)
+            act_token = _impersonate_act_sa_sync(
+                client, self.project_id, td.sa_to_impersonate, self.bearer_token
+            )
+            # Query live labels strictly in target_region!
+            live_labels = None
+            url = f"https://run.googleapis.com/v2/projects/{self.project_id}/locations/{target_region}/services/{short_name}"
+            resp = client.get(url)
+            if resp.status_code == 200:
+                live_labels = dict(resp.json().get("labels") or {})
+            assert_managed_resource(caller_labels, service_name, live_labels=live_labels)
+
+            desired_config = dict(args.get("desired_config") or {})
+            previous_config = dict(args.get("previous_config") or {})
+            update_mask = "template.scaling,template.containers,template.maxInstanceRequestConcurrency"
+            patch_url = (
+                f"https://run.googleapis.com/v2/projects/{self.project_id}/"
+                f"locations/{target_region}/services/{short_name}"
+            )
+            headers = {"Authorization": f"Bearer {act_token}"}
+            resp = client.patch(patch_url, params={"updateMask": update_mask}, json=desired_config, headers=headers)
             resp.raise_for_status()
             api_response = resp.json()
 
+        sa_used = td.sa_to_impersonate
         effective_labels = dict(live_labels if live_labels is not None else (caller_labels or {}))
         return {
             "restored": True,
@@ -989,7 +1058,7 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
             "update_mask": update_mask,
             "applied_config": desired_config,
             "api_response": api_response,
-            "sa_used": None,
+            "sa_used": sa_used,
             "reversal_recipe": {
                 "capability": "run.restore_revision_config",
                 "args": {
@@ -1008,6 +1077,9 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
     ) -> dict[str, Any]:
         """Async execution of `run.restore_revision_config` over `httpx.AsyncClient`."""
         td = assert_valid_mutating_trust("run.restore_revision_config", trust_decision)
+        if not td.sa_to_impersonate:
+            raise TrustViolation("run.restore_revision_config requires an authorized sa_to_impersonate")
+
         service_name = str(args.get("service_name", ""))
         caller_labels = (
             dict(args["labels"]) if "labels" in args and args["labels"] is not None else None
@@ -1032,27 +1104,21 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
             f"locations/{target_region}/services/{short_name}"
         )
 
-        sa_used = None
-        headers = {}
-        if td.sa_to_impersonate and self.auth is not None and hasattr(self.auth, "impersonate_service_account"):
-            try:
-                act_token = await self.auth.impersonate_service_account(td.sa_to_impersonate)
-                if act_token:
-                    headers["Authorization"] = f"Bearer {act_token}"
-                    sa_used = td.sa_to_impersonate
-            except Exception:
-                sa_used = None
-
         async with self._http_client() as client:
+            act_token = await _impersonate_act_sa_async(
+                client, self.project_id, td.sa_to_impersonate, self.bearer_token
+            )
+            headers = {"Authorization": f"Bearer {act_token}"}
             resp = await client.patch(
                 patch_url,
                 params={"updateMask": update_mask},
                 json=desired_config,
-                headers=headers or None,
+                headers=headers,
             )
             resp.raise_for_status()
             api_response = resp.json()
 
+        sa_used = td.sa_to_impersonate
         effective_labels = dict(live_labels if live_labels is not None else (caller_labels or {}))
         return {
             "restored": True,
@@ -2310,7 +2376,31 @@ class PubSubAdapter(_BaseGcpAdapter):
                         target_metric_sub = str(candidate.get("name", "")).rsplit("/", 1)[-1]
                         break
 
-            metric_sub = target_metric_sub or short_sub
+            if dlq_policy and not target_metric_sub:
+                return {
+                    "subscription": short_sub,
+                    "dlq_subscription": None,
+                    "found": bool(matching),
+                    "dlq_configured": True,
+                    "dlq_topic": dlq_topic,
+                    "num_undelivered_messages": None,
+                    "ack_latency_s": None,
+                    "error": "DLQ topic has no subscription; dead-lettered messages are dropped",
+                }
+
+            if not dlq_policy:
+                return {
+                    "subscription": short_sub,
+                    "dlq_subscription": None,
+                    "found": bool(matching),
+                    "dlq_configured": False,
+                    "dlq_topic": None,
+                    "num_undelivered_messages": None,
+                    "ack_latency_s": None,
+                    "error": "No dead-letter policy configured on subscription",
+                }
+
+            metric_sub = target_metric_sub
             metric_full_sub = f"projects/{self.project_id}/subscriptions/{metric_sub}"
 
             num_undelivered: int | None = 0
@@ -3179,11 +3269,47 @@ class HttpProbeAdapter(SenseAdapter):
         *,
         http_transport: httpx.BaseTransport | httpx.AsyncBaseTransport | None = None,
         fixtures: dict[str, Any] | None = None,
+        discovered_hosts: Sequence[str] | set[str] | None = None,
     ) -> None:
         self._fixtures = fixtures
         self._transport = http_transport or (
             build_fixture_http_transport(fixtures) if fixtures is not None else None
         )
+        self._discovered_hosts: set[str] = set(discovered_hosts or [])
+        if fixtures:
+            for s in (fixtures.get("services") or []) + (
+                fixtures.get("cloud_run_v2", {}).get("services", [])
+            ):
+                for key in ("locator", "url", "uri"):
+                    val = str(s.get(key) or "")
+                    if "://" in val:
+                        h = (urlsplit(val).hostname or "").lower().rstrip(".")
+                        if h:
+                            self._discovered_hosts.add(h)
+                s_name = str(s.get("name", "")).rsplit("/", 1)[-1]
+                if s_name:
+                    self._discovered_hosts.add(f"{s_name}.internal")
+                    self._discovered_hosts.add(f"{s_name}.run.app")
+            trace_dict = (
+                fixtures.get("trace")
+                if isinstance(fixtures.get("trace"), dict)
+                else (
+                    fixtures.get("cloud_trace")
+                    if isinstance(fixtures.get("cloud_trace"), dict)
+                    else {}
+                )
+            )
+            for trace in trace_dict.get("traces", []):
+                for span in trace.get("spans", []):
+                    s_name = span.get("labels", {}).get("service.name")
+                    if s_name:
+                        self._discovered_hosts.add(f"{s_name}.internal")
+                        self._discovered_hosts.add(f"{s_name}.run.app")
+                    for lbl_key, lbl_val in span.get("labels", {}).items():
+                        if "url" in lbl_key.lower() and "://" in str(lbl_val):
+                            h = (urlsplit(str(lbl_val)).hostname or "").lower().rstrip(".")
+                            if h:
+                                self._discovered_hosts.add(h)
 
     def senses(self) -> list[SenseCategory]:
         return [SenseCategory.SCOPED_OBSERVABILITY, SenseCategory.SYNTHETIC_INTERROGATION]
@@ -3219,9 +3345,14 @@ class HttpProbeAdapter(SenseAdapter):
             if not url:
                 raise ValueError("http.probe requires a non-empty target url")
 
+            raw_host = (urlsplit(url).hostname or "").lower()
+            host = raw_host.rstrip(".")
+            discovered = set(self._discovered_hosts) if hasattr(self, "_discovered_hosts") else set()
+            allow_private = (raw_host in discovered or host in discovered)
+
             _assert_ssrf_safe_url(
                 url,
-                allow_private=bool(args.get("allow_private", False)),
+                allow_private=allow_private,
             )
 
             # Filter headers: strip sensitive / auth / metadata headers

@@ -927,6 +927,11 @@
           "maxDeliveryAttempts": 5
         },
         "ackDeadlineSeconds": 60
+      },
+      {
+        "name": "projects/test-project-123/subscriptions/sub-events-dlq",
+        "topic": "projects/test-project-123/topics/events-dlq",
+        "ackDeadlineSeconds": 60
       }
     ]
   },

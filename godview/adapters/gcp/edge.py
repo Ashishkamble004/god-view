@@ -285,6 +285,12 @@ class CloudEdgeAdapter(SenseAdapter):
         neg_lookup: dict[str, dict[str, Any]] = {}
         for n in negs:
             n_name = str(n.get("name", ""))
+            self_link = str(n.get("selfLink", ""))
+            if self_link:
+                neg_lookup[self_link] = n
+                if "/networkEndpointGroups/" in self_link:
+                    rel = self_link.split("/networkEndpointGroups/")[1]
+                    neg_lookup[rel] = n
             if n_name:
                 neg_lookup[n_name] = n
 
@@ -355,7 +361,9 @@ class CloudEdgeAdapter(SenseAdapter):
                     waf_posture_str = "default"
 
             sp_doc_id = f"{self.env_id}__security_policy.{p_name}"
-            policy_lookup[p_name] = sp
+            sp_copy = dict(sp)
+            sp_copy["_waf_posture"] = waf_posture_str
+            policy_lookup[p_name] = sp_copy
             services.append(
                 DiscoveredServiceDoc(
                     doc_id=sp_doc_id,
@@ -395,15 +403,12 @@ class CloudEdgeAdapter(SenseAdapter):
             sp_url = str(bs.get("securityPolicy", ""))
             sp_name = sp_url.rsplit("/", 1)[-1] if sp_url else None
 
-            waf_val = "unknown"
-            if sp_name and sp_name in policy_lookup:
-                sp_info = policy_lookup[sp_name]
-                for r in sp_info.get("rules", []):
-                    expr = str(r.get("match", {}).get("expr", {}).get("expression", ""))
-                    if "evaluatePreconfiguredWaf" in expr:
-                        m = _SENSITIVITY_RE.search(expr)
-                        waf_val = f"sensitivity-{m.group(1)}" if m else "missing_sensitivity"
-                        break
+            waf_val = "none"
+            if sp_name:
+                if sp_name in policy_lookup:
+                    waf_val = policy_lookup[sp_name].get("_waf_posture", "unknown")
+                else:
+                    waf_val = "unknown"
 
             bs_doc_id = f"{self.env_id}__backend_service.{bs_name}"
             bs_labels = dict(bs.get("labels") or {})
@@ -457,6 +462,7 @@ class CloudEdgeAdapter(SenseAdapter):
                 )
 
             # Edge from backend service to compute backend (via NEGs or instance groups)
+            seen_service_ids: set[str] = {s.doc_id for s in services}
             backends = bs.get("backends", [])
             for b in backends:
                 group_url = str(b.get("group", ""))
@@ -464,21 +470,27 @@ class CloudEdgeAdapter(SenseAdapter):
                 if group_name:
                     if "/networkEndpointGroups/" in group_url or "neg" in group_name.lower():
                         target_id = f"{self.env_id}__neg.{group_name}"
-                        neg_data = neg_lookup.get(group_name, {})
-                        services.append(
-                            DiscoveredServiceDoc(
-                                doc_id=target_id,
-                                env_id=self.env_id,
-                                name=group_name,
-                                kind="other",
-                                adapter_family="gcp",
-                                locator=group_url or f"compute://neg/{group_name}",
-                                labels={"resource_type": "network_endpoint_group"},
-                                status="active",
-                                first_seen=now_iso,
-                                last_seen=now_iso,
-                            )
+                        neg_data = (
+                            neg_lookup.get(group_url)
+                            or neg_lookup.get(group_name)
+                            or {}
                         )
+                        if target_id not in seen_service_ids:
+                            seen_service_ids.add(target_id)
+                            services.append(
+                                DiscoveredServiceDoc(
+                                    doc_id=target_id,
+                                    env_id=self.env_id,
+                                    name=group_name,
+                                    kind="other",
+                                    adapter_family="gcp",
+                                    locator=group_url or f"compute://neg/{group_name}",
+                                    labels={"resource_type": "network_endpoint_group"},
+                                    status="active",
+                                    first_seen=now_iso,
+                                    last_seen=now_iso,
+                                )
+                            )
                         cr_info = neg_data.get("cloudRun") or {}
                         cr_service = cr_info.get("service")
                         if cr_service:
@@ -512,20 +524,22 @@ class CloudEdgeAdapter(SenseAdapter):
                             )
                     elif "/instanceGroups/" in group_url or "instancegroup" in group_name.lower():
                         target_id = f"{self.env_id}__instance_group.{group_name}"
-                        services.append(
-                            DiscoveredServiceDoc(
-                                doc_id=target_id,
-                                env_id=self.env_id,
-                                name=group_name,
-                                kind="gce_instance",
-                                adapter_family="gcp",
-                                locator=group_url or f"compute://instanceGroup/{group_name}",
-                                labels={"resource_type": "instance_group"},
-                                status="active",
-                                first_seen=now_iso,
-                                last_seen=now_iso,
+                        if target_id not in seen_service_ids:
+                            seen_service_ids.add(target_id)
+                            services.append(
+                                DiscoveredServiceDoc(
+                                    doc_id=target_id,
+                                    env_id=self.env_id,
+                                    name=group_name,
+                                    kind="gce_instance",
+                                    adapter_family="gcp",
+                                    locator=group_url or f"compute://instanceGroup/{group_name}",
+                                    labels={"resource_type": "instance_group"},
+                                    status="active",
+                                    first_seen=now_iso,
+                                    last_seen=now_iso,
+                                )
                             )
-                        )
                     else:
                         target_id = f"{self.env_id}__backend_group.{group_name}"
                     edges.append(
@@ -642,11 +656,7 @@ class CloudEdgeAdapter(SenseAdapter):
         trust_decision: TrustDecision | None = None,
     ) -> Any:
         if capability_id == "edge.describe_backends":
-            try:
-                backends = await self._fetch_backend_services()
-            except Exception as exc:
-                self._errors["describe_backends"] = str(exc)
-                return []
+            backends = await self._fetch_backend_services()
             try:
                 url_maps = await self._fetch_url_maps()
                 backend_hosts: dict[str, list[str]] = {}
@@ -672,12 +682,7 @@ class CloudEdgeAdapter(SenseAdapter):
             return backends
 
         if capability_id == "edge.describe_security_policies":
-            try:
-                policies = await self._fetch_security_policies()
-            except Exception as exc:
-                self._errors["describe_security_policies"] = str(exc)
-                return []
-
+            policies = await self._fetch_security_policies()
             parsed_policies: list[dict[str, Any]] = []
             for p in policies:
                 p_copy = copy.deepcopy(p)

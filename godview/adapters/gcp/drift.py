@@ -165,6 +165,92 @@ def assert_valid_mutating_trust(
     return trust_decision
 
 
+def _snake_to_camel(s: str) -> str:
+    """Convert snake_case identifier to camelCase for GCP API field names."""
+    components = s.split("_")
+    return components[0] + "".join(x.title() for x in components[1:])
+
+
+async def _impersonate_act_sa_async(
+    client: httpx.AsyncClient,
+    project_id: str,
+    sa_to_impersonate: str,
+    bearer_token: str | None = None,
+) -> str:
+    """Impersonate godview-act-sa via IAM Credentials API (TDD I-06). Refuses on failure."""
+    target_sa = (
+        f"{sa_to_impersonate}@{project_id}.iam.gserviceaccount.com"
+        if "@" not in sa_to_impersonate
+        else sa_to_impersonate
+    )
+    endpoint = (
+        f"https://iamcredentials.googleapis.com/v1/projects/-/"
+        f"serviceAccounts/{target_sa}:generateAccessToken"
+    )
+    headers = {"Accept": "application/json"}
+    if bearer_token:
+        headers["Authorization"] = f"Bearer {bearer_token}"
+    resp = await client.post(
+        endpoint,
+        json={
+            "scope": ["https://www.googleapis.com/auth/cloud-platform"],
+            "lifetime": "900s",
+        },
+        headers=headers,
+    )
+    if resp.status_code != 200:
+        raise PermissionError(
+            f"Refusing mutation: impersonation of '{target_sa}' failed with HTTP {resp.status_code}: {resp.text[:120]}"
+        )
+    data = resp.json()
+    token = data.get("accessToken")
+    if not token:
+        raise PermissionError(
+            f"Refusing mutation: IAM Credentials API returned empty accessToken for '{target_sa}'"
+        )
+    return str(token)
+
+
+def _impersonate_act_sa_sync(
+    client: httpx.Client,
+    project_id: str,
+    sa_to_impersonate: str,
+    bearer_token: str | None = None,
+) -> str:
+    """Synchronous impersonation of godview-act-sa via IAM Credentials API (TDD I-06). Refuses on failure."""
+    target_sa = (
+        f"{sa_to_impersonate}@{project_id}.iam.gserviceaccount.com"
+        if "@" not in sa_to_impersonate
+        else sa_to_impersonate
+    )
+    endpoint = (
+        f"https://iamcredentials.googleapis.com/v1/projects/-/"
+        f"serviceAccounts/{target_sa}:generateAccessToken"
+    )
+    headers = {"Accept": "application/json"}
+    if bearer_token:
+        headers["Authorization"] = f"Bearer {bearer_token}"
+    resp = client.post(
+        endpoint,
+        json={
+            "scope": ["https://www.googleapis.com/auth/cloud-platform"],
+            "lifetime": "900s",
+        },
+        headers=headers,
+    )
+    if resp.status_code != 200:
+        raise PermissionError(
+            f"Refusing mutation: impersonation of '{target_sa}' failed with HTTP {resp.status_code}: {resp.text[:120]}"
+        )
+    data = resp.json()
+    token = data.get("accessToken")
+    if not token:
+        raise PermissionError(
+            f"Refusing mutation: IAM Credentials API returned empty accessToken for '{target_sa}'"
+        )
+    return str(token)
+
+
 def resolve_gcp_project_id(
     explicit_project_id: str | None = None,
     fixtures: dict[str, Any] | None = None,
@@ -884,6 +970,7 @@ class TerraformDriftAdapter(SenseAdapter):
 
     async def _fetch_live_resources(
         self,
+        region: str | None = None,
     ) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
         """Fetch live Cloud Run v2, Compute Engine, and Cloud SQL resources over `httpx`."""
         live_run_by_name: dict[str, dict[str, Any]] = {}
@@ -891,12 +978,13 @@ class TerraformDriftAdapter(SenseAdapter):
         live_sql_by_name: dict[str, dict[str, Any]] = {}
 
         async with self._http_client() as client:
-            # 1. Cloud Run (locations/- with pagination)
+            # 1. Cloud Run (locations/{region} or locations/- with pagination)
+            loc = region if region else "-"
             page_token: str | None = None
             while True:
                 params = {"pageToken": page_token} if page_token else {}
                 run_resp = await client.get(
-                    f"https://run.googleapis.com/v2/projects/{self.project_id}/locations/-/services",
+                    f"https://run.googleapis.com/v2/projects/{self.project_id}/locations/{loc}/services",
                     params=params,
                 )
                 if run_resp.status_code == 200:
@@ -1247,9 +1335,12 @@ class TerraformDriftAdapter(SenseAdapter):
             "cloudevents": cloudevents,
         }
 
-    async def _lookup_live_resource_labels(self, resource_ref: str) -> dict[str, str] | None:
-        """Look up the live labels of a resource over `httpx` if the resource exists."""
-        live_run, live_vm, live_sql = await self._fetch_live_resources()
+    async def _lookup_live_resource_labels(
+        self, resource_ref: str, region: str | None = None
+    ) -> dict[str, str] | None:
+        """Look up the live labels of a resource over `httpx` in target region."""
+        target_reg = region or self.region
+        live_run, live_vm, live_sql = await self._fetch_live_resources(region=target_reg)
         short = resource_ref.rsplit("/", 1)[-1].rsplit(".", 1)[-1]
         for candidate in (resource_ref, short):
             if candidate in live_run:
@@ -1274,10 +1365,15 @@ class TerraformDriftAdapter(SenseAdapter):
         previous_live = args.get("live")
         caller_labels = args.get("labels") if "labels" in args else None
 
-        live_labels = await self._lookup_live_resource_labels(resource_name)
-        assert_managed_resource(caller_labels, address, live_labels=live_labels)
-        if resource_name != address:
-            assert_managed_resource(caller_labels, resource_name, live_labels=live_labels)
+        if "google_compute_instance" in address or "google_sql" in address:
+            raise NotImplementedError(
+                f"tf.restore_attribute fast-restore currently supports Cloud Run v2 services (got '{address}'). "
+                "Use remediation orchestrator for infrastructure-level mutations."
+            )
+        if "[" in attribute or "]" in attribute:
+            raise ValueError(
+                f"Invalid attribute path '{attribute}': array indexing is not supported by updateMask"
+            )
 
         target_region = args.get("region")
         if not target_region and "/locations/" in resource_name:
@@ -1287,37 +1383,49 @@ class TerraformDriftAdapter(SenseAdapter):
         if not target_region:
             target_region = self.region
 
+        live_labels = await self._lookup_live_resource_labels(resource_name, region=target_region)
+        assert_managed_resource(caller_labels, address, live_labels=live_labels)
+        if resource_name != address:
+            assert_managed_resource(caller_labels, resource_name, live_labels=live_labels)
+
+        if not td.sa_to_impersonate:
+            raise TrustViolation("tf.restore_attribute requires an authorized sa_to_impersonate")
+
+        # Impersonate act-sa strictly; REFUSE if impersonation fails
+        async with self._http_client() as client:
+            act_token = await _impersonate_act_sa_async(
+                client, self.project_id, td.sa_to_impersonate, self.bearer_token
+            )
+        sa_used = td.sa_to_impersonate
+        headers = {
+            "Authorization": f"Bearer {act_token}",
+            "Accept": "application/json",
+        }
+
         short_name = resource_name.rsplit("/", 1)[-1]
         patch_url = (
             f"https://run.googleapis.com/v2/projects/{self.project_id}/"
             f"locations/{target_region}/services/{short_name}"
         )
 
-        # Build nested dict from attribute dot-path
+        # Convert snake_case attribute path to camelCase for Cloud Run v2
+        camel_parts = [_snake_to_camel(p) for p in attribute.split(".")]
+        camel_attribute = ".".join(camel_parts)
+
+        # Build nested dict from camelCase attribute path
         body_dict: dict[str, Any] = {}
         curr = body_dict
-        attr_parts = attribute.split(".")
-        for p in attr_parts[:-1]:
+        for p in camel_parts[:-1]:
             curr[p] = {}
             curr = curr[p]
-        curr[attr_parts[-1]] = desired
-
-        sa_used = td.sa_to_impersonate
-        headers = {}
-        if td.sa_to_impersonate and self.auth is not None and hasattr(self.auth, "impersonate_service_account"):
-            try:
-                act_token = await self.auth.impersonate_service_account(td.sa_to_impersonate)
-                if act_token:
-                    headers["Authorization"] = f"Bearer {act_token}"
-            except Exception:
-                pass
+        curr[camel_parts[-1]] = desired
 
         async with self._http_client() as client:
             resp = await client.patch(
                 patch_url,
-                params={"updateMask": attribute},
+                params={"updateMask": camel_attribute},
                 json=body_dict,
-                headers=headers or None,
+                headers=headers,
             )
             resp.raise_for_status()
             api_response = resp.json()

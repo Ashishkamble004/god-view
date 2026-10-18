@@ -396,6 +396,8 @@ class BusinessContextInferencer:
                 else:
                     journey_items = []
 
+            model_id = getattr(res, "model_id", None) or "gemini-4-argon"
+            now_iso = datetime.now(tz=UTC).isoformat()
             journeys: list[JourneyDoc] = []
             for item in journey_items:
                 name = getattr(item, "name", None) or (item.get("name") if isinstance(item, dict) else "")
@@ -416,6 +418,10 @@ class BusinessContextInferencer:
                         steps_str.append(f"{node}.{op}" if op else str(node))
                     else:
                         steps_str.append(str(s))
+                conf_val = float(getattr(item, "confidence", 0.0) or (item.get("confidence", 0.0) if isinstance(item, dict) else 0.0))
+                ev_val = getattr(item, "evidence", []) or (item.get("evidence", []) if isinstance(item, dict) else [])
+                if isinstance(ev_val, str):
+                    ev_val = [ev_val]
                 journeys.append(
                     JourneyDoc(
                         doc_id=f"journey__{name.lower().replace(' ', '_')}",
@@ -423,6 +429,10 @@ class BusinessContextInferencer:
                         steps=steps_str,
                         intended_order_source="trace_dag",
                         status="active",
+                        confidence=conf_val,
+                        evidence=ev_val,
+                        inferred_by=model_id,
+                        inferred_at=now_iso,
                     )
                 )
             return journeys
