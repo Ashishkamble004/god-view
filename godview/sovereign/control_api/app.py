@@ -207,7 +207,24 @@ def create_app(
                     for hook in ctx.hooks.perception_tick:
                         res = hook()
                         if asyncio.iscoroutine(res):
-                            res = await res
+                            # Keep heartbeat beating during long-running perception passes
+                            stop_hb = asyncio.Event()
+
+                            async def _beat(stop_event: asyncio.Event) -> None:
+                                while not stop_event.is_set():
+                                    ctx.loop_heartbeats["perception"] = datetime.now(tz=UTC)
+                                    try:
+                                        await asyncio.wait_for(stop_event.wait(), timeout=5.0)
+                                    except TimeoutError:
+                                        pass
+
+                            hb_task = asyncio.create_task(_beat(stop_hb))
+                            try:
+                                res = await res
+                            finally:
+                                stop_hb.set()
+                                await hb_task
+
                         if res is not None and (hasattr(res, "env_id") or hasattr(res, "services_count")):
                             report = res
                     if report is not None:
