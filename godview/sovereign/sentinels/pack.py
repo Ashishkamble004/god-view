@@ -6,6 +6,7 @@ during perception cycles without tenant-specific knowledge.
 
 from __future__ import annotations
 
+import os
 import re
 import urllib.parse
 from datetime import UTC, datetime
@@ -392,6 +393,7 @@ def compile_universal_sentinels(
     business_contexts: dict[str, Any] | None = None,
     tfstate: dict[str, Any] | None = None,
     env_id: str = "env",
+    env_mode: str | None = None,
 ) -> list[SentinelDefinition]:
     """Auto-compile universal sentinels for all discovered services, edges, and invariants."""
     compiled: list[SentinelDefinition] = []
@@ -417,9 +419,12 @@ def compile_universal_sentinels(
                 break
 
     if not detected_env_id:
-        import os
-
         detected_env_id = os.environ.get("GODVIEW_ENV_ID") or "env"
+
+    # Strictly gate local mode on GODVIEW_ENV or explicit env_mode parameter.
+    # Never key on env_id substring (preserves strict SSRF posture in GCP mode).
+    env_mode_val = env_mode or os.environ.get("GODVIEW_ENV", "")
+    is_local = env_mode_val.lower() in ("local", "hermetic", "test")
 
     platform_agent_id = f"platform__{detected_env_id}"
 
@@ -485,9 +490,9 @@ def compile_universal_sentinels(
 
             valid_hosts = [
                 h for h in sorted(hosts)
-                if not h.startswith(("10.", "172.", "192.168.", "127.", "0."))
+                if (is_local or not h.startswith(("10.", "172.", "192.168.", "127.", "0.")))
                 and not h.endswith(".googleapis.com")
-                and not h.replace(".", "").isdigit()
+                and (is_local or not h.replace(".", "").isdigit())
             ]
 
             if valid_hosts:
@@ -517,13 +522,14 @@ def compile_universal_sentinels(
                 h = (parsed.hostname or "").lower()
                 if not h:
                     return False
-                # Reject private and loopback IPs
-                if (
-                    h.startswith(("10.", "192.168.", "127.", "0.", "169.254."))
-                    or (h.startswith("172.") and any(h.startswith(f"172.{i}.") for i in range(16, 32)))
-                    or h == "localhost"
-                ):
-                    return False
+                # Reject private and loopback IPs outside local/hermetic test mode
+                if not is_local:
+                    if (
+                        h.startswith(("10.", "192.168.", "127.", "0.", "169.254."))
+                        or (h.startswith("172.") and any(h.startswith(f"172.{i}.") for i in range(16, 32)))
+                        or h == "localhost"
+                    ):
+                        return False
                 # Reject cloud provider internal APIs and metadata
                 if (
                     h.endswith(".googleapis.com")
