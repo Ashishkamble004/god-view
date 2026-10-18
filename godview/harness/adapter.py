@@ -73,6 +73,10 @@ class HermeticSpecialistLlm(BaseLlm):
         self, llm_request: LlmRequest, stream: bool = False
     ) -> AsyncGenerator[AdkLlmResponse]:
         text_content = ""
+        if getattr(llm_request, "config", None) is not None:
+            si = getattr(llm_request.config, "system_instruction", None)
+            if si:
+                text_content += str(si) + "\n"
         for c in llm_request.contents:
             if hasattr(c, "parts"):
                 for p in c.parts:

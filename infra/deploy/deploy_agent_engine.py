@@ -356,7 +356,9 @@ class VertexAgentEngineBackend:
                 self._llm: Any = None
 
             def set_up(self) -> None:
+                auth = None
                 try:
+                    from godview_shared.auth import TokenProvider
                     from godview_shared.config import GodViewSettings
                     from godview_shared.llm import LlmClient
 
@@ -364,6 +366,7 @@ class VertexAgentEngineBackend:
                         env_mode="gcp",
                         sovereign_url=self.sovereign_url,
                     )
+                    auth = TokenProvider(settings=settings)
                     self._llm = LlmClient(settings=settings)
                 except Exception as exc:
                     logger.warning("Could not initialize LlmClient in set_up: %s", exc)
@@ -377,7 +380,7 @@ class VertexAgentEngineBackend:
                     ctx = SimpleNamespace(
                         llm=self._llm,
                         sovereign_url=self.sovereign_url,
-                        auth=None,
+                        auth=auth,
                         docs=None,
                         ledger=None,
                     )
@@ -398,11 +401,21 @@ class VertexAgentEngineBackend:
                 return build_a2a_card(self.agent_type, self.subject_key)
 
             def query(self, **kwargs: Any) -> dict[str, Any]:
-                if kwargs.get("action") == "card" or kwargs.get("get_card"):
+                input_data = kwargs.get("input")
+                merged = dict(kwargs)
+                if isinstance(input_data, dict):
+                    for k, v in input_data.items():
+                        merged.setdefault(k, v)
+
+                if (
+                    merged.get("action") in ("card", "get_card")
+                    or merged.get("get_card")
+                ):
                     return self.agent_card()
 
-                incident_id = str(kwargs.get("incident_id") or "adhoc")
-                evidence = kwargs.get("evidence_pack") or kwargs.get("evidence") or {}
+                incident_id = str(merged.get("incident_id") or "adhoc")
+                evidence = merged.get("evidence_pack") or merged.get("evidence") or {}
+                challenges = merged.get("challenges")
                 if self._agent is not None and hasattr(self._agent, "diagnose"):
                     import asyncio
 
@@ -416,10 +429,14 @@ class VertexAgentEngineBackend:
 
                         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                             diag = pool.submit(
-                                lambda: asyncio.run(self._agent.diagnose(incident_id, evidence))
+                                lambda: asyncio.run(
+                                    self._agent.diagnose(incident_id, evidence, challenges=challenges)
+                                )
                             ).result(timeout=60)
                     else:
-                        diag = asyncio.run(self._agent.diagnose(incident_id, evidence))
+                        diag = asyncio.run(
+                            self._agent.diagnose(incident_id, evidence, challenges=challenges)
+                        )
 
                     return {
                         "agent_id": self.agent_id,

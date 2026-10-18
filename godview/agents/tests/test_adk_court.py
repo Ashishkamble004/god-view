@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import re
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
@@ -133,7 +134,8 @@ class MockSovereignContext:
 
 
 def test_specialist_agent_generic_archetypes_and_tools() -> None:
-    ctx = MockSovereignContext()
+    llm = AsyncFakeLlm()
+    ctx = MockSovereignContext(llm=llm)
     runner = AsyncFakeLlm()
 
     for domain in COURT_DOMAINS:
@@ -247,7 +249,8 @@ class FunctionCallingFakeLlm(BaseLlm):
 @pytest.mark.asyncio
 async def test_specialist_adk_native_function_tool_calling() -> None:
     fake_llm = FunctionCallingFakeLlm()
-    ctx = MockSovereignContext()
+    llm = AsyncFakeLlm()
+    ctx = MockSovereignContext(llm=llm)
     ctx.docs.set("incidents", "inc-42", {"incident_id": "inc-42", "summary": "DB lock timeout"})
 
     agent = create_specialist_agent(
@@ -277,7 +280,8 @@ async def test_zero_invented_confidence_on_parse_error() -> None:
             yield AdkLlmResponse(content=types.Content(parts=[part], role="model"))
 
     malformed_llm = MalformedFakeLlm()
-    ctx = MockSovereignContext()
+    llm = AsyncFakeLlm()
+    ctx = MockSovereignContext(llm=llm)
     agent = create_specialist_agent(
         archetype="application",
         subject_ref="payments-svc",
@@ -422,7 +426,8 @@ async def test_install_court_and_rsi_wiring() -> None:
 
 @pytest.mark.asyncio
 async def test_remote_a2a_agent_registration() -> None:
-    ctx = MockSovereignContext()
+    llm = AsyncFakeLlm()
+    ctx = MockSovereignContext(llm=llm)
     orchestrator = CourtOrchestrator(ctx=ctx)
 
     card_url = "https://us-central1-aiplatform.googleapis.com/v1beta1/projects/test/locations/us-central1/reasoningEngines/app-1:query"
@@ -545,3 +550,232 @@ def test_rsi_evolution_and_gcs_persistence(tmp_path: Path) -> None:
     # Verify skills and harness_trees collections in firestore
     assert len(ctx.docs.list_docs("skills")) >= 1
     assert len(ctx.docs.list_docs("harness_trees")) >= 1
+
+
+@pytest.mark.asyncio
+async def test_court_orchestrator_convene_multiple_incidents_without_reparenting_error() -> None:
+    llm = AsyncFakeLlm()
+    ctx = MockSovereignContext(llm=llm)
+    orchestrator = CourtOrchestrator(ctx=ctx)
+
+    # First convene call
+    diag1 = await orchestrator.convene(
+        incident_id="inc-first-run",
+        evidence_pack={"metric": "cpu_high"},
+        specialists=["application", "platform"],
+    )
+    assert isinstance(diag1, Diagnosis)
+    assert diag1.confidence >= 0.85
+
+    # Second convene call on the SAME orchestrator singleton (must not raise ValidationError: already has a parent)
+    diag2 = await orchestrator.convene(
+        incident_id="inc-second-run",
+        evidence_pack={"metric": "memory_leak"},
+        specialists=["application", "platform"],
+    )
+    assert isinstance(diag2, Diagnosis)
+    assert diag2.confidence >= 0.85
+
+
+@pytest.mark.asyncio
+async def test_specialist_ctxllm_forwards_system_instruction_and_tool_declarations() -> None:
+    recorded_calls: list[dict[str, Any]] = []
+
+    class InspectingLlm:
+        async def generate(self, **kwargs: Any) -> Any:
+            recorded_calls.append(kwargs)
+            return {
+                "hypothesis": "Inspected system instruction and tools",
+                "confidence": 0.90,
+                "root_cause_category": "inspected",
+                "citations": ["evidence:inspected"],
+                "proposed_actions": [],
+            }
+
+    llm = InspectingLlm()
+    ctx = MockSovereignContext(llm=llm)
+    specialist = create_specialist_agent("application", "checkout-svc", ctx=ctx)
+    specialist.instruction = "SYSTEM_INSTRUCTION_UNIQUE_TOKEN_123"
+    specialist.adk_agent.instruction = "SYSTEM_INSTRUCTION_UNIQUE_TOKEN_123"
+
+    diag = await specialist.diagnose("inc-inspect", {"key": "val"})
+    assert isinstance(diag, Diagnosis)
+    assert len(recorded_calls) >= 1
+
+    last_call = recorded_calls[-1]
+    # Verify system_instruction was passed to ctx.llm.generate
+    assert "system_instruction" in last_call
+    assert last_call["system_instruction"] is not None
+    assert "SYSTEM_INSTRUCTION_UNIQUE_TOKEN_123" in str(last_call["system_instruction"])
+
+    # Verify tools (GenAI Tool/FunctionDeclaration) were passed
+    assert "tools" in last_call
+    assert last_call["tools"] is not None
+    tools = last_call["tools"]
+    assert len(tools) >= 1
+    tool_names: list[str] = []
+    for t in tools:
+        if hasattr(t, "function_declarations"):
+            tool_names.extend([fd.name for fd in t.function_declarations])
+        elif hasattr(t, "name"):
+            tool_names.append(t.name)
+    assert "get_incident" in tool_names or "invoke_capability" in tool_names
+
+
+@pytest.mark.asyncio
+async def test_remote_specialist_parses_reasoning_engine_query_output_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import MagicMock
+
+    llm = AsyncFakeLlm()
+    ctx = MockSovereignContext(llm=llm)
+    orchestrator = CourtOrchestrator(ctx=ctx)
+    card_url = "https://us-central1-aiplatform.googleapis.com/v1beta1/projects/p/locations/l/reasoningEngines/re-123:query"
+    orchestrator.register_remote_agent("application__orders-svc", card_url)
+
+    # Recorded Vertex AI Agent Engine :query response payload
+    query_response_payload = {
+        "output": {
+            "agent_id": "application__orders-svc",
+            "agent_type": "application",
+            "status": "ok",
+            "diagnosis": {
+                "hypothesis": "High memory leak in worker pool",
+                "confidence": 0.92,
+                "citations": ["metric:container/memory/used"],
+                "proposed_actions": [
+                    {"capability_id": "run.restore_revision_config", "confidence": 0.92, "rationale": "rollback"}
+                ],
+                "root_cause_category": "memory_leak",
+            },
+        }
+    }
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = query_response_payload
+
+    class MockAsyncClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> MockAsyncClient:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            pass
+
+        async def post(self, *args: Any, **kwargs: Any) -> Any:
+            return mock_resp
+
+    import httpx
+
+    monkeypatch.setattr(httpx, "AsyncClient", MockAsyncClient)
+
+    class EchoCriticLlm(BaseLlm):
+        model: str = "echo-critic"
+
+        async def generate_content_async(
+            self, llm_request: LlmRequest, stream: bool = False
+        ) -> AsyncGenerator[AdkLlmResponse]:
+            text = ""
+            for c in llm_request.contents:
+                if hasattr(c, "parts"):
+                    for p in c.parts:
+                        if hasattr(p, "text") and p.text:
+                            text += p.text
+            match = re.search(r'"hypothesis":\s*"([^"]+)"', text)
+            hyp = match.group(1) if match else "Synthesized hypothesis"
+            part = types.Part.from_text(
+                text=json.dumps({
+                    "consensus_score": 0.95,
+                    "hypothesis": f"Critic verified: {hyp}",
+                    "confidence": 0.92,
+                    "root_cause_category": "memory_leak",
+                    "citations": ["evidence:trace"],
+                    "proposed_actions": [],
+                })
+            )
+            yield AdkLlmResponse(content=types.Content(parts=[part], role="model"))
+
+    critic_llm = EchoCriticLlm()
+    orchestrator.critic.llm_runner = critic_llm
+    orchestrator.critic.adk_agent.model = critic_llm
+
+    diag = await orchestrator.convene(
+        incident_id="inc-remote-query-shape",
+        evidence_pack={"trace": "data"},
+        specialists=["application"],
+    )
+    assert isinstance(diag, Diagnosis)
+    assert diag.confidence == 0.92
+    assert "High memory leak in worker pool" in diag.hypothesis
+    assert diag.root_cause_category == "memory_leak"
+
+
+def test_specialist_tools_remote_dispatch_with_id_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    import httpx
+
+    captured_requests: list[tuple[str, str, dict[str, Any]]] = []
+
+    class MockHttpClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def __enter__(self) -> MockHttpClient:
+            return self
+
+        def __exit__(self, *args: Any) -> None:
+            pass
+
+        def get(self, url: str, headers: dict[str, str]) -> Any:
+            captured_requests.append(("GET", url, headers))
+            resp = MagicMock()
+            resp.status_code = 200
+            if "incidents" in url:
+                resp.json.return_value = {"incident_id": "inc-456", "title": "DB Latency Spike"}
+            elif "business-context" in url:
+                resp.json.return_value = {"service_id": "order-api", "domain": "checkout"}
+            return resp
+
+        def post(self, url: str, json: dict[str, Any], headers: dict[str, str]) -> Any:
+            captured_requests.append(("POST", url, headers))
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = {"status": "ok", "result": {"rows": 42}}
+            return resp
+
+    monkeypatch.setattr(httpx, "Client", MockHttpClient)
+
+    class FakeAuth:
+        def id_token_for(self, audience: str) -> str:
+            return f"mock-oidc-token-for-{audience}"
+
+    ctx = SimpleNamespace(auth=FakeAuth(), docs=None, executors=None, ledger=None)
+    tools = SpecialistTools(ctx=ctx, sovereign_url="https://godview-sovereign.a.run.app")
+
+    # 1. Remote get_incident
+    inc = tools.get_incident("inc-456")
+    assert inc["incident_id"] == "inc-456"
+    method, url, headers = captured_requests[-1]
+    assert method == "GET"
+    assert url == "https://godview-sovereign.a.run.app/incidents/inc-456"
+    assert headers["Authorization"] == "Bearer mock-oidc-token-for-https://godview-sovereign.a.run.app"
+
+    # 2. Remote get_business_context
+    bctx = tools.get_business_context("order-api")
+    assert bctx["domain"] == "checkout"
+    method, url, headers = captured_requests[-1]
+    assert method == "GET"
+    assert url == "https://godview-sovereign.a.run.app/business-context/order-api"
+    assert "Bearer mock-oidc-token" in headers["Authorization"]
+
+    # 3. Remote invoke_capability (read)
+    res = tools.invoke_capability("sql.list_tables", {"database": "prod"})
+    assert res["status"] == "ok"
+    method, url, headers = captured_requests[-1]
+    assert method == "POST"
+    assert url == "https://godview-sovereign.a.run.app/capabilities/sql.list_tables:invoke"
+    assert "Bearer mock-oidc-token" in headers["Authorization"]

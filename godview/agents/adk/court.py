@@ -33,7 +33,7 @@ from godview_shared.contracts import (
     Diagnosis,
     ProposedAction,
 )
-from google.adk.agents import BaseAgent, LlmAgent, LoopAgent, ParallelAgent
+from google.adk.agents import BaseAgent, LlmAgent
 from google.adk.agents.remote_a2a_agent import RemoteA2aAgent
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
@@ -104,12 +104,6 @@ class CourtCriticAgent:
                 "measure consensus, identify evidence gaps, and challenge ungrounded claims."
             ),
             description="God-View Court Critic Agent evaluating swarm consensus",
-        )
-        self.loop_agent = LoopAgent(
-            name="court_critic_loop",
-            sub_agents=[self.adk_agent],
-            max_iterations=MAX_SWARM_ROUNDS,
-            description="Iterative critic debate loop over specialist hypotheses",
         )
 
     async def evaluate_consensus(
@@ -315,6 +309,7 @@ class CourtOrchestrator:
         self.critic = CourtCriticAgent(ctx=ctx, llm_runner=llm_runner)
         self._in_process_specialists: dict[str, SpecialistAgent] = {}
         self._remote_specialists: dict[str, RemoteA2aAgent] = {}
+        self._remote_card_urls: dict[str, str] = {}
         self.sub_agents: list[BaseAgent] = []
         self._init_sub_agents()
 
@@ -341,6 +336,7 @@ class CourtOrchestrator:
             agent_card=card_url,
         )
         self._remote_specialists[agent_id] = remote
+        self._remote_card_urls[agent_id] = card_url
         self.sub_agents.append(remote)
         return remote
 
@@ -372,22 +368,11 @@ class CourtOrchestrator:
         target_domains = list(specialists) if specialists else list(ARCHETYPE_DOMAINS)
         ep = evidence_pack or {}
 
-        # 1. ParallelAgent fan-out to specialists
+        # 1. Parallel fan-out to specialists
         active_specialists: list[tuple[Any, str, str]] = []
-        adk_sub_agents: list[BaseAgent] = []
         for dom in target_domains:
             agent, runtime = self.get_specialist(dom)
             active_specialists.append((agent, dom, runtime))
-            if hasattr(agent, "adk_agent") and isinstance(agent.adk_agent, BaseAgent):
-                adk_sub_agents.append(agent.adk_agent)
-            elif isinstance(agent, BaseAgent):
-                adk_sub_agents.append(agent)
-
-        _ = ParallelAgent(
-            name="court_fanout",
-            sub_agents=adk_sub_agents,
-            description="Parallel fan-out across God-View court specialists",
-        )
 
         candidates: list[SpecialistCandidate] = []
 
@@ -406,18 +391,26 @@ class CourtOrchestrator:
                 try:
                     import httpx
 
+                    card_target = getattr(agent, "_agent_card_source", None)
+                    if not card_target:
+                        for aid, url in self._remote_card_urls.items():
+                            if aid.startswith(f"{dom}__") or aid == getattr(agent, "name", ""):
+                                card_target = url
+                                break
+                    if not card_target and hasattr(agent, "agent_card"):
+                        card_target = agent.agent_card
                     headers = {"Content-Type": "application/json"}
                     if self.ctx is not None and hasattr(self.ctx, "auth") and self.ctx.auth is not None:
                         token = ""
                         if hasattr(self.ctx.auth, "access_token"):
                             token = self.ctx.auth.access_token()
                         elif hasattr(self.ctx.auth, "id_token_for"):
-                            token = self.ctx.auth.id_token_for(agent.agent_card)
+                            token = self.ctx.auth.id_token_for(str(card_target))
                         if token:
                             headers["Authorization"] = f"Bearer {token}"
                     async with httpx.AsyncClient(timeout=30.0) as client:
                         resp = await client.post(
-                            str(agent.agent_card),
+                            str(card_target),
                             json={
                                 "input": {
                                     "incident_id": incident_id,
@@ -429,7 +422,12 @@ class CourtOrchestrator:
                         )
                         if resp.status_code == 200:
                             data = resp.json()
-                            diag_data = data.get("diagnosis", data.get("output", data))
+                            inner = data.get("output") if isinstance(data, dict) and "output" in data else data
+                            diag_data = None
+                            if isinstance(inner, dict):
+                                diag_data = inner.get("diagnosis", inner)
+                            else:
+                                diag_data = inner
                             diag = Diagnosis.model_validate(diag_data)
                         else:
                             diag = Diagnosis(

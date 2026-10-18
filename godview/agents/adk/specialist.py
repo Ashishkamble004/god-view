@@ -127,7 +127,25 @@ class CtxLlm(BaseLlm):
     ) -> AsyncGenerator[AdkLlmResponse]:
         if self.ctx is not None and hasattr(self.ctx, "llm") and self.ctx.llm is not None:
             contents = llm_request.contents
-            tools = list(llm_request.tools_dict.values()) if getattr(llm_request, "tools_dict", None) else None
+
+            # Extract system instruction from llm_request.config
+            system_instruction = None
+            if getattr(llm_request, "config", None) is not None:
+                si = getattr(llm_request.config, "system_instruction", None)
+                if si is not None:
+                    if isinstance(si, str):
+                        system_instruction = si
+                    elif hasattr(si, "parts"):
+                        system_instruction = "".join(getattr(p, "text", "") or "" for p in si.parts)
+                    elif hasattr(si, "text"):
+                        system_instruction = si.text
+                    else:
+                        system_instruction = str(si)
+
+            # Pass llm_request.config.tools (genai Tool/FunctionDeclaration), not tools_dict.values() (ADK callables)
+            tools = None
+            if getattr(llm_request, "config", None) is not None and getattr(llm_request.config, "tools", None):
+                tools = llm_request.config.tools
 
             call_kwargs: dict[str, Any] = {
                 "role": "reasoning",
@@ -143,6 +161,10 @@ class CtxLlm(BaseLlm):
                     p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
                 ):
                     call_kwargs["tools"] = tools
+                if "system_instruction" in sig.parameters or any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+                ):
+                    call_kwargs["system_instruction"] = system_instruction
             except Exception:
                 pass
 
@@ -198,6 +220,31 @@ class SpecialistTools:
         self.sovereign_url = sovereign_url.rstrip("/") if sovereign_url else ""
         self.proposed_actions: list[ProposedAction] = []
 
+    def _get_auth_headers(self) -> dict[str, str]:
+        """Produce HTTP headers with OIDC ID token for Sovereign Cloud Run."""
+        headers = {"Content-Type": "application/json"}
+        if not self.sovereign_url:
+            return headers
+        token = None
+        if self.ctx is not None and hasattr(self.ctx, "auth") and self.ctx.auth is not None:
+            try:
+                if hasattr(self.ctx.auth, "id_token_for"):
+                    token = self.ctx.auth.id_token_for(self.sovereign_url)
+                elif hasattr(self.ctx.auth, "id_token"):
+                    token = self.ctx.auth.id_token(self.sovereign_url)
+            except Exception:
+                token = None
+        if not token:
+            try:
+                from godview_shared.auth import TokenProvider
+
+                token = TokenProvider().id_token_for(self.sovereign_url)
+            except Exception:
+                token = None
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        return headers
+
     def invoke_capability(
         self, capability_id: str, args: dict[str, Any] | None = None
     ) -> dict[str, Any]:
@@ -215,7 +262,7 @@ class SpecialistTools:
                 ),
             }
 
-        # Dispatch via Sovereign capability registry executors
+        # 1. Dispatch via Sovereign capability registry executors
         if self.ctx is not None and hasattr(self.ctx, "executors") and self.ctx.executors is not None:
             executor = self.ctx.executors.get(capability_id)
             if executor is not None:
@@ -226,6 +273,20 @@ class SpecialistTools:
             dispatcher = self.ctx.remediation_dispatcher
             if hasattr(dispatcher, "invoke_read"):
                 return dispatcher.invoke_read(capability_id, arg_dict)
+
+        # 2. Remote Sovereign dispatch over HTTP with ID token
+        if self.sovereign_url:
+            try:
+                import httpx
+
+                url = f"{self.sovereign_url}/capabilities/{capability_id}:invoke"
+                headers = self._get_auth_headers()
+                with httpx.Client(timeout=15.0) as client:
+                    resp = client.post(url, json={"args": arg_dict}, headers=headers)
+                    if resp.status_code == 200:
+                        return resp.json()
+            except Exception as exc:
+                logger.warning("Remote invoke_capability failed for %s: %s", capability_id, exc)
 
         # Zero Echo: Never return fabricated status string when unhandled. Fail closed with NoExecutorError.
         from godview.sovereign.remediation.types import NoExecutorError
@@ -241,6 +302,18 @@ class SpecialistTools:
                 return doc["business_context"]
             if doc:
                 return doc
+        if self.sovereign_url:
+            try:
+                import httpx
+
+                url = f"{self.sovereign_url}/business-context/{target_id}"
+                headers = self._get_auth_headers()
+                with httpx.Client(timeout=15.0) as client:
+                    resp = client.get(url, headers=headers)
+                    if resp.status_code == 200:
+                        return resp.json()
+            except Exception as exc:
+                logger.warning("Remote fetch get_business_context failed for %s: %s", target_id, exc)
         return {"service_id": target_id, "status": "no_business_context_found"}
 
     def query_ledger(
@@ -257,6 +330,18 @@ class SpecialistTools:
             doc = self.ctx.docs.get("incidents", incident_id)
             if doc:
                 return doc
+        if self.sovereign_url:
+            try:
+                import httpx
+
+                url = f"{self.sovereign_url}/incidents/{incident_id}"
+                headers = self._get_auth_headers()
+                with httpx.Client(timeout=15.0) as client:
+                    resp = client.get(url, headers=headers)
+                    if resp.status_code == 200:
+                        return resp.json()
+            except Exception as exc:
+                logger.warning("Remote fetch get_incident failed for %s: %s", incident_id, exc)
         return {"incident_id": incident_id, "status": "incident_not_found"}
 
     def propose_remediation(
