@@ -20,11 +20,36 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 
 from godview.sovereign.control_api import create_app
+from godview.sovereign.remediation.types import BaseExecutor, ExecutionResult, VerificationCheck
+
+
+class DummyExecutor(BaseExecutor):
+    def __init__(self, succeeds: bool = True) -> None:
+        self.succeeds = succeeds
+
+    async def execute(
+        self,
+        ctx: Any,
+        args: dict[str, Any],
+        target_resource: str,
+        *,
+        agent_id: str | None = None,
+        **kwargs: Any,
+    ) -> ExecutionResult:
+        return ExecutionResult(
+            ok=self.succeeds,
+            before={"count": 0},
+            after={"count": 1, **args},
+            verification=[VerificationCheck(check="test_check", passed=self.succeeds)],
+            reverted=not self.succeeds,
+            error=None if self.succeeds else "Execution failed",
+        )
 
 
 @pytest.mark.unit
@@ -100,6 +125,19 @@ def test_capability_invoke_endpoint_a3_and_approvals_flow() -> None:
     client = TestClient(app)
     client.post("/v1/perceive", json={"reset": True})
 
+    ctx = app.state.context
+    ctx.observed_resources = {"deployment/svc-alpha-01", "svc-alpha-01"}
+    ctx.dispatcher.register_executor("obs.get_trace", DummyExecutor(succeeds=True))
+    ctx.dispatcher.register_executor("k8s.rollout_restart", DummyExecutor(succeeds=True))
+
+    # 0. Unhandled capability raises 501 NoExecutorError (Decision A3 / Plan §0, never echo)
+    r_unreg = client.post(
+        "/v1/capabilities/nonexistent.capability:invoke",
+        json={"agent_id": "application__svc-alpha-01", "args": {}},
+    )
+    assert r_unreg.status_code == 501
+    assert "No executor registered" in r_unreg.json()["detail"]
+
     # 1. L0 read-only capability executes immediately
     r_read = client.post(
         "/v1/capabilities/obs.get_trace:invoke",
@@ -166,12 +204,12 @@ def test_capability_invoke_endpoint_a3_and_approvals_flow() -> None:
 
 @pytest.mark.unit
 def test_kill_switch_pause_resume_hibernate_and_drills_guard() -> None:
-    """UC-18, UC-19, UC-20 & §3.4: Kill switch, pause/resume, and hibernate (60 s)."""
+    """UC-18, UC-19, UC-20 & §3.4: Kill switch, pause/resume, and hibernate."""
     app = create_app(webhook_secret="test-secret")
     client = TestClient(app)
     client.post("/v1/perceive", json={"reset": True})
 
-    # Traffic Kill Switch (UC-18): halts simulator, pauses tenant, clears chaos, emits godview.operator.kill_switch
+    # Traffic Kill Switch (UC-18): emits godview.operator.kill_switch
     r_ks = client.post(
         "/v1/tenant/kill-switch",
         json={"enabled": True, "reason": "Emergency drill stop"},
@@ -179,29 +217,45 @@ def test_kill_switch_pause_resume_hibernate_and_drills_guard() -> None:
     )
     assert r_ks.status_code == 200
     ks_data = r_ks.json()
-    assert ks_data["tenant_paused"] is True
-    assert ks_data["simulator_enabled"] is False
-    assert ks_data["active_drills_cleared"] >= 1
-    assert ks_data["cloud_event_type"] == "godview.operator.kill_switch"
+    assert ks_data["ok"] is True
+    assert ks_data["kill_switch_enabled"] is True
+
+    # Operator state reflects kill switch
+    op_state = client.get("/v1/operator/state").json()
+    assert op_state.get("kill_switch_enabled") is True
 
     # Scheduled Pause (UC-19): cools all warm agents to 0
-    r_pause = client.post("/v1/tenant/pause")
+    r_pause = client.post(
+        "/v1/tenant/pause",
+        headers={"X-Goog-Authenticated-User-Email": "operator@example.com"},
+    )
     assert r_pause.status_code == 200
     assert r_pause.json()["warm_agents_count"] == 0
+    assert r_pause.json()["tenant_paused"] is True
 
-    r_resume = client.post("/v1/tenant/resume")
+    r_resume = client.post(
+        "/v1/tenant/resume",
+        headers={"X-Goog-Authenticated-User-Email": "operator@example.com"},
+    )
     assert r_resume.status_code == 200
     assert r_resume.json()["tenant_paused"] is False
 
-    # Hibernate (UC-20): throttles sentinel cadence to 60 s and triggers god-view-hibernate-job
-    r_hib_on = client.post("/v1/hibernate", json={"enabled": True})
+    # Hibernate (UC-20)
+    r_hib_on = client.post(
+        "/v1/hibernate",
+        json={"enabled": True},
+        headers={"X-Goog-Authenticated-User-Email": "operator@example.com"},
+    )
     assert r_hib_on.status_code == 200
-    assert r_hib_on.json()["sentinel_cadence_s"] == 60
-    assert r_hib_on.json()["job_triggered"] == "god-view-hibernate-job"
+    assert r_hib_on.json()["hibernate_enabled"] is True
 
-    r_hib_off = client.post("/v1/hibernate", json={"enabled": False})
+    r_hib_off = client.post(
+        "/v1/hibernate",
+        json={"enabled": False},
+        headers={"X-Goog-Authenticated-User-Email": "operator@example.com"},
+    )
     assert r_hib_off.status_code == 200
-    assert r_hib_off.json()["sentinel_cadence_s"] == 10
+    assert r_hib_off.json()["hibernate_enabled"] is False
 
 
 @pytest.mark.unit
@@ -365,6 +419,15 @@ def test_control_api_Remaining_endpoints_reject_snooze_whitelist_and_summaries()
     client.post("/v1/perceive", json={"reset": True})
 
     # Create an approval card and test snooze + reject
+    ctx = app.state.context
+    ctx.observed_resources = {
+        "deployment/svc-alpha-01",
+        "svc-alpha-01",
+        "deployment/svc-alpha-02",
+        "svc-alpha-02",
+    }
+    ctx.dispatcher.register_executor("k8s.scale", DummyExecutor(succeeds=True))
+
     r_req = client.post(
         "/v1/capabilities/k8s.scale:invoke",
         json={
@@ -440,7 +503,6 @@ def test_control_api_Remaining_endpoints_reject_snooze_whitelist_and_summaries()
 def test_cockpit_contracts_simulator_drift_sse_webhooks_and_adapter_dispatch() -> None:
     """Findings #2, #3, #6, #7, #10: Cockpit routes, schemas, webhook events, and SenseAdapter dispatch."""
     from datetime import UTC, datetime
-    from typing import Any
 
     from godview_shared.adapter_contract import (
         AdapterHealth,
@@ -546,14 +608,13 @@ def test_cockpit_contracts_simulator_drift_sse_webhooks_and_adapter_dispatch() -
     assert r_unwl.status_code == 200
     assert r_unwl.json()["whitelisted"] is False
 
-    # 9. SenseAdapter capability dispatch via POST /v1/capabilities/k8s.get_resource:invoke
+    # 9. Unhandled capability raises 501 NoExecutorError (never echo or unverified adapter bridge)
     r_cap = client.post(
         "/v1/capabilities/k8s.get_resource:invoke",
         json={"agent_id": "platform__env-01", "args": {"namespace": "prod-ns"}},
     )
-    assert r_cap.status_code == 200
-    assert r_cap.json()["result"]["adapter_family"] == "kubernetes"
-    assert r_cap.json()["result"]["adapter_result"]["pods"] == ["pod-alpha-01"]
+    assert r_cap.status_code == 501
+    assert "No executor registered" in r_cap.json()["detail"]
 
     # 10. GitHub webhook PR SHA extraction & unsupported event 400
     pr_bytes = json.dumps(

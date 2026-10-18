@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import urllib
+import urllib.parse
 from pathlib import Path
 from typing import Any
 
@@ -56,15 +58,56 @@ def test_patch_waf_expression_updates_existing_strict_sensitivity() -> None:
 async def test_armor_executor_set_waf_sensitivity_preview_first_and_verify(
     remediation_fixtures: dict[str, Any],
 ) -> None:
-    """Executes set_waf_sensitivity against recorded API fixture, rolling out preview=true then preview=false."""
+    """Executes set_waf_sensitivity with preview_first=True: creates temp rule at higher priority, verifies, patches real rule, cleans up temp rule."""
     ca_fixture = remediation_fixtures["cloud_armor"]
     rule_state = dict(ca_fixture["rule_1000"])
+    temp_rules: dict[int, dict[str, Any]] = {}
     patch_history: list[dict[str, Any]] = []
+    added_rules: list[dict[str, Any]] = []
+    removed_rules: list[int] = []
+
+    policy_data = {
+        "name": "edge-security-policy",
+        "rules": [
+            {"priority": 100, "action": "deny(403)", "description": "emergency kill switch", "match": {"versionedExpr": "SRC_IPS_V1", "config": {"srcIpRanges": ["*"]}}},
+            rule_state,
+        ],
+    }
 
     def handle_request(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
-        if "getRule" in url and "priority=1000" in url:
-            return httpx.Response(200, json=rule_state)
+        # Policy GET (for priority discovery)
+        if url.endswith("/securityPolicies/edge-security-policy"):
+            return httpx.Response(200, json=policy_data)
+
+        # Temp rule add
+        if "addRule" in url:
+            body = json.loads(request.content)
+            added_rules.append(body)
+            temp_rules[body["priority"]] = body
+            return httpx.Response(200, json={"status": "DONE", "name": "op-add"})
+
+        # Temp rule remove
+        if "removeRule" in url:
+            parsed = urllib.parse.urlsplit(url)
+            qs = urllib.parse.parse_qs(parsed.query)
+            pri = int(qs["priority"][0])
+            removed_rules.append(pri)
+            temp_rules.pop(pri, None)
+            return httpx.Response(200, json={"status": "DONE", "name": "op-rm"})
+
+        # getRule
+        if "getRule" in url:
+            parsed = urllib.parse.urlsplit(url)
+            qs = urllib.parse.parse_qs(parsed.query)
+            pri = int(qs["priority"][0])
+            if pri == 1000:
+                return httpx.Response(200, json=rule_state)
+            if pri in temp_rules:
+                return httpx.Response(200, json=temp_rules[pri])
+            return httpx.Response(404)
+
+        # patchRule
         if "patchRule" in url and "priority=1000" in url:
             body = json.loads(request.content)
             patch_history.append(body)
@@ -73,9 +116,11 @@ async def test_armor_executor_set_waf_sensitivity_preview_first_and_verify(
             if "match" in body and "expr" in body["match"]:
                 rule_state["match"]["expr"]["expression"] = body["match"]["expr"]["expression"]
             return httpx.Response(200, json=rule_state)
+
+        # probe
         if "test-probe" in url:
-            # 422 validation response indicates request reached backend (not 403 WAF block)
             return httpx.Response(422, json={"detail": "validation error"})
+
         return httpx.Response(404)
 
     transport = httpx.MockTransport(handle_request)
@@ -97,20 +142,25 @@ async def test_armor_executor_set_waf_sensitivity_preview_first_and_verify(
 
         assert result.ok is True
         assert result.reverted is False
-        assert len(patch_history) == 2
 
-        # First patch: preview=True
-        assert patch_history[0]["preview"] is True
+        # Temp rule was added at free priority 900 (1000 - 100) with preview=True
+        assert len(added_rules) == 1
+        assert added_rules[0]["priority"] == 900
+        assert added_rules[0]["preview"] is True
+        assert "{'sensitivity': 1}" in added_rules[0]["match"]["expr"]["expression"]
+
+        # Temp rule was removed
+        assert removed_rules == [900]
+
+        # Real rule 1000 was NEVER patched with preview=True (WAF was never disabled!)
+        assert len(patch_history) == 1
+        assert patch_history[0]["preview"] is False
         assert "{'sensitivity': 1}" in patch_history[0]["match"]["expr"]["expression"]
 
-        # Second patch: preview=False
-        assert patch_history[1]["preview"] is False
-
-        # Verification checks recorded (preview active, LB logs observed, enforced, probe)
-        assert len(result.verification) == 4
+        # Verification checks recorded (temp rule active, temp rule cleaned up, enforced, probe)
         check_names = [v.check for v in result.verification]
-        assert "waf_rule_preview_mode_active" in check_names
-        assert "preview_mode_lb_logs_observed" in check_names
+        assert "waf_preview_temp_rule_active" in check_names
+        assert "waf_preview_temp_rule_cleaned_up" in check_names
         assert "waf_rule_enforced_with_sensitivity" in check_names
         assert "post_enforce_probe_bypasses_waf_block" in check_names
 
@@ -153,6 +203,8 @@ async def test_armor_executor_rollback_on_failed_verification(
             if "match" in body:
                 rule_state["match"]["expr"]["expression"] = body["match"]["expr"]["expression"]
             return httpx.Response(200, json=rule_state)
+        if "test-probe" in url:
+            return httpx.Response(422)
         return httpx.Response(404)
 
     transport = httpx.MockTransport(handle_request)
@@ -166,7 +218,8 @@ async def test_armor_executor_rollback_on_failed_verification(
                 "security_policy": "edge-security-policy",
                 "priority": 1000,
                 "sensitivity": 1,
-                "preview_first": True,
+                "preview_first": False,
+                "probe_url": "https://api.example.com/test-probe",
             },
             target_resource="edge-security-policy",
         )

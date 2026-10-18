@@ -204,6 +204,65 @@ class CloudArmorExecutor(BaseExecutor):
         resp.raise_for_status()
         return resp.json()
 
+    async def _add_rule(
+        self,
+        client: httpx.AsyncClient,
+        project_id: str,
+        security_policy: str,
+        body: dict[str, Any],
+        headers: dict[str, str],
+    ) -> dict[str, Any]:
+        url = (
+            f"{COMPUTE_API_BASE}/projects/{project_id}/global/securityPolicies/"
+            f"{security_policy}/addRule"
+        )
+        resp = await client.post(url, headers=headers, json=body)
+        resp.raise_for_status()
+        return resp.json()
+
+    async def _remove_rule(
+        self,
+        client: httpx.AsyncClient,
+        project_id: str,
+        security_policy: str,
+        priority: int,
+        headers: dict[str, str],
+    ) -> dict[str, Any]:
+        url = (
+            f"{COMPUTE_API_BASE}/projects/{project_id}/global/securityPolicies/"
+            f"{security_policy}/removeRule?priority={priority}"
+        )
+        resp = await client.post(url, headers=headers)
+        resp.raise_for_status()
+        return resp.json()
+
+    async def _find_free_preview_priority(
+        self,
+        client: httpx.AsyncClient,
+        project_id: str,
+        security_policy: str,
+        waf_priority: int,
+        headers: dict[str, str],
+    ) -> int:
+        policy = await self._get_policy(client, project_id, security_policy, headers)
+        existing_priorities = {int(r["priority"]) for r in policy.get("rules", []) if "priority" in r}
+
+        target = waf_priority - 100
+        if target > 100 and target not in existing_priorities:
+            return target
+
+        for candidate in range(waf_priority - 1, 100, -1):
+            if candidate not in existing_priorities:
+                return candidate
+
+        for candidate in range(waf_priority + 1, waf_priority + 100):
+            if candidate not in existing_priorities:
+                return candidate
+
+        raise RuntimeError(
+            f"Could not find free priority for preview rule on security policy '{security_policy}'"
+        )
+
     async def _wait_for_global_operation(
         self,
         client: httpx.AsyncClient,
@@ -613,6 +672,7 @@ class CloudArmorExecutor(BaseExecutor):
 
         before: dict[str, Any] = {}
         checks: list[VerificationCheck] = []
+        temp_priority: int | None = None
 
         try:
             # Discover or read priority
@@ -636,66 +696,110 @@ class CloudArmorExecutor(BaseExecutor):
             # Step 2: Compute patched expression
             new_expr = patch_waf_expression(orig_expr, sensitivity=sensitivity)
             preview_first = bool(args.get("preview_first", False))
+            temp_priority: int | None = None
 
             if preview_first:
-                # Optional 2-phase rollout with preview=True first
-                preview_patch = {
-                    "priority": priority,
-                    "match": {"expr": {"expression": new_expr}},
+                # Real preview: add temporary rule at free higher priority with preview=True (Plan §3.4, Verifier #135, #136)
+                # NEVER disable the existing WAF rule!
+                temp_priority = await self._find_free_preview_priority(
+                    client, project_id, security_policy, priority, headers
+                )
+                temp_rule_data = {
+                    "action": "deny(403)",
+                    "priority": temp_priority,
                     "preview": True,
+                    "match": {"expr": {"expression": new_expr}},
+                    "description": f"godview-waf-preview-temp-priority-{temp_priority}",
                 }
-                patch_op1 = await self._patch_rule(client, project_id, security_policy, priority, preview_patch, headers)
-                await self._wait_for_global_operation(client, project_id, patch_op1, headers)
+                add_op = await self._add_rule(client, project_id, security_policy, temp_rule_data, headers)
+                await self._wait_for_global_operation(client, project_id, add_op, headers)
 
-                preview_rule = await self._get_rule(client, project_id, security_policy, priority, headers)
-                preview_expr = preview_rule.get("match", {}).get("expr", {}).get("expression", "")
-                preview_ok = (
-                    preview_rule.get("preview") is True
-                    and f"'sensitivity': {sensitivity}" in preview_expr
-                )
+                temp_rule = await self._get_rule(client, project_id, security_policy, temp_priority, headers)
+                temp_expr = temp_rule.get("match", {}).get("expr", {}).get("expression", "")
+                temp_ok = (temp_rule.get("preview") is True) and (f"'sensitivity': {sensitivity}" in temp_expr)
                 checks.append(
                     VerificationCheck(
-                        check="waf_rule_preview_mode_active",
-                        passed=preview_ok,
-                        evidence={"expression": preview_expr, "preview": preview_rule.get("preview")},
+                        check="waf_preview_temp_rule_active",
+                        passed=temp_ok,
+                        evidence={"temp_priority": temp_priority, "preview": temp_rule.get("preview"), "expression": temp_expr},
                     )
                 )
 
-                checks.append(
-                    VerificationCheck(
-                        check="preview_mode_lb_logs_observed",
-                        passed=True,
-                        evidence={"preview_active": True, "security_policy": security_policy},
-                    )
-                )
+                # Query LB logs for previewSecurityPolicy outcomes if logging adapter available on ctx
+                logging_adapter = None
+                if hasattr(ctx, "adapters") and isinstance(ctx.adapters, list):
+                    for adp in ctx.adapters:
+                        if getattr(adp, "family", "") == "logging" or "obs.query_logs_scoped" in getattr(adp, "supported_capabilities", []):
+                            logging_adapter = adp
+                            break
 
-                if not preview_ok:
-                    rollback_op = await self._patch_rule(
-                        client,
-                        project_id,
-                        security_policy,
-                        priority,
-                        {"priority": priority, "match": {"expr": {"expression": orig_expr}}, "preview": orig_preview},
-                        headers,
-                    )
-                    await self._wait_for_global_operation(client, project_id, rollback_op, headers)
+                if logging_adapter:
+                    try:
+                        log_entries = await logging_adapter.execute_capability(
+                            "obs.query_logs_scoped",
+                            {
+                                "filter": f'jsonPayload.previewSecurityPolicy.priority="{temp_priority}"',
+                                "page_size": 20,
+                            },
+                        )
+                        if isinstance(log_entries, list) and log_entries:
+                            deny_count = sum(
+                                1
+                                for e in log_entries
+                                if isinstance(e, dict)
+                                and e.get("jsonPayload", {}).get("previewSecurityPolicy", {}).get("outcome") == "DENY"
+                            )
+                            checks.append(
+                                VerificationCheck(
+                                    check="preview_mode_lb_logs_observed",
+                                    passed=(deny_count == 0),
+                                    evidence={
+                                        "entries_count": len(log_entries),
+                                        "would_deny_count": deny_count,
+                                        "temp_priority": temp_priority,
+                                    },
+                                )
+                            )
+                    except Exception as log_err:
+                        logger.debug("Failed querying LB logs for preview rule: %s", log_err)
+
+                if not temp_ok:
+                    rm_op = await self._remove_rule(client, project_id, security_policy, temp_priority, headers)
+                    await self._wait_for_global_operation(client, project_id, rm_op, headers)
+                    temp_priority = None
                     return ExecutionResult(
                         ok=False,
                         before=before,
-                        after={"expression": preview_expr, "preview": preview_rule.get("preview")},
+                        after={"temp_priority": temp_priority, "preview": temp_rule.get("preview")},
                         verification=checks,
                         reverted=True,
-                        error="Failed preview verification: sensitivity expression not confirmed",
+                        error=f"Temp preview rule {temp_priority} verification failed",
                     )
 
-            # Direct patch / Enforce: preview=False with new_expr
+            # Direct patch / Enforce: patch rule (priority) with new_expr and preview=False
             enforce_patch = {
                 "priority": priority,
                 "match": {"expr": {"expression": new_expr}},
                 "preview": False,
             }
-            patch_op2 = await self._patch_rule(client, project_id, security_policy, priority, enforce_patch, headers)
-            await self._wait_for_global_operation(client, project_id, patch_op2, headers)
+            patch_op = await self._patch_rule(client, project_id, security_policy, priority, enforce_patch, headers)
+            await self._wait_for_global_operation(client, project_id, patch_op, headers)
+
+            # If a temp preview rule was created, delete it now that enforce is applied
+            if temp_priority is not None:
+                try:
+                    del_op = await self._remove_rule(client, project_id, security_policy, temp_priority, headers)
+                    await self._wait_for_global_operation(client, project_id, del_op, headers)
+                    checks.append(
+                        VerificationCheck(
+                            check="waf_preview_temp_rule_cleaned_up",
+                            passed=True,
+                            evidence={"deleted_temp_priority": temp_priority},
+                        )
+                    )
+                    temp_priority = None
+                except Exception as del_err:
+                    logger.warning("Failed to remove temp preview rule %s: %s", temp_priority, del_err)
 
             # Verify enforced state on Compute API
             final_rule = await self._get_rule(client, project_id, security_policy, priority, headers)
@@ -718,6 +822,12 @@ class CloudArmorExecutor(BaseExecutor):
             }
 
             if not final_ok:
+                if temp_priority is not None:
+                    try:
+                        rm_op = await self._remove_rule(client, project_id, security_policy, temp_priority, headers)
+                        await self._wait_for_global_operation(client, project_id, rm_op, headers)
+                    except Exception:
+                        pass
                 rollback_op = await self._patch_rule(
                     client,
                     project_id,
@@ -750,6 +860,12 @@ class CloudArmorExecutor(BaseExecutor):
                 )
             )
             if not probe_passed:
+                if temp_priority is not None:
+                    try:
+                        rm_op = await self._remove_rule(client, project_id, security_policy, temp_priority, headers)
+                        await self._wait_for_global_operation(client, project_id, rm_op, headers)
+                    except Exception:
+                        pass
                 logger.warning("Post-enforcement probe returned 403; rolling back WAF rule on %s", security_policy)
                 rollback_op = await self._patch_rule(
                     client,
@@ -771,6 +887,12 @@ class CloudArmorExecutor(BaseExecutor):
 
             return ExecutionResult(ok=True, before=before, after=after, verification=checks)
         except Exception as e:
+            if temp_priority is not None:
+                try:
+                    rm_op = await self._remove_rule(client, project_id, security_policy, temp_priority, headers)
+                    await self._wait_for_global_operation(client, project_id, rm_op, headers)
+                except Exception:
+                    pass
             logger.exception("Error executing set_waf_sensitivity on %s", security_policy)
             if before.get("expression"):
                 try:

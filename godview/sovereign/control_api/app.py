@@ -24,7 +24,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import APIRouter, FastAPI, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from godview_shared.adapter_contract import SenseAdapter
 from godview_shared.config import (
@@ -157,47 +157,40 @@ def create_app(
     ctx.trust_gate = trust_gate
     ctx.mcp_manager = mcp_manager
     ctx.ledger_exporter = ledger_exporter
-    if cfg.env_mode == "hermetic":
-        if "k8s.rollout_restart" not in ctx.executors:
-            ctx.executors["k8s.rollout_restart"] = lambda **kwargs: {"ok": True, "restarted": True}
-        if "obs.get_trace" not in ctx.executors:
-            ctx.executors["obs.get_trace"] = lambda **kwargs: {"ok": True, "trace": "tr-123"}
-        if "k8s.scale" not in ctx.executors:
-            ctx.executors["k8s.scale"] = lambda **kwargs: {"ok": True, "scaled": True}
-        if not hasattr(ctx, "managed_resources"):
-            ctx.managed_resources = {
-                "deployment/svc-alpha-01",
-                "deployment/svc-alpha-02",
-                "svc-managed-01",
-            }
+
+    # Install slices into context before mounting routers (Decision #91.2)
+    try:
+        from godview.sovereign.sentinel_engine import install as install_sentinels
+        install_sentinels(ctx)
+    except Exception as exc:
+        logger.error("Could not install sentinel engine: %s", exc)
+        if cfg.env_mode != "hermetic":
+            raise
+
+    try:
+        from godview.agents.adk.court import install_court_and_rsi
+        install_court_and_rsi(ctx)
+    except Exception as exc:
+        logger.error("Could not install court and rsi: %s", exc)
+        if cfg.env_mode != "hermetic":
+            raise
+
+    try:
+        from godview.sovereign.perception import install as install_perception
+        install_perception(ctx)
+    except Exception as exc:
+        logger.error("Could not install perception: %s", exc)
+        if cfg.env_mode != "hermetic":
+            raise
 
     if hasattr(ctx, "perception") and ctx.perception is not None:
-        if not ctx.hooks.perception_tick:
-            ctx.hooks.perception_tick.append(ctx.perception.perceive)
+        if ctx.perception.perceive not in ctx.hooks.perception_tick:
+            ctx.hooks.perception_tick.insert(0, ctx.perception.perceive)
     if not ctx.hooks.agent_warmth_tick:
         ctx.hooks.agent_warmth_tick.append(court_manager.evaluate_earned_warmth)
 
     @asynccontextmanager
     async def lifespan(fastapi_app: FastAPI):
-        # 1. Install slices into context
-        try:
-            from godview.sovereign.sentinel_engine import install as install_sentinels
-            install_sentinels(ctx)
-        except Exception as exc:
-            logger.warning("Could not install sentinel engine: %s", exc)
-
-        try:
-            from godview.agents.adk.court import install_court_and_rsi
-            install_court_and_rsi(ctx)
-        except Exception as exc:
-            logger.warning("Could not install court and rsi: %s", exc)
-
-        try:
-            from godview.sovereign.perception import install as install_perception
-            install_perception(ctx)
-        except Exception as exc:
-            logger.warning("Could not install perception: %s", exc)
-
         # Advance heartbeats immediately upon boot
         now = datetime.now(tz=UTC)
         ctx.loop_heartbeats["perception"] = now
@@ -213,11 +206,15 @@ def create_app(
             while True:
                 try:
                     ctx.loop_heartbeats["perception"] = datetime.now(tz=UTC)
+                    report = None
                     for hook in ctx.hooks.perception_tick:
                         res = hook()
                         if asyncio.iscoroutine(res):
-                            await res
-                    ctx.last_perception_at = datetime.now(tz=UTC)
+                            res = await res
+                        if res is not None and (hasattr(res, "env_id") or hasattr(res, "services_count")):
+                            report = res
+                    if report is not None:
+                        ctx.last_perception_at = datetime.now(tz=UTC)
                     ctx.loop_heartbeats["perception"] = datetime.now(tz=UTC)
                 except asyncio.CancelledError:
                     break
@@ -301,6 +298,7 @@ def create_app(
         version="0.1.0",
         lifespan=lifespan,
     )
+    app.state.context = ctx
     app.state.firestore = fs
     app.state.bigquery = bq
     app.state.pubsub = ps
@@ -614,7 +612,7 @@ def create_app(
             principal = ctx.auth.verify_google_oidc(request)
             if principal is None:
                 raise HTTPException(status_code=401, detail="Unauthorized: valid OIDC token required")
-            if not principal.email.startswith("godview-sense-sa") and not principal.email.startswith("godview-"):
+            if not principal.email.startswith("godview-sense-sa@"):
                 raise HTTPException(
                     status_code=403,
                     detail=f"Forbidden: sense-sa identity required, got {principal.email}",
@@ -704,36 +702,59 @@ def create_app(
             {**d, "id": d.get("doc_id") or d.get("_id")} for d in fs.list_docs("cost_findings")
         ]
         court_gov = getattr(court_manager, "token_governor", None)
-        court_ceiling = float(court_gov.court_daily_ceiling_usd) if court_gov else float(cfg.court_daily_ceiling_usd)
+        court_ceiling = (
+            float(court_gov.court_daily_ceiling_usd)
+            if court_gov
+            else (float(cfg.court_daily_ceiling_usd) if getattr(cfg, "court_daily_ceiling_usd", None) else None)
+        )
         court_spent = float(court_gov.total_court_usd_spent) if court_gov else 0.0
         drift_docs = [
             d for d in cost_docs if d.get("finding_type") == "drift_diff" or d.get("kind") == "drift"
         ]
-        monthly_budget = float(getattr(cfg, "monthly_ceiling_usd", 600.0))
+        monthly_budget_env = os.environ.get("MONTHLY_CEILING_USD")
+        monthly_budget = float(monthly_budget_env) if monthly_budget_env else None
+
+        last_drift = next(
+            (
+                d.get("scanned_at") or d.get("last_scan_at")
+                for d in drift_docs
+                if d.get("scanned_at") or d.get("last_scan_at")
+            ),
+            None,
+        )
 
         return {
             "monthly_ceiling_usd": monthly_budget,
             "projected_active_month_usd": None,
             "projected_hibernated_month_usd": None,
             "budget_thresholds_pct": [50, 80, 100],
-            "current_month_spend_usd": round(court_spent, 2),
+            "current_month_spend_usd": round(court_spent, 2) if court_spent else 0.0,
             "daily_court_ceiling_usd": court_ceiling,
             "daily_court_spent_usd": court_spent,
             "court_daily_ceiling_usd": court_ceiling,
             "court_spent_today_usd": court_spent,
-            "escalation_reserve_pct": int(
-                court_gov.escalation_reserve_fraction * 100 if court_gov else 20
+            "escalation_reserve_pct": (
+                int(court_gov.escalation_reserve_fraction * 100) if court_gov else None
             ),
-            "tier_budgets_summary": "Tier budgets governed by token governor",
-            "cost_findings_subtitle": "Idle resources, warm-tier right-sizing, and token budget alerts",
+            "tier_budgets_summary": None,
+            "cost_findings_subtitle": None,
             "tfstate_uri": os.environ.get("TFSTATE_URI"),
-            "last_drift_scan_at": datetime.now(tz=UTC).isoformat(),
+            "last_drift_scan_at": last_drift,
             "cost_findings": cost_docs,
             "findings": cost_docs,
             "drift_diffs": drift_docs,
         }
 
-    @api.post("/traces")
+    trace_service_dep = (
+        ctx.auth.require_trace_service()
+        if hasattr(ctx.auth, "require_trace_service")
+        else (ctx.auth.require_service() if hasattr(ctx.auth, "require_service") else None)
+    )
+
+    @api.post(
+        "/traces",
+        dependencies=[Depends(trace_service_dep)] if trace_service_dep is not None else [],
+    )
     async def receive_otlp_traces(payload: dict[str, Any]) -> dict[str, Any]:
         """Receive OTLP/HTTP JSON spans and feed them into LedgerSpanExporter (#120 / #125)."""
         span_dicts = parse_otlp_spans(payload)
@@ -745,25 +766,6 @@ def create_app(
             "transitions_written": batch.transitions_written,
             "journeys_updated": batch.journeys_updated,
         }
-
-    # Install slices into context before mounting routers (Decision #91.2)
-    try:
-        from godview.sovereign.sentinel_engine import install as install_sentinels
-        install_sentinels(ctx)
-    except Exception as exc:
-        logger.warning("Could not install sentinel engine: %s", exc)
-
-    try:
-        from godview.agents.adk.court import install_court_and_rsi
-        install_court_and_rsi(ctx)
-    except Exception as exc:
-        logger.warning("Could not install court and rsi: %s", exc)
-
-    try:
-        from godview.sovereign.perception import install as install_perception
-        install_perception(ctx)
-    except Exception as exc:
-        logger.warning("Could not install perception: %s", exc)
 
     routers_dir = Path(__file__).parent / "routers"
     if routers_dir.exists():

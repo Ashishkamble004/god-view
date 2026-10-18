@@ -95,6 +95,12 @@ class AuthService:
         act_sa = os.environ.get("GODVIEW_ACT_SA_EMAIL")
         if act_sa and act_sa not in raw_principals:
             raw_principals.append(act_sa)
+        raw_trace = [
+            s.strip()
+            for s in os.environ.get("GODVIEW_TRACE_PRINCIPALS", "").split(",")
+            if s.strip()
+        ]
+        self._allowed_trace_principals = set(raw_trace)
         self._allowed_service_principals = set(raw_principals)
         self._auth_request: Any = None
 
@@ -376,41 +382,28 @@ class AuthService:
             # Strict project-qualified service principal allowlist (Decision #89/#91/#95)
             if self._allowed_service_principals:
                 if email not in self._allowed_service_principals:
-                    if current_project:
-                        expected_suffix = f"@{current_project}.iam.gserviceaccount.com"
-                        if not (
-                            email.startswith("godview-")
-                            and email.endswith(expected_suffix)
-                        ):
-                            logger.warning(
-                                "OIDC rejected: foreign or unlisted service account %s (expected %s)",
-                                email, expected_suffix
-                            )
-                            return None
-                    else:
-                        logger.warning("OIDC rejected: email %s not in allowed principals", email)
-                        return None
+                    logger.warning("OIDC rejected: email %s not in allowed principals %s", email, self._allowed_service_principals)
+                    return None
             else:
                 if current_project:
-                    expected_suffix = f"@{current_project}.iam.gserviceaccount.com"
-                    if not (
-                        email.startswith("godview-")
-                        and email.endswith(expected_suffix)
-                    ):
+                    canonical = {
+                        f"godview-sense-sa@{current_project}.iam.gserviceaccount.com",
+                        f"godview-act-sa@{current_project}.iam.gserviceaccount.com",
+                        f"godview-runtime-sa@{current_project}.iam.gserviceaccount.com",
+                        f"godview-deploy-sa@{current_project}.iam.gserviceaccount.com",
+                        f"godview-apigw-sa@{current_project}.iam.gserviceaccount.com",
+                    }
+                    if email not in canonical:
                         logger.warning(
-                            "OIDC rejected: %s does not match project domain %s",
-                            email, expected_suffix
+                            "OIDC rejected: %s not in canonical project allowlist %s",
+                            email, canonical
                         )
                         return None
                 else:
-                    if not (
-                        email.startswith("godview-")
-                        and email.endswith(".iam.gserviceaccount.com")
-                    ):
-                        logger.warning(
-                            "OIDC rejected: email %s does not match service principal pattern", email
-                        )
-                        return None
+                    logger.warning(
+                        "OIDC rejected: project is unknown and no service principal allowlist configured"
+                    )
+                    return None
 
             sub = claims.get("sub", "")
             aud = claims.get("aud", verified_aud)
@@ -462,6 +455,26 @@ class AuthService:
                 detail="Unauthorized: valid service OIDC token required",
             )
         return principal
+
+    def require_trace_service(self) -> Any:
+        """FastAPI dependency for trace ingestion (OIDC from trace principals)."""
+        async def _dependency(request: Request) -> Principal:
+            principal = self.verify_google_oidc(request)
+            if principal is None:
+                raise HTTPException(
+                    status_code=401,
+                    detail="Unauthorized: valid trace service OIDC token required",
+                )
+            if self.settings.env_mode != "hermetic":
+                allowed = self._allowed_trace_principals or self._allowed_service_principals
+                if allowed and principal.email not in allowed:
+                    raise HTTPException(
+                        status_code=403,
+                        detail=f"Forbidden: trace sender {principal.email} not in trace principals",
+                    )
+            return principal
+
+        return _dependency
 
     async def optional_principal(self, request: Request) -> Principal | None:
         """FastAPI dependency returning the authenticated principal if any, or None."""

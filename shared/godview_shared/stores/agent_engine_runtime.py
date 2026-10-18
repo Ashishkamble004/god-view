@@ -106,41 +106,30 @@ class AgentEngineRuntime:
 
         mode = self._env_mode()
         if mode == "gcp" and self.project:
-            token = self._get_access_token()
-            headers = {
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-            }
-            url = f"{self._base_url()}/{self._parent_name()}/reasoningEngines"
-            payload = {
-                "displayName": f"godview-{agent_type}-{agent_id}",
-                "description": f"God-View Court Agent {agent_id} ({agent_type})",
-                "spec": {
-                    "deploymentSpec": {
-                        "minInstances": min_instances,
-                        "maxInstances": max_instances,
-                        "containerConcurrency": 4,
-                    }
-                },
-                "labels": {
-                    "godview_managed": "true",
-                    "godview_role": "court",
-                    "agent_type": agent_type,
-                    "agent_id": agent_id,
-                },
-            }
             try:
-                with httpx.Client(timeout=15.0) as client:
-                    resp = client.post(url, headers=headers, json=payload)
-                    if resp.status_code in (200, 201):
-                        resp_data = resp.json()
-                        if "name" in resp_data:
-                            record["reasoning_engine"] = resp_data["name"]
-                            record["a2a_card_url"] = f"{self._base_url()}/{resp_data['name']}:query"
-                    elif resp.status_code != 409:  # 409 Conflict is acceptable if already deployed
-                        raise RuntimeError(
-                            f"Vertex deploy reasoningEngine failed with HTTP {resp.status_code}: {resp.text}"
-                        )
+                from infra.deploy.deploy_agent_engine import (
+                    VertexAgentEngineBackend,
+                    build_agent_payload,
+                )
+
+                sov_url = os.environ.get("GODVIEW_SOVEREIGN_URL", "http://god-view-sovereign:8080")
+                payload = build_agent_payload(
+                    agent_type=agent_type,
+                    subject_key=subject or agent_id.split("__")[-1],
+                    sovereign_url=sov_url,
+                    project_id=self.project,
+                    location=self.location,
+                )
+                backend = VertexAgentEngineBackend(
+                    project_id=self.project,
+                    location=self.location,
+                    staging_bucket=payload.staging_bucket,
+                )
+                deployed_info = backend.deploy_reasoning_engine(payload)
+                record["reasoning_engine"] = deployed_info.get("name", resource_name)
+                record["a2a_card_url"] = deployed_info.get("a2a_card_url", card_url)
+                if "a2a_card" in deployed_info:
+                    record["card"] = deployed_info["a2a_card"]
             except Exception as exc:
                 if mode == "gcp":
                     raise RuntimeError(f"Vertex ReasoningEngine deployment failed for {agent_id}: {exc}") from exc
@@ -194,10 +183,7 @@ class AgentEngineRuntime:
         return {"agent_id": agent_id, "state": "RETIRED"}
 
     def get_agent(self, agent_id: str) -> dict[str, Any]:
-        """Get ReasoningEngine metadata."""
-        if agent_id in self._cached_agents:
-            return copy.deepcopy(self._cached_agents[agent_id])
-
+        """Get ReasoningEngine metadata, querying Vertex AI in GCP mode."""
         mode = self._env_mode()
         if mode == "gcp" and self.project:
             token = self._get_access_token()
@@ -210,22 +196,25 @@ class AgentEngineRuntime:
             url = f"{self._base_url()}/{resource_name}"
             with httpx.Client(timeout=10.0) as client:
                 resp = client.get(url, headers=headers)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    rec = {
+                        "agent_id": agent_id,
+                        "reasoning_engine": data.get("name", resource_name),
+                        "display_name": data.get("displayName", ""),
+                        "state": data.get("state", "ACTIVE"),
+                        "raw": data,
+                    }
+                    self._cached_agents[agent_id] = copy.deepcopy(rec)
+                    return rec
                 if resp.status_code == 404:
                     raise KeyError(f"Unknown ReasoningEngine agent_id '{agent_id}'")
-                if resp.status_code != 200:
-                    raise RuntimeError(
-                        f"Vertex get reasoningEngine failed with HTTP {resp.status_code}: {resp.text}"
-                    )
-                data = resp.json()
-                rec = {
-                    "agent_id": agent_id,
-                    "reasoning_engine": data.get("name", resource_name),
-                    "display_name": data.get("displayName", ""),
-                    "state": data.get("state", "ACTIVE"),
-                    "raw": data,
-                }
-                self._cached_agents[agent_id] = copy.deepcopy(rec)
-                return rec
+                raise RuntimeError(
+                    f"Vertex get reasoningEngine failed with HTTP {resp.status_code}: {resp.text}"
+                )
+
+        if agent_id in self._cached_agents:
+            return copy.deepcopy(self._cached_agents[agent_id])
 
         raise KeyError(f"Unknown ReasoningEngine agent_id '{agent_id}'")
 
@@ -298,10 +287,12 @@ class AgentEngineRuntime:
                 "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json",
             }
+            msg_dict = parsed.model_dump(mode="json", by_alias=True)
+            payload = {"input": msg_dict} if endpoint.endswith(":query") else msg_dict
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(
                     endpoint,
-                    json=parsed.model_dump(mode="json", by_alias=True),
+                    json=payload,
                     headers=headers,
                 )
                 if resp.status_code == 200:
