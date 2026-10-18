@@ -183,9 +183,6 @@ def create_app(
         if cfg.env_mode != "hermetic":
             raise
 
-    if hasattr(ctx, "perception") and ctx.perception is not None:
-        if ctx.perception.perceive not in ctx.hooks.perception_tick:
-            ctx.hooks.perception_tick.insert(0, ctx.perception.perceive)
     if not ctx.hooks.agent_warmth_tick:
         ctx.hooks.agent_warmth_tick.append(court_manager.evaluate_earned_warmth)
 

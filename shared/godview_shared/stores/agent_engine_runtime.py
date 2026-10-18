@@ -112,7 +112,11 @@ class AgentEngineRuntime:
                     build_agent_payload,
                 )
 
-                sov_url = os.environ.get("GODVIEW_SOVEREIGN_URL", "http://god-view-sovereign:8080")
+                sov_url = os.environ.get("GODVIEW_SOVEREIGN_URL")
+                if not sov_url:
+                    raise RuntimeError(
+                        "GODVIEW_SOVEREIGN_URL environment variable is required in GCP mode for ReasoningEngine deployment"
+                    )
                 payload = build_agent_payload(
                     agent_type=agent_type,
                     subject_key=subject or agent_id.split("__")[-1],
@@ -141,15 +145,18 @@ class AgentEngineRuntime:
         """Update deploymentSpec.minInstances on the Vertex ReasoningEngine."""
         mode = self._env_mode()
         if mode == "gcp" and self.project:
+            # Query remote agent first to verify existence and fetch canonical resource name
+            remote_rec = self.get_agent(agent_id)
+            resource_name = (
+                remote_rec.get("reasoning_engine")
+                or f"{self._parent_name()}/reasoningEngines/{agent_id}"
+            )
+
             token = self._get_access_token()
             headers = {
                 "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json",
             }
-            resource_name = (
-                self._cached_agents.get(agent_id, {}).get("reasoning_engine")
-                or f"{self._parent_name()}/reasoningEngines/{agent_id}"
-            )
             url = f"{self._base_url()}/{resource_name}?updateMask=spec.deploymentSpec.minInstances"
             patch_body = {
                 "spec": {
@@ -166,21 +173,32 @@ class AgentEngineRuntime:
                             f"Vertex patch minInstances failed with HTTP {resp.status_code}: {resp.text}"
                         )
             except Exception as exc:
-                if mode == "gcp":
-                    raise RuntimeError(f"Failed to set min_instances on {agent_id}: {exc}") from exc
+                raise RuntimeError(f"Failed to set min_instances on {agent_id}: {exc}") from exc
 
-        if agent_id in self._cached_agents:
-            self._cached_agents[agent_id]["deployment_spec"]["min_instances"] = min_instances
-            return copy.deepcopy(self._cached_agents[agent_id])
-        return {"agent_id": agent_id, "deployment_spec": {"min_instances": min_instances}}
+            # Fetch and return fresh remote-verified state
+            return self.get_agent(agent_id)
+
+        if agent_id not in self._cached_agents:
+            raise KeyError(f"Unknown ReasoningEngine agent_id '{agent_id}'")
+        self._cached_agents[agent_id]["deployment_spec"]["min_instances"] = min_instances
+        return copy.deepcopy(self._cached_agents[agent_id])
 
     def retire_agent(self, agent_id: str) -> dict[str, Any]:
         """Retire a ReasoningEngine and cool its instances to 0."""
+        mode = self._env_mode()
+        if mode == "gcp" and self.project:
+            self.set_min_instances(agent_id, 0)
+            remote_rec = self.get_agent(agent_id)
+            remote_rec["state"] = "RETIRED"
+            if agent_id in self._cached_agents:
+                self._cached_agents[agent_id]["state"] = "RETIRED"
+            return remote_rec
+
+        if agent_id not in self._cached_agents:
+            raise KeyError(f"Unknown ReasoningEngine agent_id '{agent_id}'")
         self.set_min_instances(agent_id, 0)
-        if agent_id in self._cached_agents:
-            self._cached_agents[agent_id]["state"] = "RETIRED"
-            return copy.deepcopy(self._cached_agents[agent_id])
-        return {"agent_id": agent_id, "state": "RETIRED"}
+        self._cached_agents[agent_id]["state"] = "RETIRED"
+        return copy.deepcopy(self._cached_agents[agent_id])
 
     def get_agent(self, agent_id: str) -> dict[str, Any]:
         """Get ReasoningEngine metadata, querying Vertex AI in GCP mode."""
@@ -191,7 +209,10 @@ class AgentEngineRuntime:
             resource_name = (
                 agent_id
                 if agent_id.startswith("projects/")
-                else f"{self._parent_name()}/reasoningEngines/{agent_id}"
+                else (
+                    self._cached_agents.get(agent_id, {}).get("reasoning_engine")
+                    or f"{self._parent_name()}/reasoningEngines/{agent_id}"
+                )
             )
             url = f"{self._base_url()}/{resource_name}"
             with httpx.Client(timeout=10.0) as client:
@@ -203,6 +224,10 @@ class AgentEngineRuntime:
                         "reasoning_engine": data.get("name", resource_name),
                         "display_name": data.get("displayName", ""),
                         "state": data.get("state", "ACTIVE"),
+                        "deployment_spec": data.get("spec", {}).get(
+                            "deploymentSpec", {"min_instances": 0}
+                        ),
+                        "a2a_card_url": f"{self._base_url()}/{data.get('name', resource_name)}:query",
                         "raw": data,
                     }
                     self._cached_agents[agent_id] = copy.deepcopy(rec)

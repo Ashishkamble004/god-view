@@ -9,6 +9,7 @@ conditions (consensus >= 0.85, <= 4 rounds, <= 90 s).
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from typing import Literal
 from zoneinfo import ZoneInfo
@@ -91,7 +92,8 @@ class CourtManager:
             )
 
         now_iso = datetime.now(tz=UTC).isoformat()
-        deployed = self._agent_engine.deploy_agent(
+        deployed = await asyncio.to_thread(
+            self._agent_engine.deploy_agent,
             agent_id=agent_id,
             agent_type=agent_type,
             min_instances=0,
@@ -142,7 +144,7 @@ class CourtManager:
                 },
             )
 
-        self._agent_engine.retire_agent(agent_id)
+        await asyncio.to_thread(self._agent_engine.retire_agent, agent_id)
         now_iso = datetime.now(tz=UTC).isoformat()
         updated = existing.model_copy(
             update={
@@ -165,7 +167,7 @@ class CourtManager:
         existing = self.get_agent(agent_id)
         if existing is None:
             raise KeyError(f"Unknown court agent '{agent_id}'")
-        self._agent_engine.set_min_instances(agent_id, min_instances)
+        await asyncio.to_thread(self._agent_engine.set_min_instances, agent_id, min_instances)
         updated = existing.model_copy(update={"warmth_min_instances": min_instances})
         self._firestore.set("court_agents", agent_id, updated.model_dump(mode="json"))
         await self._router.emit(
@@ -183,7 +185,7 @@ class CourtManager:
             if doc.warmth_min_instances != 0:
                 await self.set_warmth(aid, 0)
             else:
-                self._agent_engine.set_min_instances(aid, 0)
+                await asyncio.to_thread(self._agent_engine.set_min_instances, aid, 0)
         return 0
 
     async def evaluate_earned_warmth(self, now_ist: datetime | None = None) -> list[str]:

@@ -30,6 +30,7 @@ RUN printf '#!/bin/sh\nexec npx -y @google-cloud/gke-mcp "$@"\n' > /usr/local/bi
 WORKDIR /app
 
 COPY shared /app/shared
+COPY infra /app/infra
 COPY godview/__init__.py /app/godview/__init__.py
 COPY godview/ledger /app/godview/ledger
 COPY godview/invariants /app/godview/invariants
@@ -38,7 +39,6 @@ COPY godview/agent-skills /app/godview/agent-skills
 COPY godview/harness /app/godview/harness
 COPY godview/agents /app/godview/agents
 COPY godview/sovereign /app/godview/sovereign
-COPY godview /app/godview
 
 RUN rm -rf /app/godview/god-view-sre-web \
     && pip install --no-cache-dir \
