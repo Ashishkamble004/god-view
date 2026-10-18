@@ -593,13 +593,14 @@ class IncidentManager:
         reason: str = "",
         outcome: str = "resolved",
         operator: str | None = None,
+        resolved_by: str | None = None,
         root_cause_category: str | None = None,
         remediation_capability: str | None = None,
         resolution_summary: str | None = None,
-        **extra_kwargs: Any,
     ) -> IncidentDoc:
         """Manually close an incident."""
         now_iso = self._clock().isoformat()
+        effective_operator = operator or resolved_by
 
         # Find in active incidents
         target: IncidentDoc | None = None
@@ -631,27 +632,20 @@ class IncidentManager:
         target.outcome = outcome
         target.closed_at = now_iso
         target.root_cause = reason or target.root_cause or "Closed by operator"
-        eff_category = root_cause_category or extra_kwargs.get("root_cause_category")
-        if eff_category:
-            target.root_cause_category = eff_category
-            target.raw_evidence["root_cause_category"] = eff_category
-        eff_remediation = (
-            remediation_capability
-            or extra_kwargs.get("remediation_capability")
-            or extra_kwargs.get("capability")
-        )
-        if eff_remediation:
-            target.remediation_capability = eff_remediation
-            target.raw_evidence["remediation_capability"] = eff_remediation
-        eff_summary = resolution_summary or extra_kwargs.get("resolution_summary")
-        if eff_summary:
-            target.resolution_summary = eff_summary
-            target.raw_evidence["resolution_summary"] = eff_summary
+        if root_cause_category:
+            target.root_cause_category = root_cause_category
+            target.raw_evidence["root_cause_category"] = root_cause_category
+        if remediation_capability:
+            target.remediation_capability = remediation_capability
+            target.raw_evidence["remediation_capability"] = remediation_capability
+        if resolution_summary:
+            target.resolution_summary = resolution_summary
+            target.raw_evidence["resolution_summary"] = resolution_summary
 
-        if operator:
-            if operator not in target.participants:
-                target.participants.append(operator)
-            target.raw_evidence["closed_by"] = operator
+        if effective_operator:
+            if effective_operator not in target.participants:
+                target.participants.append(effective_operator)
+            target.raw_evidence["closed_by"] = effective_operator
         if reason:
             target.raw_evidence["close_reason"] = reason
 

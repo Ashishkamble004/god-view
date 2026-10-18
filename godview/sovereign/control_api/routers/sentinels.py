@@ -36,6 +36,17 @@ class ProbeRunRequest(BaseModel):
     sentinel_id: str | None = Field(default=None, description="Optional target sentinel ID")
 
 
+def _get_env_mode(ctx: Any) -> str:
+    settings = getattr(ctx, "settings", None)
+    if settings is not None and hasattr(settings, "env_mode"):
+        return str(settings.env_mode)
+    if hasattr(ctx, "env_mode") and ctx.env_mode:
+        return str(ctx.env_mode)
+    import os
+
+    return os.environ.get("GODVIEW_ENV", "hermetic")
+
+
 def _get_service_auth_dep(ctx: Any) -> Callable[..., Any]:
     """Retrieve require_service auth dependency from SovereignContext."""
     auth = getattr(ctx, "auth", None)
@@ -46,9 +57,12 @@ def _get_service_auth_dep(ctx: Any) -> Callable[..., Any]:
             return auth.require_service
 
     async def _unauthenticated_service(request: Request) -> Any:
+        env_mode = _get_env_mode(ctx)
         test_p = request.headers.get("x-godview-test-principal")
-        if test_p or getattr(ctx, "auth", None) is None:
+        if env_mode == "hermetic":
             return {"email": test_p or "service@godview.internal", "role": "service"}
+        if test_p:
+            raise HTTPException(status_code=401, detail="Header spoofing prohibited outside hermetic mode")
         raise HTTPException(
             status_code=401, detail="Unauthorized: authenticated service identity required"
         )
@@ -63,9 +77,12 @@ def _get_operator_dep(ctx: Any) -> Callable[..., Any]:
         return auth.require_operator
 
     async def _unauthenticated_operator(request: Request) -> Any:
+        env_mode = _get_env_mode(ctx)
         test_p = request.headers.get("x-godview-test-principal")
-        if test_p or getattr(ctx, "auth", None) is None:
+        if env_mode == "hermetic":
             return {"email": test_p or "operator@godview.internal", "role": "operator"}
+        if test_p:
+            raise HTTPException(status_code=401, detail="Header spoofing prohibited outside hermetic mode")
         raise HTTPException(
             status_code=401, detail="Unauthorized: authenticated operator identity required"
         )
