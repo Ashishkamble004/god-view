@@ -199,34 +199,35 @@ def _assert_ssrf_safe_url(url: str, allow_private: bool = False) -> None:
 
     nip_match = re.search(r"(\d+\.\d+\.\d+\.\d+)\.(?:nip|sslip)\.io", host)
     if nip_match:
-        try:
-            _check_ip(ipaddress.ip_address(nip_match.group(1)), allow_private, raw_host)
-        except ValueError:
-            raise
+        _check_ip(ipaddress.ip_address(nip_match.group(1)), allow_private, raw_host)
 
+    parsed_ip: ipaddress.IPv4Address | ipaddress.IPv6Address | None = None
     if host.isdigit():
         try:
-            _check_ip(ipaddress.ip_address(int(host)), allow_private, raw_host)
+            parsed_ip = ipaddress.ip_address(int(host))
         except (ValueError, TypeError):
             pass
     elif host.startswith(("0x", "0X")):
         try:
-            _check_ip(ipaddress.ip_address(int(host, 16)), allow_private, raw_host)
+            parsed_ip = ipaddress.ip_address(int(host, 16))
         except (ValueError, TypeError):
             pass
-
-    if "." in host and all(p.isalnum() for p in host.split(".")):
+    elif "." in host and all(p.isalnum() for p in host.split(".")):
         try:
             parts = [int(p, 0) for p in host.split(".")]
             if len(parts) == 4 and all(0 <= p <= 255 for p in parts):
-                _check_ip(ipaddress.IPv4Address(bytes(parts)), allow_private, raw_host)
-        except Exception:
+                parsed_ip = ipaddress.IPv4Address(bytes(parts))
+        except (ValueError, TypeError):
             pass
 
-    try:
-        _check_ip(ipaddress.ip_address(host), allow_private, raw_host)
-    except ValueError:
-        pass
+    if parsed_ip is None:
+        try:
+            parsed_ip = ipaddress.ip_address(host)
+        except ValueError:
+            pass
+
+    if parsed_ip is not None:
+        _check_ip(parsed_ip, allow_private, raw_host)
 
     try:
         for res in socket.getaddrinfo(host, None):
@@ -3286,10 +3287,6 @@ class HttpProbeAdapter(SenseAdapter):
                         h = (urlsplit(val).hostname or "").lower().rstrip(".")
                         if h:
                             self._discovered_hosts.add(h)
-                s_name = str(s.get("name", "")).rsplit("/", 1)[-1]
-                if s_name:
-                    self._discovered_hosts.add(f"{s_name}.internal")
-                    self._discovered_hosts.add(f"{s_name}.run.app")
             trace_dict = (
                 fixtures.get("trace")
                 if isinstance(fixtures.get("trace"), dict)
@@ -3301,10 +3298,6 @@ class HttpProbeAdapter(SenseAdapter):
             )
             for trace in trace_dict.get("traces", []):
                 for span in trace.get("spans", []):
-                    s_name = span.get("labels", {}).get("service.name")
-                    if s_name:
-                        self._discovered_hosts.add(f"{s_name}.internal")
-                        self._discovered_hosts.add(f"{s_name}.run.app")
                     for lbl_key, lbl_val in span.get("labels", {}).items():
                         if "url" in lbl_key.lower() and "://" in str(lbl_val):
                             h = (urlsplit(str(lbl_val)).hostname or "").lower().rstrip(".")
@@ -3483,5 +3476,5 @@ def build_all_gcp_adapters(
         TerraformDriftAdapter(project_id=project_id, region=region, zone=zone, auth=auth, fixtures=fixtures, http_transport=http_transport),
         CloudEdgeAdapter(project_id=project_id, region=region, zone=zone, auth=auth, fixtures=fixtures, http_transport=http_transport),
         ApiGatewayAdapter(project_id=project_id, region=region, zone=zone, auth=auth, fixtures=fixtures, http_transport=http_transport),
-        HttpProbeAdapter(http_transport=http_transport),
+        HttpProbeAdapter(fixtures=fixtures, http_transport=http_transport),
     ]

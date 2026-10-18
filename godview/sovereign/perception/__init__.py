@@ -12,6 +12,7 @@ import os
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from godview_shared.adapter_contract import AdapterHealth, SenseAdapter
@@ -165,6 +166,19 @@ class PerceptionOrgan:
                         checked_at=datetime.now(tz=UTC),
                     )
                 )
+
+        # Feed real discovered hosts into probing adapters
+        discovered_hostnames: set[str] = set()
+        for s in discovered_services:
+            loc = getattr(s, "locator", None) or ""
+            if "://" in loc:
+                h = (urlsplit(loc).hostname or "").lower().rstrip(".")
+                if h:
+                    discovered_hostnames.add(h)
+        if discovered_hostnames:
+            for adapter in self._adapters:
+                if hasattr(adapter, "_discovered_hosts") and isinstance(adapter._discovered_hosts, set):
+                    adapter._discovered_hosts.update(discovered_hostnames)
 
         # In hermetic mode, honour environment ID from discovered services or existing store
         if self._env_id == "hermetic":

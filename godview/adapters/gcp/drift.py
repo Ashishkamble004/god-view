@@ -1365,16 +1365,6 @@ class TerraformDriftAdapter(SenseAdapter):
         previous_live = args.get("live")
         caller_labels = args.get("labels") if "labels" in args else None
 
-        if "google_compute_instance" in address or "google_sql" in address:
-            raise NotImplementedError(
-                f"tf.restore_attribute fast-restore currently supports Cloud Run v2 services (got '{address}'). "
-                "Use remediation orchestrator for infrastructure-level mutations."
-            )
-        if "[" in attribute or "]" in attribute:
-            raise ValueError(
-                f"Invalid attribute path '{attribute}': array indexing is not supported by updateMask"
-            )
-
         target_region = args.get("region")
         if not target_region and "/locations/" in resource_name:
             parts = resource_name.split("/locations/")[1].split("/")
@@ -1387,6 +1377,16 @@ class TerraformDriftAdapter(SenseAdapter):
         assert_managed_resource(caller_labels, address, live_labels=live_labels)
         if resource_name != address:
             assert_managed_resource(caller_labels, resource_name, live_labels=live_labels)
+
+        if "google_cloud_run_v2_service" not in address:
+            raise NotImplementedError(
+                f"tf.restore_attribute fast-restore currently supports google_cloud_run_v2_service resources (got '{address}'). "
+                "Use remediation orchestrator for infrastructure-level mutations."
+            )
+        if "[" in attribute or "]" in attribute:
+            raise ValueError(
+                f"Invalid attribute path '{attribute}': array indexing is not supported by updateMask"
+            )
 
         if not td.sa_to_impersonate:
             raise TrustViolation("tf.restore_attribute requires an authorized sa_to_impersonate")
