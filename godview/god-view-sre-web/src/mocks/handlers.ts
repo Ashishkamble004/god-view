@@ -50,15 +50,15 @@ export const handlers = [
         incidents_open: openIncidents,
         agent_id: s.owner_agent_id || null,
         golden: {
-          rps: 140 + idx * 20,
-          p95_ms: 16 + idx * 3,
-          error_ratio: openIncidents > 0 ? 0.045 : 0.0001,
+          rps: idx === 0 ? null : 140 + idx * 20,
+          p95_ms: idx === 0 ? null : 16 + idx * 3,
+          error_ratio: idx === 0 ? null : openIncidents > 0 ? 0.045 : 0.0001,
         },
         posture: {
-          ingress: 'internal-and-cloud-load-balancing',
-          iap: true,
-          invoker_iam: true,
-          waf: openIncidents > 0 ? 'sensitivity-4' : 'sensitivity-1',
+          ingress: (s.kind as string) === 'lb_frontend' ? 'external' : 'internal-and-cloud-load-balancing',
+          iap: idx === 0 ? null : true,
+          invoker_iam: idx === 0 ? null : true,
+          waf: (s.kind as string) === 'lb_frontend' || openIncidents > 0 ? 'sensitivity-4' : 'sensitivity-1',
         },
       };
     });
@@ -147,6 +147,14 @@ export const handlers = [
           confidence: 0.99,
           evidence: { kind: 'ledger', ref: 'bigquery/conformance' },
           value: 99.8,
+        },
+        {
+          name: 'Cold Start Ratio',
+          definition: 'cold_start_spans / total_spans',
+          unit: '%',
+          confidence: 0.91,
+          evidence: { kind: 'trace', ref: 'cloudtrace/cold_starts' },
+          value: null,
         },
       ],
       invariants: [
@@ -245,6 +253,12 @@ export const handlers = [
             ],
           },
         ],
+      },
+      root: {
+        id: 'root-decision-tree',
+        label: 'Incident Triage & Heuristic Synthesis',
+        type: 'condition',
+        description: 'Analyzes incoming incident evidence pack and determines remediation path',
       },
       skills: [
         {

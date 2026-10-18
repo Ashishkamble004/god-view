@@ -121,7 +121,7 @@ export const IncidentsTab: React.FC<IncidentsTabProps> = ({
                 {incidents.length} Incidents
               </p>
               <p className="mt-1 text-xs text-slate-600">
-                768-dim symptom_embedding indexed for KNN precedent recall
+                Symptom embeddings indexed for precedent recall
               </p>
             </Card>
 
@@ -133,7 +133,7 @@ export const IncidentsTab: React.FC<IncidentsTabProps> = ({
                 {formatCurrency(totalExposure)}
               </p>
               <p className="mt-1 text-xs text-slate-600">
-                Principal at risk across detected invariant &amp; infra breaches
+                Value at risk across detected invariant &amp; infra breaches
               </p>
             </Card>
 
@@ -142,13 +142,13 @@ export const IncidentsTab: React.FC<IncidentsTabProps> = ({
                 <span className="text-xs text-slate-500">
                   Mean Time to Investigate (MTTI)
                 </span>
-                <Badge variant="success">SLO ≤ 60s</Badge>
+                <Badge variant="success">Automated</Badge>
               </div>
               <p className="mt-2 text-2xl font-semibold text-slate-900 num-tabular">
                 {avgMtti}s
               </p>
               <p className="mt-1 text-xs text-slate-600">
-                Bounded 4-round A2A swarm convergence protocol
+                Multi-round agent swarm convergence protocol
               </p>
             </Card>
 
@@ -157,13 +157,13 @@ export const IncidentsTab: React.FC<IncidentsTabProps> = ({
                 <span className="text-xs text-slate-500">
                   Mean Swarm Consensus Score
                 </span>
-                <Badge variant="info">Target ≥ 85%</Badge>
+                <Badge variant="info">Consensus</Badge>
               </div>
               <p className="mt-2 text-2xl font-semibold text-slate-900 num-tabular">
                 {avgConsensus}%
               </p>
               <p className="mt-1 text-xs text-slate-600">
-                0.35 lead + 0.25 corroborating + 0.20 probe + 0.20 precedent
+                Weighted consensus across specialist agents and probes
               </p>
             </Card>
           </div>
@@ -182,7 +182,7 @@ export const IncidentsTab: React.FC<IncidentsTabProps> = ({
                     <th className="px-3 py-2 font-semibold">Symptom Summary</th>
                     <th className="px-3 py-2 font-semibold">Lead Agent</th>
                     <th className="px-3 py-2 text-right font-semibold">
-                      ₹ Impact
+                      Value Impact
                     </th>
                     <th className="px-3 py-2 font-semibold">Convergence</th>
                     <th className="px-3 py-2 font-semibold">Outcome</th>

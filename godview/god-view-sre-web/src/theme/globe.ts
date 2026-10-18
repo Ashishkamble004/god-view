@@ -31,6 +31,13 @@ export const NODE_STATUS_COLORS = {
   unknown: 0x9aa0a6,
 } as const;
 
+export const STATUS_COLORS: Record<string, { hex: string; num: number; label: string }> = {
+  green: { hex: '#34A853', num: NODE_STATUS_COLORS.green, label: 'Operational' },
+  amber: { hex: '#FBBC04', num: NODE_STATUS_COLORS.amber, label: 'Degraded' },
+  red: { hex: '#EA4335', num: NODE_STATUS_COLORS.red, label: 'Incident Active' },
+  unknown: { hex: '#9AA0A6', num: NODE_STATUS_COLORS.unknown, label: 'Unknown' },
+};
+
 /** Agents rendered as satellites use teal (tertiary), not a status colour. */
 export const AGENT_COLORS = { awake: 0x75d5e2, asleep: 0x5f6b7a } as const;
 

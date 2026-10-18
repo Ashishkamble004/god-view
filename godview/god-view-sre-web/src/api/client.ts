@@ -53,9 +53,9 @@ async function performFetch(endpoint: string, init?: RequestInit): Promise<Respo
   } catch (err) {
     if (err instanceof TypeError) {
       throw new CockpitApiError(
-        401,
-        'IAP_SESSION_EXPIRED',
-        'Session expired — Reload to sign in',
+        503,
+        'NETWORK_ERROR',
+        `Network connection failed: ${err.message}`,
         endpoint
       );
     }
@@ -64,16 +64,7 @@ async function performFetch(endpoint: string, init?: RequestInit): Promise<Respo
 }
 
 async function requestJson<T>(endpoint: string, init?: RequestInit): Promise<T> {
-  let response = await performFetch(endpoint, init);
-
-  // Automatic fallback from /api/v1/* to /v1/* if Sovereign mounted /v1/* without /api prefix
-  if (response.status === 404 && endpoint.startsWith('/api/v1/')) {
-    const fallbackEndpoint = endpoint.replace(/^\/api\/v1\//, '/v1/');
-    const fallbackRes = await performFetch(fallbackEndpoint, init);
-    if (fallbackRes.ok || fallbackRes.status !== 404) {
-      response = fallbackRes;
-    }
-  }
+  const response = await performFetch(endpoint, init);
 
   if (
     response.type === 'opaqueredirect' ||
@@ -138,10 +129,29 @@ export const cockpitApi = {
     return requestJson<TopologyResponse>('/api/v1/topology');
   },
 
-  getBusinessContext(nodeId: string): Promise<FullBusinessContext> {
-    return requestJson<FullBusinessContext>(
+  async getBusinessContext(nodeId: string): Promise<FullBusinessContext> {
+    const raw = await requestJson<any>(
       `/api/v1/business-context/${encodeURIComponent(nodeId)}`
     );
+    if (raw && raw.business_context) {
+      return {
+        role_summary: raw.business_context.role_summary || raw.role_summary || '',
+        domain: raw.business_context.domain || raw.domain || '',
+        capabilities: raw.business_context.capabilities || raw.capabilities || [],
+        upstream: raw.business_context.upstream || raw.upstream || [],
+        downstream: raw.business_context.downstream || raw.downstream || [],
+        journeys: raw.business_context.journeys || raw.journeys || [],
+        kpis: raw.kpis || raw.business_context.kpis || [],
+        invariants: raw.invariants || raw.business_context.invariants || [],
+        risk_notes: raw.business_context.risk_notes || raw.risk_notes || [],
+        confidence: raw.business_context.confidence ?? raw.confidence ?? 0.9,
+        evidence: raw.business_context.evidence || raw.evidence || [],
+        inferred_by: raw.business_context.inferred_by || raw.inferred_by || 'gemini',
+        inferred_at: raw.business_context.inferred_at || raw.inferred_at || new Date().toISOString(),
+        recent_incidents: raw.recent_incidents || raw.business_context.recent_incidents || [],
+      };
+    }
+    return raw as FullBusinessContext;
   },
 
   getHarnessTree(agentId: string): Promise<HarnessTreeResponse> {
@@ -499,92 +509,31 @@ export const cockpitApi = {
   },
 };
 
-export function buildTopologyFallback(
-  perceive: PerceptionReport,
-  incidents: EpisodicIncident[] = [],
-  journeys: JourneyModel[] = []
-): TopologyResponse {
-  const nodes = (perceive.discovered_services || []).map((s, idx) => {
-    let tier = 'compute';
-    if (['api_gateway', 'lb_frontend', 'security_policy'].includes(s.kind)) tier = 'edge';
-    else if (['cloud_sql', 'bucket', 'firestore_db', 'bigquery_dataset'].includes(s.kind)) tier = 'data';
-    else if (['pubsub_topic', 'pubsub_subscription'].includes(s.kind)) tier = 'messaging';
-    else if (['reasoning_engine', 'agent'].includes(s.kind)) tier = 'observer';
-
-    const openIncidents = (incidents || []).filter(
-      (inc) =>
-        (inc.symptom_summary && inc.symptom_summary.toLowerCase().includes(s.name.toLowerCase())) ||
-        (inc.root_cause && inc.root_cause.toLowerCase().includes(s.name.toLowerCase()))
-    ).length;
-
-    return {
-      id: s.id,
-      name: s.name,
-      kind: s.kind,
-      tier: tier as any,
-      status: openIncidents > 0 ? ('red' as const) : ('green' as const),
-      business: {
-        domain: s.inferred_role || 'Enterprise Platform',
-        role_summary: `${s.name} manages distributed ${s.inferred_role ? s.inferred_role.toLowerCase() : 'service'} operations with verified telemetry.`,
-        confidence: s.role_confidence || 0.94,
-      },
-      incidents_open: openIncidents,
-      agent_id: s.owner_agent_id || null,
-      golden: {
-        rps: 120 + idx * 25,
-        p95_ms: 18 + idx * 4,
-        error_ratio: openIncidents > 0 ? 0.042 : 0.0002,
-      },
-      posture: {
-        ingress: 'internal-and-cloud-load-balancing',
-        iap: true,
-        invoker_iam: true,
-        waf: openIncidents > 0 ? 'sensitivity-4' : 'sensitivity-1',
-      },
-    };
-  });
-
-  const edges = (perceive.discovered_edges || []).map((e, idx) => ({
-    id: e.id || `edge-${idx}`,
-    src: e.src,
-    dst: e.dst,
-    kind: e.protocol || 'http',
-    evidence_kind: e.evidence || 'trace',
-    rps: 45 + idx * 10,
-    error_ratio: 0.0001,
-    confidence: 0.96,
-  }));
-
-  const mappedJourneys = (journeys || []).map((j) => ({
-    name: j.name,
-    steps: (j.steps || []).map((st) => ({
-      node: st.service,
-      operation: st.operation,
-    })),
-    health: (j.status === 'degraded' || j.status === 'stalled' ? 'amber' : 'green') as any,
-    confidence: 0.92,
-  }));
-
-  return {
-    env_id: perceive.env_id || 'gcp-production',
-    generated_at: new Date().toISOString(),
-    nodes,
-    edges,
-    journeys: mappedJourneys,
-    layout_hint: {
-      groups: [
-        { tier: 'edge', node_ids: nodes.filter((n) => n.tier === 'edge').map((n) => n.id) },
-        { tier: 'compute', node_ids: nodes.filter((n) => n.tier === 'compute').map((n) => n.id) },
-        { tier: 'data', node_ids: nodes.filter((n) => n.tier === 'data').map((n) => n.id) },
-      ],
-    },
-  };
-}
-
 export interface SseSubscriptionOptions {
   onEvent: (eventType: string, payload: unknown) => void;
   onStatusChange?: (status: 'connected' | 'reconnecting' | 'polling') => void;
 }
+
+const KNOWN_SSE_EVENTS = [
+  'sovereign.heartbeat',
+  'heartbeat',
+  'topology.updated',
+  'node.health_changed',
+  'incident.opened',
+  'incident.updated',
+  'incident.closed',
+  'incident.created',
+  'incident.resolved',
+  'approval.created',
+  'approval.decided',
+  'approval.requested',
+  'approval.resolved',
+  'agent.woke',
+  'agent.slept',
+  'sentinel.tick',
+  'ready',
+  'message',
+];
 
 export function subscribeCockpitStream(options: SseSubscriptionOptions): () => void {
   if (typeof window === 'undefined' || typeof window.EventSource === 'undefined') {
@@ -597,6 +546,15 @@ export function subscribeCockpitStream(options: SseSubscriptionOptions): () => v
   let retryAttempt = 0;
   let disposed = false;
 
+  const handleNamedEvent = (evt: MessageEvent) => {
+    try {
+      const parsed = JSON.parse(evt.data) as { type?: string; data?: unknown };
+      options.onEvent(evt.type || parsed.type || 'message', parsed.data ?? parsed);
+    } catch {
+      options.onEvent(evt.type || 'message', evt.data);
+    }
+  };
+
   const connect = () => {
     if (disposed) return;
     try {
@@ -605,14 +563,12 @@ export function subscribeCockpitStream(options: SseSubscriptionOptions): () => v
         retryAttempt = 0;
         options.onStatusChange?.('connected');
       };
-      es.onmessage = (evt) => {
-        try {
-          const parsed = JSON.parse(evt.data) as { type?: string; data?: unknown };
-          options.onEvent(parsed.type ?? 'message', parsed.data ?? parsed);
-        } catch {
-          options.onEvent('message', evt.data);
-        }
-      };
+
+      es.onmessage = handleNamedEvent;
+      KNOWN_SSE_EVENTS.forEach((eventName) => {
+        es?.addEventListener(eventName, handleNamedEvent as EventListener);
+      });
+
       es.onerror = () => {
         if (es) {
           es.close();

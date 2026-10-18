@@ -178,7 +178,7 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
           adapter_family: 'kubernetes',
           locator: `k8s://cluster-main/ns-core/deployment/${svcEvaluator}`,
           labels: { godview_managed: 'true', tf_module: 'workloads' },
-          inferred_role: 'Obligation ratio, installment pricing, and eligibility decision engine',
+          inferred_role: 'Obligation ratio, pricing schedule, and eligibility decision engine',
           role_confidence: 0.96,
           classification: 'journey_linked',
           routes: ['POST /internal/decision/evaluate', 'GET /metrics', 'GET /healthz'],
@@ -459,9 +459,9 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
               confidence: 0.96,
             },
             {
-              id: 'rule-installment-formula',
-              expression: 'abs(installment_amount - amortize(principal_amount, rate_pct, tenure_months)) <= 1.0',
-              description: 'Monthly installment matches standard reducing-balance amortization within ₹1 rounding tolerance',
+              id: 'rule-pricing-formula',
+              expression: 'abs(scheduled_amount - calculate_schedule(base_amount, rate_pct, cycle_periods)) <= 1.0',
+              description: 'Periodic amount matches standard schedule calculation within 1.0 rounding tolerance',
               source_path: `services/${svcEvaluator}/app/pricing.py#L19-L37`,
               source_sha: '9f1c2ab',
               confidence: 0.94,
@@ -955,7 +955,7 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
 **Business meaning**: Every \`APPROVED\` eligibility decision requires a fixed-obligation-to-income ratio of at most **60%** and a credit bureau score of at least **680**.
 
 - **Provenance**: Extracted from \`services/${svcEvaluator}/app/rules_engine.py\` lines 41–58.
-- **₹ at risk**: Sum of \`requested_amount\` across non-compliant approvals in the 300s evaluation window.
+- **Value at risk**: Sum of \`requested_amount\` across non-compliant approvals in the 300s evaluation window.
 - **Remediation protocol**:
   1. Correlate with recent commits/deploys on \`${svcEvaluator}\`.
   2. Open rollback PR via \`git.create_rollback_pr\` (Trust Level L3).
@@ -1026,8 +1026,8 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
         ],
       },
       {
-        id: 'inv-installment-amortization-tolerance',
-        name: 'installment-amortization-tolerance',
+        id: 'inv-schedule-tolerance',
+        name: 'schedule-tolerance',
         scope: {
           service: svcEvaluator,
           entity: 'credit_application',
@@ -1038,7 +1038,7 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
         check: {
           dialect: 'python',
           window_s: 300,
-          statement: 'abs(observed_installment_amount - expected_amortized_val(principal, rate_pct, tenure)) <= 1.0',
+          statement: 'abs(observed_amount - expected_val(base_val, rate_pct, periods)) <= 1.0',
         },
         severity: 'sev2',
         wake_condition: {
@@ -1056,12 +1056,12 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
           breaches: 0,
           false_positive_rate: 0.007,
         },
-        sentinel_id: 'snt-invariant_sql-installment-amortization-tolerance',
-        git_path: `godview/invariants/${journeyKey}/installment-amortization-tolerance/INVARIANT.md`,
+        sentinel_id: 'snt-invariant_sql-schedule-tolerance',
+        git_path: `godview/invariants/${journeyKey}/schedule-tolerance/INVARIANT.md`,
         git_sha: '9f1c2ab',
-        body_md: `### Invariant: Installment Formula Tolerance ±₹1
+        body_md: `### Invariant: Schedule Formula Tolerance ±1.0
 
-**Business meaning**: Validates that every computed monthly installment adheres to the standard amortization schedule within ±₹1.00, catching floating-point truncation or rounding regressions while infrastructure latencies remain normal.`,
+**Business meaning**: Validates that every computed periodic amount adheres to the standard schedule within ±1.00, catching floating-point truncation or rounding regressions while infrastructure latencies remain normal.`,
         history: [
           {
             at: '2026-10-16T04:00:00Z',
@@ -1484,7 +1484,7 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
         causal_chain: [
           `14:04:12Z — PR #42 merged & deployed to ${svcEvaluator} (sha a1b2c3d)`,
           `14:05:00Z — Sentinel snt-invariant_sql-approved-implies-ratio-and-score observed 14 violations in 300s window`,
-          `14:05:10Z — Sovereign woke lead ${appAgentEvalId} with EvidencePack evp-20261016-0007 (₹1,84,00,000 at risk across 212 rows)`,
+          `14:05:10Z — Sovereign woke lead ${appAgentEvalId} with EvidencePack evp-20261016-0007 ($18,400,000 at risk across 212 rows)`,
           `14:05:51Z — Swarm converged in 2 rounds (41s, consensus 0.92): autonomous L3 rollback PR #43 created; L4 cohort re-evaluation awaiting approval apr-inc-20261016-0003-2`,
         ],
         outcome: 'mitigated',
@@ -2079,13 +2079,13 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
         expires_at: null,
       },
       {
-        drill_id: 'installment_rounding_drift',
+        drill_id: 'formula_rounding_drift',
         fault_class: 'BUSINESS',
-        fault_type: 'installment_rounding_drift',
-        title: 'Installment Formula Rounding Drift',
+        fault_type: 'formula_rounding_drift',
+        title: 'Formula Rounding Drift',
         target_service: svcEvaluator,
         infra_golden_signals: 'green',
-        expected_detection: 'CUSUM / z-score KPI change-point + Python amortization invariant breach (±₹1)',
+        expected_detection: 'CUSUM / z-score KPI change-point + Python formula invariant breach (±1.0)',
         mttd_target: '≤ 15 s',
         is_active: false,
         triggered_by: null,

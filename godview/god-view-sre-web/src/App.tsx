@@ -2,14 +2,11 @@ import { RefreshCw, Sliders, UserCheck, X } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   CockpitApiError,
-  buildTopologyFallback,
   cockpitApi,
   subscribeCockpitStream,
 } from './api/client';
 import type {
   CockpitDataset,
-  CostAndDriftOverview,
-  IapUserIdentity,
   PerceptionReport,
   SentinelDefinition,
 } from './api/types';
@@ -27,6 +24,7 @@ import { Badge, Button, TableSkeleton, formatEnumLabel } from './components/ui';
 
 export type CockpitRouteTab =
   | 'globe'
+  | 'globe-2d'
   | 'organism'
   | 'agent'
   | 'invariants'
@@ -49,6 +47,15 @@ function parseWindowHash(rawHash: string): ParsedHashRoute {
   }
   if (!cleaned || cleaned === 'globe') {
     return { tab: 'globe', param: null };
+  }
+  if (cleaned === 'globe-2d') {
+    return { tab: 'globe-2d', param: null };
+  }
+  if (cleaned.startsWith('globe-2d/')) {
+    return {
+      tab: 'globe-2d',
+      param: decodeURIComponent(cleaned.slice('globe-2d/'.length)),
+    };
   }
   if (cleaned.startsWith('globe/')) {
     return {
@@ -86,77 +93,10 @@ function parseWindowHash(rawHash: string): ParsedHashRoute {
 
 function getMockQueryMode(): string | null {
   if (typeof window === 'undefined') return null;
+  if (!(import.meta as any).env?.DEV) return null;
   const params = new URLSearchParams(window.location.search);
   return params.get('mock');
 }
-
-const FALLBACK_ME: IapUserIdentity = {
-  email: 'operator@unavailable',
-  principal: 'accounts.google.com:unavailable',
-  role: 'SRE Lead / CTO',
-  iap_authenticated: true,
-};
-
-const FALLBACK_PERCEIVE: PerceptionReport = {
-  env_id: 'env-degraded',
-  sovereign_id: 'sovereign-degraded',
-  sovereign_status: 'degraded',
-  heartbeat_at: new Date().toISOString(),
-  sentinel_cadence_s: 10,
-  tokens_at_rest: 0,
-  sovereign_budget_daily_usd: 1.5,
-  sovereign_spent_today_usd: 0,
-  court_ceiling_daily_usd: 4.5,
-  monthly_ceiling_usd: 150,
-  escalation_reserve_pct: 20,
-  reasoning_model: 'model-unavailable',
-  escalation_model: 'model-unavailable',
-  embedding_model: 'model-unavailable',
-  managed_scope_label: 'godview_managed=true',
-  warm_tier_spec: '1 vCPU / 512 MiB',
-  active_window_label: '08:00–20:00 IST',
-  approval_window_label: '08:00–22:00 IST',
-  hibernate_job_name: 'god-view-hibernate-job',
-  memory_db_name: 'god-view-memory',
-  simulator_target_daily: 200,
-  simulator_image_ratio_label: '15% image',
-  controls_enabled: true,
-  senses: [],
-  discovered_services: [],
-  discovered_edges: [],
-  discovered_entities: [],
-  operator_state: {
-    kill_switch_enabled: false,
-    kill_switch_reason: null,
-    kill_switch_actor: null,
-    kill_switch_updated_at: null,
-    tenant_paused: false,
-    pause_schedule_ist: '20:00–08:00 IST',
-    hibernated: false,
-    simulator_enabled: false,
-    simulator_window_ist: '08:00–20:00 IST',
-    simulator_journeys_today: 0,
-    simulator_target_per_day: 200,
-    simulator_specimen_ratio: '15% image / 85% text-only',
-  },
-};
-
-const FALLBACK_COST: CostAndDriftOverview = {
-  monthly_ceiling_usd: 150,
-  current_month_spend_usd: 0,
-  projected_active_month_usd: 0,
-  projected_hibernated_month_usd: 0,
-  daily_court_ceiling_usd: 4.5,
-  daily_court_spent_usd: 0,
-  escalation_reserve_pct: 20,
-  budget_thresholds_pct: [50, 80, 100],
-  tfstate_uri: 'gs://unavailable/default.tfstate',
-  last_drift_scan_at: new Date().toISOString(),
-  tier_budgets_summary: 'App / Biz / Change $0.75/d · Data / Platform $0.50/d · Sovereign $1.50/d',
-  cost_findings_subtitle: 'Surfaces idle Reasoning Engines, oversized tiers, and specimen pool levers',
-  cost_findings: [],
-  drift_diffs: [],
-};
 
 export function App() {
   const [route, setRoute] = useState<ParsedHashRoute>(() =>
@@ -242,9 +182,13 @@ export function App() {
 
       setDataset((prev) => {
         const merged: CockpitDataset = {
-          me: settled.partial.me ?? prev?.me ?? FALLBACK_ME,
-          perceive:
-            settled.partial.perceive ?? prev?.perceive ?? FALLBACK_PERCEIVE,
+          me: settled.partial.me ?? prev?.me ?? {
+            email: 'operator@internal',
+            principal: 'accounts.google.com:operator',
+            role: 'SRE Lead / CTO',
+            iap_authenticated: true,
+          },
+          perceive: settled.partial.perceive ?? prev?.perceive ?? null as any,
           court: settled.partial.court ?? prev?.court ?? [],
           invariants: settled.partial.invariants ?? prev?.invariants ?? [],
           sentinels: settled.partial.sentinels ?? prev?.sentinels ?? [],
@@ -255,7 +199,7 @@ export function App() {
               ? []
               : settled.partial.approvals ?? prev?.approvals ?? [],
           changes: settled.partial.changes ?? prev?.changes ?? [],
-          cost: settled.partial.cost ?? prev?.cost ?? FALLBACK_COST,
+          cost: settled.partial.cost ?? prev?.cost ?? null as any,
           drills: settled.partial.drills ?? prev?.drills ?? [],
           topology: settled.partial.topology ?? prev?.topology ?? null,
         };
@@ -479,12 +423,16 @@ export function App() {
   };
 
   return (
-    <div className="min-h-screen bg-white text-slate-700">
+    <div
+      className={`min-h-screen bg-white text-slate-700 ${
+        route.tab === 'globe' ? 'h-screen flex flex-col overflow-hidden' : ''
+      }`}
+    >
       {/* Hairline Google four-colour top rule */}
-      <div className="google-top-hairline w-full" />
+      <div className="google-top-hairline w-full shrink-0" />
 
       {/* Global Top Bar */}
-      <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/95 backdrop-blur-sm">
+      <header className="sticky top-0 z-30 shrink-0 border-b border-slate-200 bg-white/95 backdrop-blur-sm">
         <div className="mx-auto flex max-w-[1440px] flex-wrap items-center justify-between gap-3 px-6 py-3">
           {/* Brand & Environment Chip */}
           <div className="flex flex-wrap items-center gap-3">
@@ -498,19 +446,19 @@ export function App() {
                     God-View Cockpit
                   </span>
                   <span className="text-xs text-slate-500">
-                    Sovereign SRE Organism v4.0
+                    3D Globe Cockpit v5.0
                   </span>
                 </div>
               </div>
             </div>
 
-            {dataset && (
+            {dataset && dataset.perceive && (
               <div className="flex flex-wrap items-center gap-2 border-l border-slate-200 pl-3 text-xs">
                 <Badge variant="outline" className="font-mono">
                   {dataset.perceive.env_id}
                 </Badge>
                 {renderHeartbeatBadge(dataset.perceive)}
-                {dataset.perceive.operator_state.kill_switch_enabled && (
+                {dataset.perceive.operator_state?.kill_switch_enabled && (
                   <Badge variant="danger" dot>
                     Kill switch engaged
                   </Badge>
@@ -606,8 +554,8 @@ export function App() {
       <main
         className={
           route.tab === 'globe'
-            ? 'w-full'
-            : 'mx-auto max-w-[1440px] px-6 py-6'
+            ? 'relative flex-1 w-full min-h-0 overflow-hidden flex flex-col'
+            : 'flex-1 overflow-auto mx-auto w-full max-w-[1440px] px-6 py-6'
         }
       >
         {/* IAP Session Expiry Banner */}
@@ -707,18 +655,20 @@ export function App() {
 
         {dataset && (
           <>
-            {route.tab === 'globe' && (
+            {(route.tab === 'globe' || route.tab === 'globe-2d') && (
               <GlobeView
-                topology={
-                  dataset.topology ||
-                  buildTopologyFallback(
-                    dataset.perceive,
-                    dataset.incidents,
-                    dataset.journeys
-                  )
-                }
+                initialForce2D={route.tab === 'globe-2d'}
+                topology={dataset.topology ?? null}
                 selectedNodeId={route.param}
-                onSelectNode={(nodeId) => console.log('Selected node:', nodeId)}
+                court={dataset.court}
+                incidents={dataset.incidents}
+                approvals={dataset.approvals}
+                perceive={dataset.perceive}
+                cost={dataset.cost}
+                streamStatus={streamStatus}
+                onSelectNode={(nodeId) => {
+                  window.location.hash = `#globe/${encodeURIComponent(nodeId)}`;
+                }}
                 onSelectIncident={(incId) =>
                   navigateToHash(
                     incId === 'active-incident'

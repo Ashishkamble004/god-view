@@ -79,7 +79,7 @@ describe('God-View Cockpit (URL 3)', () => {
     ).toBeInTheDocument();
   });
 
-  it('renders #journeys explorer with SVG directly-follows DAG, conformance violations, funnel KPIs, and ₹ at risk', async () => {
+  it('renders #journeys explorer with SVG directly-follows DAG, conformance violations, funnel KPIs, and value at risk', async () => {
     const dataset = resetMockCockpitState(42);
     window.location.hash = '#journeys';
     render(<App />);

@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it } from 'vitest';
 import App from '../App';
@@ -50,8 +50,8 @@ describe('God-View 3D Globe Cockpit', () => {
 
     // Select the first discovered service
     const firstService = dataset.perceive.discovered_services[0];
-    const nodeCard = await screen.findByText(firstService.name);
-    await user.click(nodeCard);
+    const nodeCards = await screen.findAllByText(firstService.name);
+    await user.click(nodeCards[0]);
 
     // Business context drawer appears
     const drawer = await screen.findByTestId('business-context-drawer');
@@ -61,14 +61,14 @@ describe('God-View 3D Globe Cockpit', () => {
     expect(screen.getAllByText(firstService.name).length).toBeGreaterThan(0);
 
     // Golden signals KPI matrix exists
-    expect(screen.getByText(/Golden Signals \(Cloud Monitoring\)/i)).toBeInTheDocument();
-    expect(screen.getByText(/Throughput/i)).toBeInTheDocument();
-    expect(screen.getByText(/p95 Latency/i)).toBeInTheDocument();
-    expect(screen.getByText(/Error Ratio/i)).toBeInTheDocument();
+    expect(within(drawer).getByText(/Golden Signals \(Cloud Monitoring\)/i)).toBeInTheDocument();
+    expect(within(drawer).getByText(/^Throughput$/i)).toBeInTheDocument();
+    expect(within(drawer).getByText(/^p95 Latency$/i)).toBeInTheDocument();
+    expect(within(drawer).getByText(/^Error Ratio$/i)).toBeInTheDocument();
 
     // Security Posture & Invariants
-    expect(screen.getByText(/Security Posture & Invariants/i)).toBeInTheDocument();
-    expect(screen.getByText(/IAP Authentication:/i)).toBeInTheDocument();
+    expect(within(drawer).getByText(/Security Posture & Invariants/i)).toBeInTheDocument();
+    expect(within(drawer).getByText(/IAP Authentication:/i)).toBeInTheDocument();
 
     // Close drawer
     const closeBtn = drawer.querySelector('button');

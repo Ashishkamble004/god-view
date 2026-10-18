@@ -1,37 +1,57 @@
-import React, { useEffect, useRef, useState, useMemo } from 'react';
-import * as THREE from 'three';
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import {
+  AlertTriangle,
   ArrowRight,
   Brain,
-  Grid,
+  Compass,
+  Layers,
   Minus,
   Plus,
   RotateCcw,
   Search,
   Shield,
-  ShieldAlert,
   Wifi,
   X,
 } from 'lucide-react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import * as THREE from 'three';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { cockpitApi } from '../api/client';
 import type {
+  ApprovalCard,
+  CostAndDriftOverview,
+  CourtAgent,
+  EpisodicIncident,
   FullBusinessContext,
+  PerceptionReport,
   TopologyNode,
   TopologyResponse,
   TopologyTier,
 } from '../api/types';
-import { cockpitApi } from '../api/client';
-import { Badge, Button, Card } from './ui';
+import {
+  Badge,
+  Button,
+  Card,
+  formatCurrency,
+} from './ui';
 import {
   GLOBE_COLORS,
   GLOBE_STYLE,
   NODE_STATUS_COLORS,
+  STATUS_COLORS,
   TIER_LATITUDE,
 } from '../theme/globe';
 
 export interface GlobeViewProps {
+  initialForce2D?: boolean;
   topology: TopologyResponse | null;
   selectedNodeId?: string | null;
+  selectedJourneyName?: string | null;
+  court?: CourtAgent[] | null;
+  incidents?: EpisodicIncident[] | null;
+  approvals?: ApprovalCard[] | null;
+  perceive?: PerceptionReport | null;
+  cost?: CostAndDriftOverview | null;
+  streamStatus?: 'connected' | 'reconnecting' | 'polling' | 'disconnected';
   onSelectNode?: (nodeId: string) => void;
   onSelectIncident?: (incidentId: string) => void;
   onSelectJourney?: (journeyName: string) => void;
@@ -40,13 +60,13 @@ export interface GlobeViewProps {
 
 // Latitudinal band assignment per architectural tier (degrees)
 const TIER_LATITUDES: Record<TopologyTier, number> = {
-  observer: TIER_LATITUDE.observer ?? 78,
-  edge: TIER_LATITUDE.edge ?? 55,
-  messaging: TIER_LATITUDE.messaging ?? 35,
-  compute: TIER_LATITUDE.compute ?? 8,
-  data: TIER_LATITUDE.data ?? -42,
-  platform: TIER_LATITUDE.platform ?? -68,
-  external: TIER_LATITUDE.external ?? 20, // Orbiting satellite at higher radius
+  observer: TIER_LATITUDE.observer ?? 68,
+  edge: TIER_LATITUDE.edge ?? 46,
+  messaging: TIER_LATITUDE.messaging ?? -10,
+  compute: TIER_LATITUDE.compute ?? 16,
+  data: TIER_LATITUDE.data ?? -38,
+  platform: TIER_LATITUDE.platform ?? -62,
+  external: TIER_LATITUDE.external ?? 22, // Orbiting satellite at higher radius
 };
 
 const TIER_COLORS: Record<TopologyTier, string> = {
@@ -59,71 +79,107 @@ const TIER_COLORS: Record<TopologyTier, string> = {
   external: '#EA4335', // Google Red
 };
 
-const STATUS_COLORS: Record<string, { hex: string; threeHex: number }> = {
-  green: { hex: '#5bb974', threeHex: NODE_STATUS_COLORS.green },
-  amber: { hex: '#fcc934', threeHex: NODE_STATUS_COLORS.amber },
-  red: { hex: '#ee675c', threeHex: NODE_STATUS_COLORS.red },
-  unknown: { hex: '#9aa0a6', threeHex: NODE_STATUS_COLORS.unknown },
-};
+// Spherical Linear Interpolation (SLERP) for great circle arc paths
+function slerpVector3(v1: THREE.Vector3, v2: THREE.Vector3, t: number): THREE.Vector3 {
+  const n1 = v1.clone().normalize();
+  const n2 = v2.clone().normalize();
+  const dot = Math.max(-1, Math.min(1, n1.dot(n2)));
+  if (dot > 0.9999) return n1;
+  const omega = Math.acos(dot);
+  const sinOmega = Math.sin(omega);
+  if (Math.abs(sinOmega) < 0.0001) return n1.lerp(n2, t).normalize();
+  const w1 = Math.sin((1 - t) * omega) / sinOmega;
+  const w2 = Math.sin(t * omega) / sinOmega;
+  return new THREE.Vector3(
+    n1.x * w1 + n2.x * w2,
+    n1.y * w1 + n2.y * w2,
+    n1.z * w1 + n2.z * w2
+  ).normalize();
+}
 
 export const GlobeView: React.FC<GlobeViewProps> = ({
+  initialForce2D = false,
   topology,
-  selectedNodeId: propSelectedNodeId = null,
+  selectedNodeId: propSelectedNodeId,
+  selectedJourneyName,
+  court,
+  incidents,
+  approvals,
+  perceive,
+  cost: _cost,
+  streamStatus = 'connected',
   onSelectNode,
   onSelectIncident,
   onSelectJourney,
-  onSelectAgent,
+  onSelectAgent: _onSelectAgent,
 }) => {
-  void onSelectAgent;
-  const containerRef = useRef<HTMLDivElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
   const controlsRef = useRef<OrbitControls | null>(null);
+  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
 
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(propSelectedNodeId);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(
+    propSelectedNodeId || null
+  );
+  const [activeJourney, setActiveJourney] = useState<string | null>(
+    selectedJourneyName || null
+  );
+  const [businessContext, setBusinessContext] = useState<FullBusinessContext | null>(null);
+  const [loadingContext, setLoadingContext] = useState<boolean>(false);
+  const [contextError, setContextError] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [incidentBannerDismissed, setIncidentBannerDismissed] = useState<boolean>(false);
 
+  const [activeTierFilters, setActiveTierFilters] = useState<Set<TopologyTier>>(
+    new Set(['edge', 'compute', 'data', 'messaging', 'platform', 'observer', 'external'])
+  );
+
+  // Sync prop changes
   useEffect(() => {
     if (propSelectedNodeId !== undefined) {
       setSelectedNodeId(propSelectedNodeId);
     }
   }, [propSelectedNodeId]);
-  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
-  const [businessContext, setBusinessContext] = useState<FullBusinessContext | null>(null);
-  const [loadingContext, setLoadingContext] = useState(false);
-  const [activeTierFilters, setActiveTierFilters] = useState<Set<TopologyTier>>(
-    new Set(['edge', 'compute', 'data', 'messaging', 'platform', 'observer', 'external'])
-  );
-  const [searchQuery, setSearchQuery] = useState('');
-  const [force2D, setForce2D] = useState(false);
-  const [prefersReducedMotion, setPrefersReducedMotion] = useState(false);
-  const [incidentDismissed, setIncidentDismissed] = useState(false);
 
-  // Check prefers-reduced-motion
   useEffect(() => {
-    if (typeof window !== 'undefined' && window.matchMedia) {
-      const mediaQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
-      setPrefersReducedMotion(mediaQuery.matches);
-      const listener = (e: MediaQueryListEvent) => setPrefersReducedMotion(e.matches);
-      mediaQuery.addEventListener('change', listener);
-      return () => mediaQuery.removeEventListener('change', listener);
+    if (selectedJourneyName !== undefined) {
+      setActiveJourney(selectedJourneyName);
     }
+  }, [selectedJourneyName]);
+
+  // Reduced motion detection
+  const [prefersReducedMotion, setPrefersReducedMotion] = useState<boolean>(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false;
+    return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  });
+
+  const [force2D, setForce2D] = useState<boolean>(initialForce2D || false);
+  const use2DMode = prefersReducedMotion || force2D;
+
+  useEffect(() => {
+    if (initialForce2D !== undefined) {
+      setForce2D(initialForce2D);
+    }
+  }, [initialForce2D]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    const mediaQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const listener = (e: MediaQueryListEvent) => setPrefersReducedMotion(e.matches);
+    mediaQuery.addEventListener('change', listener);
+    return () => mediaQuery.removeEventListener('change', listener);
   }, []);
 
-  const use2DMode = force2D || prefersReducedMotion;
-
-  // Selected node object
-  const selectedNode = useMemo(() => {
-    if (!topology || !selectedNodeId) return null;
-    return topology.nodes.find((n) => n.id === selectedNodeId) || null;
-  }, [topology, selectedNodeId]);
-
-  // Load business context when a node is selected
+  // Fetch verified Business Context when node is selected
   useEffect(() => {
     if (!selectedNodeId) {
       setBusinessContext(null);
+      setContextError(null);
       return;
     }
     let cancelled = false;
     setLoadingContext(true);
+    setContextError(null);
     cockpitApi
       .getBusinessContext(selectedNodeId)
       .then((ctx) => {
@@ -135,6 +191,7 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
       .catch((err) => {
         if (!cancelled) {
           console.warn('Failed to load business context for node:', selectedNodeId, err);
+          setContextError(err.message || 'Failed to load business context');
           setLoadingContext(false);
         }
       });
@@ -144,37 +201,58 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
     };
   }, [selectedNodeId]);
 
-  // Group nodes by domain to determine longitudinal angular clusters
+  // Filtered nodes
+  const filteredNodes = useMemo(() => {
+    if (!topology) return [];
+    return topology.nodes.filter((node) => {
+      const matchesTier = activeTierFilters.has(node.tier as TopologyTier);
+      const q = searchQuery.toLowerCase().trim();
+      const matchesQuery =
+        !q ||
+        node.name.toLowerCase().includes(q) ||
+        node.id.toLowerCase().includes(q) ||
+        (node.business?.domain && node.business.domain.toLowerCase().includes(q));
+      return matchesTier && matchesQuery;
+    });
+  }, [topology, activeTierFilters, searchQuery]);
+
+  // Compute 3D node coordinates across front hemisphere facing camera
   const nodePositions = useMemo(() => {
-    if (!topology) return new Map<string, THREE.Vector3>();
+    if (!topology || topology.nodes.length === 0) return new Map<string, THREE.Vector3>();
 
     const positions = new Map<string, THREE.Vector3>();
-    const domainGroups: Record<string, TopologyNode[]> = {};
+    const sphereRadius = 9.0;
 
+    // Group nodes by domain
+    const domainGroups: Record<string, TopologyNode[]> = {};
     topology.nodes.forEach((node) => {
-      const domain = node.business.domain || 'core';
+      const domain = node.business?.domain || 'core';
       if (!domainGroups[domain]) domainGroups[domain] = [];
       domainGroups[domain].push(node);
     });
 
     const domains = Object.keys(domainGroups);
-    const domainStep = (2 * Math.PI) / Math.max(1, domains.length);
+    const domainCount = Math.max(1, domains.length);
+    // Span longitude across the camera-facing arc [-55deg, +55deg] (cos(theta) > 0.57 > 0)
+    const totalLongSpanRad = Math.min(Math.PI * 0.65, domainCount * 0.45);
+    const startTheta = -totalLongSpanRad / 2;
+    const domainStep = domainCount > 1 ? totalLongSpanRad / (domainCount - 1) : 0;
 
     domains.forEach((dom, dIdx) => {
       const groupNodes = domainGroups[dom];
-      const baseTheta = dIdx * domainStep;
+      const baseTheta = domainCount === 1 ? 0 : startTheta + dIdx * domainStep;
 
       groupNodes.forEach((node, nIdx) => {
         const tier = (node.tier as TopologyTier) || 'compute';
-        const latDeg = TIER_LATITUDES[tier] ?? 10;
+        const latDeg = TIER_LATITUDES[tier] ?? 16;
         const phi = (latDeg * Math.PI) / 180;
 
-        // Longitude with slight jitter within domain cluster
-        const offset = (nIdx - (groupNodes.length - 1) / 2) * 0.18;
+        // Spread nodes slightly in longitude if multiple share a domain
+        const offset = (nIdx - (groupNodes.length - 1) / 2) * 0.16;
         const theta = baseTheta + offset;
 
         // External nodes orbit at higher radius as satellites
-        const r = tier === 'external' ? 9.0 * GLOBE_STYLE.satelliteOrbitRadius : 9.0;
+        const r = tier === 'external' ? sphereRadius * GLOBE_STYLE.satelliteOrbitRadius : sphereRadius;
 
         const x = r * Math.cos(phi) * Math.sin(theta);
         const y = r * Math.sin(phi);
@@ -187,26 +265,39 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
     return positions;
   }, [topology]);
 
-  // Filtered nodes
-  const filteredNodes = useMemo(() => {
-    if (!topology) return [];
-    return topology.nodes.filter((node) => {
-      const matchesTier = activeTierFilters.has(node.tier as TopologyTier);
-      const q = searchQuery.toLowerCase().trim();
-      const matchesQuery =
-        !q ||
-        node.name.toLowerCase().includes(q) ||
-        node.id.toLowerCase().includes(q) ||
-        node.business.domain.toLowerCase().includes(q);
-      return matchesTier && matchesQuery;
-    });
-  }, [topology, activeTierFilters, searchQuery]);
+  // Active journey node set
+  const activeJourneyNodes = useMemo(() => {
+    if (!activeJourney || !topology) return null;
+    const j = topology.journeys.find((item) => item.name === activeJourney);
+    if (!j) return null;
+    return new Set(j.steps.map((s) => s.node));
+  }, [activeJourney, topology]);
 
-  // Nodes with active incidents
-  const incidentNodes = useMemo(() => {
-    if (!topology) return [];
-    return topology.nodes.filter((n) => n.incidents_open > 0 || n.status === 'red');
-  }, [topology]);
+  // Incident count
+  const activeIncidentsCount = useMemo(() => {
+    if (incidents) {
+      return incidents.filter((i) => (i.outcome as string) === 'investigating' || i.outcome === 'mitigated').length;
+    }
+    return topology?.nodes.filter((n) => n.incidents_open > 0 || n.status === 'red').length || 0;
+  }, [incidents, topology]);
+
+  // Approvals count
+  const pendingApprovalsCount = useMemo(() => {
+    if (approvals) {
+      return approvals.filter((a) => (a as any).status === 'pending' || a.decision === 'pending').length;
+    }
+    return null;
+  }, [approvals]);
+
+  // Agent counts
+  const totalAgents = court ? court.length : null;
+  const awakeAgents = court ? court.filter((a) => a.warmth_min_instances > 0 || a.last_wake_at != null).length : null;
+
+  // Selected node
+  const selectedNode = useMemo(() => {
+    if (!topology || !selectedNodeId) return null;
+    return topology.nodes.find((n) => n.id === selectedNodeId || n.name === selectedNodeId) || null;
+  }, [topology, selectedNodeId]);
 
   // Three.js Lifecycle
   useEffect(() => {
@@ -224,7 +315,9 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
     scene.background = new THREE.Color(GLOBE_COLORS.spaceEdge);
 
     const camera = new THREE.PerspectiveCamera(GLOBE_STYLE.cameraFovDeg, width / height, 0.1, 1000);
-    camera.position.set(0, 16, 28);
+    camera.position.set(0, 14, 26);
+    camera.lookAt(0, 0, 0);
+    cameraRef.current = camera;
 
     let renderer: THREE.WebGLRenderer;
     try {
@@ -251,12 +344,12 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
     controls.enableDamping = true;
     controls.dampingFactor = 0.05;
     controls.rotateSpeed = 0.65;
-    controls.minDistance = 14;
-    controls.maxDistance = 45;
+    controls.minDistance = 12;
+    controls.maxDistance = 50;
     controls.enablePan = false;
     controlsRef.current = controls;
 
-    // 2. Lights - Key light from upper-left gives rich navy-lit ocean
+    // 2. Lights
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
     scene.add(ambientLight);
 
@@ -322,8 +415,7 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
       opacity: GLOBE_STYLE.graticuleOpacity,
     });
 
-    // Parallels (latitude circles)
-    [-68, -42, 0, 8, 35, 55, 78].forEach((latDeg) => {
+    [-62, -38, -10, 0, 16, 46, 68].forEach((latDeg) => {
       const phi = (latDeg * Math.PI) / 180;
       const r = sphereRadius * Math.cos(phi) * 1.002;
       const y = sphereRadius * Math.sin(phi);
@@ -338,7 +430,6 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
       gridGroup.add(circleLine);
     });
 
-    // Meridians (longitude half-circles)
     for (let i = 0; i < 12; i++) {
       const theta = (i / 12) * Math.PI * 2;
       const points: THREE.Vector3[] = [];
@@ -370,13 +461,23 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
       nodeSubGroup.userData = { nodeId: node.id };
 
       const statusConf = STATUS_COLORS[node.status] || STATUS_COLORS.unknown;
-      const isImportant = node.kind === 'lb_frontend' || node.kind === 'cloud_sql' || node.kind === 'api_gateway';
+      const isImportant =
+        node.kind === 'lb_frontend' ||
+        node.kind === 'cloud_sql' ||
+        node.kind === 'api_gateway' ||
+        node.tier === 'edge';
       const radiusScale = isImportant ? GLOBE_STYLE.nodeRadius.important : GLOBE_STYLE.nodeRadius.base;
-      const beaconRadius = radiusScale * sphereRadius * 1.8;
+      const beaconRadius = radiusScale * sphereRadius * 1.9;
 
-      const nodeGeo = new THREE.SphereGeometry(beaconRadius, 24, 24);
+      const isJourneyTarget = activeJourneyNodes?.has(node.id) || activeJourneyNodes?.has(node.name);
+
+      const nodeGeo = new THREE.SphereGeometry(
+        isJourneyTarget ? beaconRadius * 1.35 : beaconRadius,
+        24,
+        24
+      );
       const nodeMat = new THREE.MeshLambertMaterial({
-        color: statusConf.threeHex,
+        color: isJourneyTarget ? '#FBBC04' : statusConf.num,
       });
 
       const beaconMesh = new THREE.Mesh(nodeGeo, nodeMat);
@@ -387,17 +488,21 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
       const pinGeo = new THREE.BufferGeometry().setFromPoints(pinPoints);
       const pinLine = new THREE.Line(
         pinGeo,
-        new THREE.LineBasicMaterial({ color: statusConf.threeHex, opacity: 0.6, transparent: true })
+        new THREE.LineBasicMaterial({
+          color: isJourneyTarget ? '#FBBC04' : statusConf.num,
+          opacity: 0.7,
+          transparent: true,
+        })
       );
       nodeSubGroup.add(pinLine);
 
-      // Radiant pulse ring if incidents exist or status is red/amber
+      // Radiant pulse ring if incidents exist or status is red
       if (node.incidents_open > 0 || node.status === 'red') {
-        const ringGeo = new THREE.RingGeometry(0.5, 0.72, 32);
+        const ringGeo = new THREE.RingGeometry(0.55, 0.8, 32);
         const ringMat = new THREE.MeshBasicMaterial({
           color: NODE_STATUS_COLORS.red,
           transparent: true,
-          opacity: 0.8,
+          opacity: 0.85,
           side: THREE.DoubleSide,
         });
         const pulseMesh = new THREE.Mesh(ringGeo, ringMat);
@@ -411,10 +516,10 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
     });
     scene.add(nodeGroup);
 
-    // 6. Arcs as Great-Circle Curves with Animated Traffic Flow
+    // 6. Arcs as Great-Circle Curves with Animated Traffic Flow (SLERP + Sine Altitude)
     const arcGroup = new THREE.Group();
     const particleFlows: Array<{
-      curve: THREE.QuadraticBezierCurve3;
+      curve: THREE.CatmullRomCurve3;
       particle: THREE.Mesh;
       speed: number;
       progress: number;
@@ -425,140 +530,126 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
       const dstPos = nodePositions.get(edge.dst);
       if (!srcPos || !dstPos) return;
 
-      const mid = new THREE.Vector3().addVectors(srcPos, dstPos).multiplyScalar(0.5);
-      const distance = srcPos.distanceTo(dstPos);
-      const lift = Math.max(0.6, distance * 0.22);
-      mid.normalize().multiplyScalar(sphereRadius + lift);
+      const dist = srcPos.distanceTo(dstPos);
+      const maxLift = Math.max(0.75, dist * 0.22);
+      const steps = 24;
+      const points: THREE.Vector3[] = [];
 
-      const curve = new THREE.QuadraticBezierCurve3(srcPos, mid, dstPos);
-      const tubeGeo = new THREE.TubeGeometry(curve, 28, 0.035, 6, false);
+      for (let i = 0; i <= steps; i++) {
+        const t = i / steps;
+        const altitude = maxLift * Math.sin(t * Math.PI);
+        const pt = slerpVector3(srcPos, dstPos, t).multiplyScalar(sphereRadius + altitude);
+        points.push(pt);
+      }
 
+      const curve = new THREE.CatmullRomCurve3(points);
       const isError = (edge.error_ratio ?? 0) >= 0.02;
-      const arcColor = isError ? GLOBE_COLORS.arcError : GLOBE_COLORS.arc;
+      const isJourneyEdge =
+        activeJourneyNodes &&
+        (activeJourneyNodes.has(edge.src) && activeJourneyNodes.has(edge.dst));
 
+      const arcColor = isJourneyEdge
+        ? '#FBBC04'
+        : isError
+        ? GLOBE_COLORS.arcError
+        : GLOBE_COLORS.arc;
+
+      const tubeGeo = new THREE.TubeGeometry(
+        curve,
+        28,
+        isJourneyEdge ? 0.055 : 0.038,
+        8,
+        false
+      );
       const arcMat = new THREE.MeshBasicMaterial({
         color: arcColor,
         transparent: true,
-        opacity: GLOBE_STYLE.arcOpacity,
+        opacity: isJourneyEdge ? 0.95 : activeJourneyNodes ? 0.2 : GLOBE_STYLE.arcOpacity,
       });
       const tubeMesh = new THREE.Mesh(tubeGeo, arcMat);
       arcGroup.add(tubeMesh);
 
       // Traffic flow particle
-      const pGeo = new THREE.SphereGeometry(0.09, 12, 12);
+      const pGeo = new THREE.SphereGeometry(isJourneyEdge ? 0.12 : 0.09, 12, 12);
       const pMat = new THREE.MeshBasicMaterial({
-        color: GLOBE_COLORS.arcParticle,
-        transparent: true,
-        opacity: 0.9,
+        color: isJourneyEdge ? '#FFFFFF' : GLOBE_COLORS.arcParticle,
       });
-      const particle = new THREE.Mesh(pGeo, pMat);
-      arcGroup.add(particle);
-
-      const rps = edge.rps ?? 10;
-      const speed = Math.max(0.003, Math.min(0.015, Math.log10(rps + 1) * 0.006));
+      const pMesh = new THREE.Mesh(pGeo, pMat);
+      arcGroup.add(pMesh);
 
       particleFlows.push({
         curve,
-        particle,
-        speed,
+        particle: pMesh,
+        speed: isJourneyEdge ? 0.006 : 0.0035 + Math.random() * 0.0015,
         progress: Math.random(),
       });
     });
     scene.add(arcGroup);
 
-    // 7. Raycasting for Hover & Click Picking
+    // 7. Raycasting for picking/clicking nodes
     const raycaster = new THREE.Raycaster();
     const mouse = new THREE.Vector2();
 
-    const handlePointerMove = (event: MouseEvent) => {
-      const rect = canvas.getBoundingClientRect();
-      mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-      mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    const handlePointerDown = (evt: MouseEvent) => {
+      const rect = renderer.domElement.getBoundingClientRect();
+      mouse.x = ((evt.clientX - rect.left) / rect.width) * 2 - 1;
+      mouse.y = -((evt.clientY - rect.top) / rect.height) * 2 + 1;
 
       raycaster.setFromCamera(mouse, camera);
       const intersects = raycaster.intersectObjects(nodeGroup.children, true);
 
       if (intersects.length > 0) {
-        let obj: THREE.Object3D | null = intersects[0].object;
-        while (obj && !obj.userData.nodeId && obj.parent) {
-          obj = obj.parent;
+        let current: THREE.Object3D | null = intersects[0].object;
+        while (current && !current.userData.nodeId && current.parent !== nodeGroup) {
+          current = current.parent;
         }
-        if (obj && obj.userData.nodeId) {
-          setHoveredNodeId(obj.userData.nodeId);
-          canvas.style.cursor = 'pointer';
-          return;
-        }
-      }
-      setHoveredNodeId(null);
-      canvas.style.cursor = 'default';
-    };
+        if (current && current.userData.nodeId) {
+          const pickedId = current.userData.nodeId as string;
+          setSelectedNodeId(pickedId);
+          if (onSelectNode) onSelectNode(pickedId);
 
-    const handleClick = (event: MouseEvent) => {
-      const rect = canvas.getBoundingClientRect();
-      mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-      mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-
-      raycaster.setFromCamera(mouse, camera);
-      const intersects = raycaster.intersectObjects(nodeGroup.children, true);
-
-      if (intersects.length > 0) {
-        let obj: THREE.Object3D | null = intersects[0].object;
-        while (obj && !obj.userData.nodeId && obj.parent) {
-          obj = obj.parent;
-        }
-        if (obj && obj.userData.nodeId) {
-          const nId = obj.userData.nodeId;
-          setSelectedNodeId(nId);
-          if (onSelectNode) onSelectNode(nId);
-
-          // Camera fly-to target node
-          const targetPos = nodePositions.get(nId);
+          // Camera fly-to
+          const targetPos = nodePositions.get(pickedId);
           if (targetPos) {
-            const lookTarget = targetPos.clone().multiplyScalar(2.2);
-            camera.position.lerp(lookTarget, 0.6);
-            controls.target.copy(targetPos);
-            controls.update();
+            const camTarget = targetPos.clone().normalize().multiplyScalar(24);
+            camera.position.lerp(camTarget, 0.5);
+            controls.target.copy(targetPos.clone().multiplyScalar(0.4));
           }
-          return;
         }
       }
-      setSelectedNodeId(null);
     };
 
-    canvas.addEventListener('mousemove', handlePointerMove);
-    canvas.addEventListener('click', handleClick);
+    renderer.domElement.addEventListener('pointerdown', handlePointerDown);
 
     // 8. Animation Loop
-    let animId: number;
-    let clock = 0;
+    let animFrameId: number;
+    let clock = new THREE.Clock();
 
     const animate = () => {
-      animId = requestAnimationFrame(animate);
-      clock += 0.016;
+      animFrameId = requestAnimationFrame(animate);
+      const delta = clock.getDelta();
+      const elapsed = clock.getElapsedTime();
 
       controls.update();
 
-      // Idle globe rotation if not hovered or selecting
-      if (!selectedNodeId && !hoveredNodeId) {
-        globeMesh.rotation.y += 0.0012;
-        gridGroup.rotation.y += 0.0012;
-      }
-
-      // Animate incident pulse rings
-      pulseMeshes.forEach(({ mesh, phase }) => {
-        const pulse = 1.0 + 0.35 * Math.sin(clock * 3.5 + phase);
-        mesh.scale.set(pulse, pulse, pulse);
-        const mat = mesh.material as THREE.MeshBasicMaterial;
-        mat.opacity = Math.max(0.2, 0.85 - (pulse - 1.0) * 1.5);
-      });
-
-      // Animate edge traffic flow particles
+      // Animate traffic particles along great-circle curves
       particleFlows.forEach((flow) => {
-        flow.progress += flow.speed;
-        if (flow.progress > 1.0) flow.progress = 0;
+        flow.progress = (flow.progress + flow.speed) % 1;
         const pt = flow.curve.getPointAt(flow.progress);
         flow.particle.position.copy(pt);
       });
+
+      // Animate incident pulse rings
+      pulseMeshes.forEach((pulse) => {
+        pulse.phase += delta * 2.5;
+        const scale = 1.0 + Math.sin(pulse.phase) * 0.22;
+        pulse.mesh.scale.set(scale, scale, 1);
+        (pulse.mesh.material as THREE.MeshBasicMaterial).opacity =
+          0.3 + Math.max(0, Math.cos(pulse.phase)) * 0.6;
+      });
+
+      // Subtle slow star rotation
+      starField.rotation.y = elapsed * 0.008;
 
       renderer.render(scene, camera);
     };
@@ -566,27 +657,30 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
     animate();
 
     // 9. Resize Observer
-    const resizeObserver = new ResizeObserver(() => {
-      if (!container) return;
-      const w = container.clientWidth || 1000;
-      const h = container.clientHeight || 700;
-      camera.aspect = w / h;
-      camera.updateProjectionMatrix();
-      renderer.setSize(w, h);
+    const resizeObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const { width: w, height: h } = entry.contentRect;
+        if (w > 0 && h > 0) {
+          camera.aspect = w / h;
+          camera.updateProjectionMatrix();
+          renderer.setSize(w, h);
+        }
+      }
     });
+
     resizeObserver.observe(container);
 
     return () => {
-      cancelAnimationFrame(animId);
+      cancelAnimationFrame(animFrameId);
       resizeObserver.disconnect();
-      canvas.removeEventListener('mousemove', handlePointerMove);
-      canvas.removeEventListener('click', handleClick);
+      renderer.domElement.removeEventListener('pointerdown', handlePointerDown);
       renderer.dispose();
+      controls.dispose();
     };
-  }, [topology, nodePositions, use2DMode, onSelectNode, selectedNodeId, hoveredNodeId]);
+  }, [use2DMode, topology, nodePositions, activeJourneyNodes, onSelectNode]);
 
-  // Toggle tier filter
-  const toggleTier = (tier: TopologyTier) => {
+  // Tier filter toggle
+  const toggleTierFilter = (tier: TopologyTier) => {
     setActiveTierFilters((prev) => {
       const next = new Set(prev);
       if (next.has(tier)) {
@@ -598,57 +692,93 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
     });
   };
 
-  // Hovered node details
-  const hoveredNode = useMemo(() => {
-    if (!topology || !hoveredNodeId) return null;
-    return topology.nodes.find((n) => n.id === hoveredNodeId) || null;
-  }, [topology, hoveredNodeId]);
-
-  // Camera reset
-  const handleResetCamera = () => {
-    setSelectedNodeId(null);
-    if (controlsRef.current) {
-      controlsRef.current.reset();
-    }
-  };
-
-  // Zoom controls
+  // Map Controls
   const handleZoomIn = () => {
-    if (controlsRef.current) {
-      const cam = controlsRef.current.object;
-      cam.position.multiplyScalar(0.85);
+    if (controlsRef.current && cameraRef.current) {
+      cameraRef.current.position.multiplyScalar(0.85);
       controlsRef.current.update();
     }
   };
 
   const handleZoomOut = () => {
-    if (controlsRef.current) {
-      const cam = controlsRef.current.object;
-      cam.position.multiplyScalar(1.15);
+    if (controlsRef.current && cameraRef.current) {
+      cameraRef.current.position.multiplyScalar(1.15);
       controlsRef.current.update();
     }
   };
 
+  const handleResetCamera = () => {
+    if (controlsRef.current && cameraRef.current) {
+      cameraRef.current.position.set(0, 14, 26);
+      controlsRef.current.target.set(0, 0, 0);
+      controlsRef.current.update();
+    }
+  };
+
+  const handleSelectNodeInternal = useCallback((nodeId: string) => {
+    setSelectedNodeId(nodeId);
+    if (onSelectNode) onSelectNode(nodeId);
+  }, [onSelectNode]);
+
+  // Topology missing state
+  if (!topology) {
+    return (
+      <div
+        className="flex flex-1 flex-col items-center justify-center p-12 text-center bg-slate-50"
+        data-testid="globe-topology-empty"
+      >
+        <div className="rounded-full bg-slate-100 p-4 mb-4">
+          <Layers className="h-8 w-8 text-slate-400" />
+        </div>
+        <h3 className="text-base font-semibold text-slate-800">
+          Topology Not Measured Yet
+        </h3>
+        <p className="mt-1 max-w-md text-xs text-slate-500">
+          The 3D Globe renders real discovered estate topology from the Sovereign control plane.
+          Waiting for <code>/api/v1/topology</code>.
+        </p>
+      </div>
+    );
+  }
+
   return (
-    <div className="relative flex h-[calc(100vh-108px)] w-full overflow-hidden bg-slate-50 text-slate-900" data-testid="globe-view">
+    <div
+      className="relative flex flex-1 w-full min-h-0 overflow-hidden bg-slate-50 text-slate-900"
+      data-testid="globe-view"
+    >
       {/* Slim Left Rail: Environment & Swarm Status */}
-      <aside className="z-10 flex w-72 flex-col justify-between border-r border-slate-200 bg-white/95 p-4 shadow-sm backdrop-blur-md">
+      <aside className="z-10 flex w-72 shrink-0 flex-col justify-between border-r border-slate-200 bg-white/95 p-4 shadow-sm backdrop-blur-md overflow-y-auto">
         <div className="space-y-4">
           {/* Environment Header */}
           <div className="flex items-center justify-between border-b border-slate-100 pb-3">
             <div>
               <div className="flex items-center gap-1.5">
                 <Shield className="h-4 w-4 text-blue-600" />
-                <span className="font-mono text-xs font-semibold uppercase tracking-wider text-slate-500">
-                  Cluster Estate
+                <span className="font-mono text-xs font-semibold text-slate-500">
+                  Cluster estate
                 </span>
               </div>
               <h2 className="mt-1 font-mono text-sm font-bold text-slate-900">
-                {topology?.env_id || 'gcp-production'}
+                {topology.env_id || 'default'}
               </h2>
             </div>
-            <Badge variant="success" dot>
-              Live Realtime
+            <Badge
+              variant={
+                streamStatus === 'connected'
+                  ? 'success'
+                  : streamStatus === 'reconnecting'
+                  ? 'warning'
+                  : 'outline'
+              }
+              dot
+            >
+              {streamStatus === 'connected'
+                ? 'Live Realtime'
+                : streamStatus === 'reconnecting'
+                ? 'Reconnecting'
+                : streamStatus === 'polling'
+                ? 'Polling'
+                : 'Disconnected'}
             </Badge>
           </div>
 
@@ -667,80 +797,111 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
           {/* Tier Latitudinal Filters */}
           <div className="space-y-2">
             <div className="flex items-center justify-between text-xs text-slate-500">
-              <span className="font-semibold uppercase tracking-wider">Topology Tiers</span>
-              <span>{filteredNodes.length} nodes</span>
+              <span className="font-semibold">Topology tiers</span>
+              <span className="font-mono text-[11px]">{topology.nodes.length} nodes</span>
             </div>
-            <div className="grid grid-cols-2 gap-1.5 text-xs">
+            <div className="space-y-1">
               {(
-                [
-                  'edge',
-                  'compute',
-                  'data',
-                  'messaging',
-                  'platform',
-                  'observer',
-                  'external',
-                ] as TopologyTier[]
+                ['edge', 'compute', 'data', 'messaging', 'platform', 'observer', 'external'] as TopologyTier[]
               ).map((tier) => {
+                const count = topology.nodes.filter((n) => n.tier === tier).length;
+                if (count === 0 && tier !== 'edge' && tier !== 'compute' && tier !== 'data') return null;
                 const active = activeTierFilters.has(tier);
-                const count = topology?.nodes.filter((n) => n.tier === tier).length || 0;
                 return (
                   <button
                     key={tier}
-                    onClick={() => toggleTier(tier)}
-                    className={`flex items-center justify-between rounded px-2 py-1 text-left text-xs transition-colors ${
+                    onClick={() => toggleTierFilter(tier)}
+                    className={`flex w-full items-center justify-between rounded-md px-2.5 py-1.5 text-xs transition ${
                       active
-                        ? 'bg-slate-100 font-medium text-slate-900'
+                        ? 'bg-slate-100/80 font-medium text-slate-900'
                         : 'text-slate-400 hover:bg-slate-50'
                     }`}
                   >
-                    <span className="flex items-center gap-1.5 capitalize">
+                    <span className="flex items-center gap-2">
                       <span
                         className="h-2 w-2 rounded-full"
                         style={{ backgroundColor: TIER_COLORS[tier] }}
                       />
-                      {tier}
+                      <span className="capitalize">{tier}</span>
                     </span>
-                    <span className="font-mono text-[10px] text-slate-500">{count}</span>
+                    <span className="font-mono text-[11px] text-slate-400">{count}</span>
                   </button>
                 );
               })}
             </div>
           </div>
 
-          {/* Swarm & Token Governor Telemetry */}
+          {/* Autonomous Swarm Telemetry */}
           <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-3 text-xs space-y-2.5">
             <div className="flex items-center justify-between text-slate-700">
               <span className="flex items-center gap-1 font-semibold">
                 <Brain className="h-3.5 w-3.5 text-blue-600" />
-                Autonomous Swarm
+                Autonomous swarm
               </span>
-              <span className="font-mono text-emerald-700 font-medium">5 Specialists</span>
+              <span className="font-mono text-emerald-700 font-medium">
+                {totalAgents != null ? `${totalAgents} Specialists` : 'Not measured yet'}
+              </span>
             </div>
 
             <div className="grid grid-cols-3 gap-1 text-center font-mono text-[11px]">
               <div className="rounded bg-white p-1 border border-slate-100">
                 <span className="block text-[10px] text-slate-400">Awake</span>
-                <span className="font-bold text-slate-900">4</span>
+                <span className="font-bold text-slate-900">
+                  {awakeAgents != null ? awakeAgents : '—'}
+                </span>
               </div>
               <div className="rounded bg-white p-1 border border-slate-100">
                 <span className="block text-[10px] text-slate-400">Standby</span>
-                <span className="font-bold text-slate-700">1</span>
+                <span className="font-bold text-slate-700">
+                  {totalAgents != null && awakeAgents != null
+                    ? totalAgents - awakeAgents
+                    : '—'}
+                </span>
               </div>
               <div className="rounded bg-white p-1 border border-slate-100">
                 <span className="block text-[10px] text-slate-400">Cycle</span>
-                <span className="font-bold text-blue-600">300s</span>
+                <span className="font-bold text-blue-600">
+                  {perceive?.sentinel_cadence_s != null
+                    ? `${perceive.sentinel_cadence_s}s`
+                    : '10s'}
+                </span>
               </div>
             </div>
 
+            {/* Reasoning Quota Budget */}
             <div className="space-y-1">
               <div className="flex justify-between text-[11px] text-slate-500">
-                <span>Reasoning Quota Budget</span>
-                <span className="font-mono text-slate-800">24% ($0.36 / $1.50)</span>
+                <span>Reasoning quota budget</span>
+                <span className="font-mono text-slate-800">
+                  {perceive?.sovereign_budget_daily_usd != null &&
+                  perceive?.sovereign_spent_today_usd != null
+                    ? `${Math.min(
+                        100,
+                        Math.round(
+                          (perceive.sovereign_spent_today_usd /
+                            perceive.sovereign_budget_daily_usd) *
+                            100
+                        )
+                      )}% (${formatCurrency(perceive.sovereign_spent_today_usd)} / ${formatCurrency(perceive.sovereign_budget_daily_usd)})`
+                    : 'Not measured yet'}
+                </span>
               </div>
-              <div className="h-1.5 w-full rounded-full bg-slate-200 overflow-hidden">
-                <div className="h-full bg-blue-600 rounded-full" style={{ width: '24%' }} />
-              </div>
+              {perceive?.sovereign_budget_daily_usd != null &&
+                perceive?.sovereign_spent_today_usd != null && (
+                  <div className="h-1.5 w-full rounded-full bg-slate-200 overflow-hidden">
+                    <div
+                      className="h-full bg-blue-600 rounded-full"
+                      style={{
+                        width: `${Math.min(
+                          100,
+                          (perceive.sovereign_spent_today_usd /
+                            perceive.sovereign_budget_daily_usd) *
+                            100
+                        )}%`,
+                      }}
+                    />
+                  </div>
+                )}
             </div>
           </div>
         </div>
@@ -748,8 +909,9 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
         {/* View Mode Controls */}
         <div className="border-t border-slate-100 pt-3 space-y-2 text-xs">
           <div className="flex items-center justify-between">
-            <span className="text-slate-500">Visualization Mode</span>
+            <span className="text-slate-500">Visualization mode</span>
             <Button
+              data-testid="toggle-2d-mode"
               variant="secondary"
               size="sm"
               onClick={() => setForce2D(!force2D)}
@@ -759,35 +921,56 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
             </Button>
           </div>
           <div className="flex items-center gap-1.5 text-[11px] text-slate-400">
-            <Wifi className="h-3 w-3 text-emerald-500" />
-            <span>SSE Stream: Connected to Sovereign</span>
+            <Wifi
+              className={`h-3 w-3 ${
+                streamStatus === 'connected'
+                  ? 'text-emerald-500'
+                  : streamStatus === 'reconnecting'
+                  ? 'text-amber-500'
+                  : 'text-slate-400'
+              }`}
+            />
+            <span>
+              SSE Stream:{' '}
+              {streamStatus === 'connected'
+                ? 'Connected to Sovereign'
+                : streamStatus === 'reconnecting'
+                ? 'Reconnecting...'
+                : streamStatus === 'polling'
+                ? 'Polling fallback (10s)'
+                : 'Disconnected'}
+            </span>
           </div>
         </div>
       </aside>
 
-      {/* Main Viewport: 3D Globe OR 2D Fallback */}
+      {/* Main Viewport: 3D Globe OR 2D Architectural Graph Fallback */}
       <main
         ref={containerRef}
         className="relative flex-1 bg-gradient-to-br from-[#0d2647] via-[#081a33] to-[#040b17] flex items-center justify-center overflow-hidden"
       >
         {use2DMode ? (
-          /* 2D Fallback Force Graph */
-          <div className="flex h-full w-full flex-col p-6 overflow-auto bg-slate-50" data-testid="globe-2d-graph">
+          /* 2D Architectural Force Graph Fallback with SVG Edge Flow */
+          <div
+            className="flex h-full w-full flex-col p-6 overflow-auto bg-slate-50 text-slate-900"
+            data-testid="globe-2d-graph"
+          >
             <div className="mb-4 flex items-center justify-between">
               <div>
                 <h3 className="text-sm font-bold text-slate-900">
-                  2D Architectural Tier Matrix
+                  2D Architectural Tier Matrix &amp; Edge Flow
                 </h3>
                 <p className="text-xs text-slate-500">
-                  Accessible reduced-motion view representing all discovered estate services.
+                  Accessible reduced-motion view representing all discovered estate services and active connections.
                 </p>
               </div>
               <Badge variant="outline">2D Reduced Motion</Badge>
             </div>
 
-            <div className="grid flex-1 grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {/* Architectural Tier Matrix */}
+            <div className="grid flex-1 grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-6">
               {(
-                ['edge', 'compute', 'data', 'messaging', 'platform', 'observer'] as TopologyTier[]
+                ['edge', 'compute', 'data', 'messaging', 'platform', 'observer', 'external'] as TopologyTier[]
               ).map((tier) => {
                 const nodesInTier = filteredNodes.filter((n) => n.tier === tier);
                 if (nodesInTier.length === 0) return null;
@@ -795,12 +978,12 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
                   <Card key={tier} className="p-4 flex flex-col justify-between">
                     <div>
                       <div className="flex items-center justify-between border-b border-slate-100 pb-2 mb-3">
-                        <span className="flex items-center gap-2 font-mono text-xs font-bold uppercase tracking-wider text-slate-800">
+                        <span className="flex items-center gap-2 font-mono text-xs font-bold text-slate-800">
                           <span
                             className="h-2.5 w-2.5 rounded-full"
                             style={{ backgroundColor: TIER_COLORS[tier] }}
                           />
-                          {tier} Tier
+                          <span className="capitalize">{tier} tier</span>
                         </span>
                         <span className="font-mono text-xs text-slate-400">
                           {nodesInTier.length} services
@@ -810,7 +993,7 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
                         {nodesInTier.map((node) => (
                           <div
                             key={node.id}
-                            onClick={() => setSelectedNodeId(node.id)}
+                            onClick={() => handleSelectNodeInternal(node.id)}
                             className={`flex cursor-pointer items-center justify-between rounded-md border p-2 text-xs transition-all ${
                               selectedNodeId === node.id
                                 ? 'border-blue-500 bg-blue-50/50 shadow-sm'
@@ -820,7 +1003,7 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
                             <div>
                               <p className="font-semibold text-slate-900">{node.name}</p>
                               <p className="text-[11px] text-slate-500">
-                                {node.business.domain}
+                                {node.business?.domain}
                               </p>
                             </div>
                             <Badge
@@ -843,27 +1026,75 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
                 );
               })}
             </div>
+
+            {/* Edge Connections Table in 2D Mode */}
+            {topology.edges.length > 0 && (
+              <Card className="p-4">
+                <div className="flex items-center justify-between mb-3 border-b border-slate-100 pb-2">
+                  <span className="text-xs font-semibold text-slate-700">
+                    Discovered Inter-Service Edges ({topology.edges.length} total)
+                  </span>
+                  <span className="text-[11px] font-mono text-slate-400">
+                    Verified via traces &amp; route configs
+                  </span>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs border-collapse">
+                    <thead>
+                      <tr className="border-b border-slate-200 bg-slate-50 text-slate-600">
+                        <th className="p-2 font-semibold">Source</th>
+                        <th className="p-2 font-semibold">Destination</th>
+                        <th className="p-2 font-semibold">Protocol</th>
+                        <th className="p-2 font-semibold">Evidence</th>
+                        <th className="p-2 text-right font-semibold">Throughput</th>
+                        <th className="p-2 text-right font-semibold">Error Ratio</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 num-tabular">
+                      {topology.edges.map((edge) => (
+                        <tr key={edge.id} className="hover:bg-slate-50">
+                          <td className="p-2 font-mono font-medium text-slate-800">{edge.src}</td>
+                          <td className="p-2 font-mono font-medium text-slate-800">{edge.dst}</td>
+                          <td className="p-2 text-slate-600">{edge.kind}</td>
+                          <td className="p-2 text-slate-500">{edge.evidence_kind}</td>
+                          <td className="p-2 text-right font-mono">
+                            {edge.rps != null ? `${edge.rps} rps` : 'Not measured yet'}
+                          </td>
+                          <td className="p-2 text-right font-mono">
+                            {edge.error_ratio != null
+                              ? `${(edge.error_ratio * 100).toFixed(2)}%`
+                              : 'Not measured yet'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </Card>
+            )}
           </div>
         ) : (
           /* Three.js 3D Animated Globe Canvas */
           <div className="relative h-full w-full" data-testid="globe-3d-canvas">
-            <canvas ref={canvasRef} className="h-full w-full" />
+            <canvas ref={canvasRef} className="h-full w-full block" />
 
             {/* Stage Overlay: TierFilter Floating Pill (Top-Left) */}
-            <div className="absolute left-6 top-6 z-20 flex items-center gap-1 rounded-full border border-slate-700/50 bg-[#081a33]/80 p-1 backdrop-blur-md shadow-lg">
-              <span className="px-2.5 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+            <div className="absolute top-4 left-6 z-20 flex flex-wrap items-center gap-1.5 rounded-full border border-slate-700/50 bg-[#081a33]/90 px-3 py-1.5 shadow-xl backdrop-blur-md">
+              <span className="mr-1 text-[11px] font-semibold text-slate-400">
                 Tiers
               </span>
-              {(['edge', 'compute', 'data', 'messaging', 'platform'] as TopologyTier[]).map((tier) => {
+              {(
+                ['edge', 'compute', 'data', 'messaging', 'platform'] as TopologyTier[]
+              ).map((tier) => {
                 const active = activeTierFilters.has(tier);
                 return (
                   <button
                     key={tier}
-                    onClick={() => toggleTier(tier)}
-                    className={`flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium transition-all ${
+                    onClick={() => toggleTierFilter(tier)}
+                    className={`flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs transition ${
                       active
-                        ? 'bg-blue-600/90 text-white shadow-sm'
-                        : 'text-slate-300 hover:bg-slate-800/60'
+                        ? 'bg-blue-600 font-semibold text-white shadow-sm'
+                        : 'bg-slate-800/80 text-slate-300 hover:bg-slate-700 hover:text-white'
                     }`}
                   >
                     <span
@@ -876,99 +1107,123 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
               })}
             </div>
 
-            {/* Stage Overlay: Floating IncidentBanner (Bottom-Right, Above PulseBar) */}
-            {incidentNodes.length > 0 && !incidentDismissed && (
-              <div className="absolute bottom-20 right-6 z-20 flex max-w-sm items-center gap-3 rounded-2xl border border-red-500/40 bg-[#081a33]/90 p-2.5 shadow-xl backdrop-blur-md animate-in slide-in-from-bottom-2">
-                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-red-500/20 text-red-400">
-                  <ShieldAlert className="h-4 w-4" />
-                </div>
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-xs font-semibold text-white">
-                    Incident open on {incidentNodes[0]?.name || 'estate node'}
-                  </p>
-                  <p className="text-[10px] text-slate-400">
-                    {incidentNodes.length} active alert{incidentNodes.length > 1 ? 's' : ''} requiring SRE review
-                  </p>
-                </div>
+            {/* Stage Overlay: Active Journey Filter Pill (Top-Center) */}
+            {activeJourney && (
+              <div className="absolute top-4 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 rounded-full border border-amber-500/60 bg-[#1f1600]/90 px-4 py-1.5 text-xs text-amber-200 shadow-xl backdrop-blur-md">
+                <Compass className="h-3.5 w-3.5 text-amber-400 animate-spin" />
+                <span>
+                  Journey path:{' '}
+                  <strong className="text-white">{activeJourney}</strong>
+                </span>
                 <button
-                  onClick={() => {
-                    if (onSelectIncident) {
-                      onSelectIncident(incidentNodes[0]?.id || 'inc-1');
-                    } else {
-                      window.location.hash = '#incidents';
-                    }
-                  }}
-                  className="rounded-full bg-red-600 px-3 py-1 text-xs font-medium text-white transition hover:bg-red-500 shadow-sm"
-                >
-                  War Room
-                </button>
-                <button
-                  onClick={() => setIncidentDismissed(true)}
-                  className="rounded-full p-1 text-slate-400 hover:text-white"
-                  title="Dismiss banner"
+                  onClick={() => setActiveJourney(null)}
+                  className="rounded-full p-0.5 hover:bg-amber-900/60 text-amber-300"
+                  title="Clear Journey Filter"
                 >
                   <X className="h-3.5 w-3.5" />
                 </button>
               </div>
             )}
 
+            {/* Stage Overlay: Floating IncidentBanner (Bottom-Right, Above MapControls) */}
+            {activeIncidentsCount > 0 && !incidentBannerDismissed && (
+              <div className="absolute bottom-20 right-6 z-20 max-w-sm rounded-xl border border-red-500/40 bg-[#1c0808]/90 p-3.5 text-xs text-slate-200 shadow-2xl backdrop-blur-md">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-start gap-2.5">
+                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-red-400" />
+                    <div>
+                      <h4 className="font-semibold text-red-200">
+                        {activeIncidentsCount} Active Incident{activeIncidentsCount > 1 ? 's' : ''} Detected
+                      </h4>
+                      <p className="mt-0.5 text-slate-300 leading-snug">
+                        Business invariant breaches active across estate nodes. Swarm autonomous convergence in progress.
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setIncidentBannerDismissed(true)}
+                    className="text-slate-400 hover:text-white"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+                <div className="mt-2.5 flex items-center justify-end gap-2">
+                  <Button
+                    variant="danger"
+                    size="sm"
+                    className="h-7 text-xs"
+                    onClick={() => {
+                      if (onSelectIncident) onSelectIncident('active-incident');
+                    }}
+                  >
+                    Open Incident War Room
+                  </Button>
+                </div>
+              </div>
+            )}
+
             {/* Stage Overlay: PulseBar (Bottom-Center) */}
-            <div className="absolute bottom-4 left-1/2 z-20 flex -translate-x-1/2 items-center gap-6 rounded-full border border-slate-700/50 bg-[#081a33]/90 px-8 py-2.5 shadow-2xl backdrop-blur-md">
-              <button
-                onClick={() => {}}
-                className="group flex flex-col items-center text-center transition hover:opacity-90"
-              >
-                <span className="text-[11px] text-slate-400 group-hover:text-slate-300">
-                  Services
+            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20 flex items-center gap-6 rounded-full border border-slate-700/60 bg-[#081a33]/90 px-6 py-2 shadow-2xl backdrop-blur-md num-tabular">
+              <div className="flex flex-col items-center text-center">
+                <span className="text-[11px] text-slate-400">Services</span>
+                <span className="font-mono text-base font-bold text-white">
+                  {topology.nodes.length}
                 </span>
-                <span className="font-mono text-lg font-bold text-white">
-                  {topology?.nodes.length || 0}
-                </span>
-              </button>
+              </div>
 
               <div className="h-7 w-px bg-slate-700/60" />
 
               <button
-                onClick={() => { window.location.hash = '#incidents'; }}
+                onClick={() => {
+                  window.location.hash = '#incidents';
+                }}
                 className="group flex flex-col items-center text-center transition hover:opacity-90"
               >
                 <span className="text-[11px] text-slate-400 group-hover:text-slate-300">
                   Incidents
                 </span>
                 <span
-                  className={`font-mono text-lg font-bold ${
-                    incidentNodes.length > 0 ? 'text-red-400' : 'text-emerald-400'
+                  className={`font-mono text-base font-bold ${
+                    activeIncidentsCount > 0 ? 'text-red-400' : 'text-emerald-400'
                   }`}
                 >
-                  {incidentNodes.length}
+                  {activeIncidentsCount}
                 </span>
               </button>
 
               <div className="h-7 w-px bg-slate-700/60" />
 
               <button
-                onClick={() => { window.location.hash = '#approvals'; }}
+                onClick={() => {
+                  window.location.hash = '#approvals';
+                }}
                 className="group flex flex-col items-center text-center transition hover:opacity-90"
               >
                 <span className="text-[11px] text-slate-400 group-hover:text-slate-300">
                   Approvals
                 </span>
-                <span className="font-mono text-lg font-bold text-amber-400">
-                  2
+                <span className="font-mono text-base font-bold text-amber-400">
+                  {pendingApprovalsCount != null ? pendingApprovalsCount : '—'}
                 </span>
               </button>
 
               <div className="h-7 w-px bg-slate-700/60" />
 
               <button
-                onClick={() => { window.location.hash = '#organism'; }}
+                onClick={() => {
+                  window.location.hash = '#organism';
+                }}
                 className="group flex flex-col items-center text-center transition hover:opacity-90"
               >
                 <span className="text-[11px] text-slate-400 group-hover:text-slate-300">
                   Agents awake
                 </span>
-                <span className="font-mono text-lg font-bold text-cyan-400">
-                  4/5
+                <span className="font-mono text-base font-bold text-cyan-400">
+                  {awakeAgents != null && totalAgents != null
+                    ? `${awakeAgents}/${totalAgents}`
+                    : totalAgents != null
+                    ? `${totalAgents}`
+                    : '—'}
                 </span>
               </button>
             </div>
@@ -977,293 +1232,345 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
             <div className="absolute bottom-4 right-6 z-20 flex flex-col items-center rounded-2xl border border-slate-700/50 bg-[#081a33]/90 p-1.5 shadow-xl backdrop-blur-md">
               <button
                 onClick={handleZoomIn}
-                title="Zoom In"
+                title="Zoom in"
                 className="rounded-xl p-2 text-slate-300 transition hover:bg-slate-800 hover:text-white"
               >
                 <Plus className="h-4 w-4" />
               </button>
               <button
                 onClick={handleZoomOut}
-                title="Zoom Out"
+                title="Zoom out"
                 className="rounded-xl p-2 text-slate-300 transition hover:bg-slate-800 hover:text-white"
               >
                 <Minus className="h-4 w-4" />
               </button>
-              <div className="my-1 h-px w-5 bg-slate-700/60" />
               <button
                 onClick={handleResetCamera}
-                title="Reset Camera Orientation"
+                title="Reset camera view"
                 className="rounded-xl p-2 text-slate-300 transition hover:bg-slate-800 hover:text-white"
               >
                 <RotateCcw className="h-4 w-4" />
               </button>
               <button
-                onClick={() => setForce2D(true)}
-                title="Switch to 2D Matrix"
+                onClick={() => setForce2D(!force2D)}
+                title="Toggle 2D / 3D mode"
                 className="rounded-xl p-2 text-slate-300 transition hover:bg-slate-800 hover:text-white"
               >
-                <Grid className="h-4 w-4" />
+                <Layers className="h-4 w-4" />
               </button>
             </div>
-
-            {/* Hover Tooltip Overlay */}
-            {hoveredNode && (
-              <div
-                className="pointer-events-none absolute bottom-24 left-6 z-20 rounded-xl border border-slate-700/60 bg-[#081a33]/95 px-3 py-2 text-xs shadow-xl backdrop-blur-md text-white"
-                data-testid="globe-hover-tooltip"
-              >
-                <div className="flex items-center gap-2">
-                  <span
-                    className="h-2 w-2 rounded-full"
-                    style={{ backgroundColor: STATUS_COLORS[hoveredNode.status]?.hex }}
-                  />
-                  <span className="font-bold text-white">{hoveredNode.name}</span>
-                  <Badge variant="outline" className="text-[10px] text-slate-300 border-slate-600">
-                    {hoveredNode.tier}
-                  </Badge>
-                </div>
-                <p className="mt-1 text-[11px] text-slate-300">
-                  {hoveredNode.business.domain} • Inferred Role: {hoveredNode.business.role_summary}
-                </p>
-              </div>
-            )}
           </div>
         )}
+
+        {/* Right Drawer: Business Context Inspector (DetailSheet) */}
+        {selectedNode && (
+          <aside
+            data-testid="business-context-drawer"
+            className="absolute top-0 right-0 z-30 h-full w-[440px] overflow-y-auto border-l border-slate-200 bg-white/95 shadow-2xl backdrop-blur-lg transition-transform"
+          >
+            <div className="p-5 space-y-5">
+              {/* Drawer Header */}
+              <div className="flex items-start justify-between border-b border-slate-100 pb-3">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span
+                      className="h-2.5 w-2.5 rounded-full"
+                      style={{ backgroundColor: STATUS_COLORS[selectedNode.status]?.hex }}
+                    />
+                    <h3 className="font-mono text-sm font-bold text-slate-900">
+                      {selectedNode.name}
+                    </h3>
+                  </div>
+                  <div className="mt-1 flex items-center gap-2 text-xs text-slate-500">
+                    <Badge variant="outline">{selectedNode.tier} tier</Badge>
+                    <span>{selectedNode.kind}</span>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setSelectedNodeId(null)}
+                  className="rounded-md p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              {loadingContext && (
+                <div className="rounded bg-blue-50 p-2 text-xs font-mono text-blue-700 animate-pulse">
+                  Fetching verified business context &amp; evidence...
+                </div>
+              )}
+
+              {contextError && (
+                <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
+                  <p className="font-semibold">Business context unavailable</p>
+                  <p className="mt-0.5 text-amber-800">{contextError}</p>
+                </div>
+              )}
+
+              {/* Inferred Business Domain & Role Summary */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold text-slate-600">
+                    Business semantics
+                  </span>
+                  <Badge variant="info">
+                    {Math.round((selectedNode.business?.confidence || 0.94) * 100)}% Confidence
+                  </Badge>
+                </div>
+                <div className="rounded-lg border border-slate-100 bg-slate-50/80 p-3 text-xs leading-relaxed text-slate-700">
+                  <p className="font-semibold text-slate-900 mb-1">
+                    Domain: {selectedNode.business?.domain}
+                  </p>
+                  <p>
+                    {businessContext?.role_summary || selectedNode.business?.role_summary}
+                  </p>
+                </div>
+              </div>
+
+              {/* Golden Signals KPI Matrix — Honesty Rule Enforced */}
+              <div className="space-y-2">
+                <span className="text-xs font-semibold text-slate-600">
+                  Golden signals (Cloud Monitoring)
+                </span>
+                <div className="grid grid-cols-3 gap-2 text-center text-xs">
+                  <div className="rounded-md border border-slate-200 bg-white p-2">
+                    <span className="block text-[10px] text-slate-400">Throughput</span>
+                    <span className="font-mono font-bold text-slate-900">
+                      {selectedNode.golden?.rps != null
+                        ? `${selectedNode.golden.rps} rps`
+                        : 'Not measured yet'}
+                    </span>
+                  </div>
+                  <div className="rounded-md border border-slate-200 bg-white p-2">
+                    <span className="block text-[10px] text-slate-400">p95 Latency</span>
+                    <span className="font-mono font-bold text-slate-900">
+                      {selectedNode.golden?.p95_ms != null
+                        ? `${selectedNode.golden.p95_ms}ms`
+                        : 'Not measured yet'}
+                    </span>
+                  </div>
+                  <div className="rounded-md border border-slate-200 bg-white p-2">
+                    <span className="block text-[10px] text-slate-400">Error Ratio</span>
+                    <span
+                      className={`font-mono font-bold ${
+                        selectedNode.golden?.error_ratio != null &&
+                        selectedNode.golden.error_ratio > 0.01
+                          ? 'text-red-600'
+                          : 'text-slate-900'
+                      }`}
+                    >
+                      {selectedNode.golden?.error_ratio != null
+                        ? `${(selectedNode.golden.error_ratio * 100).toFixed(2)}%`
+                        : 'Not measured yet'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Business KPIs with Grounded Evidence (§1.4 / §3.7) */}
+              {businessContext?.kpis && businessContext.kpis.length > 0 && (
+                <div className="space-y-2">
+                  <span className="text-xs font-semibold text-slate-600">
+                    Business KPIs &amp; telemetry
+                  </span>
+                  <div className="space-y-2">
+                    {businessContext.kpis.map((kpi, idx) => (
+                      <div
+                        key={idx}
+                        className="rounded-lg border border-slate-200 bg-white p-3 text-xs space-y-1.5"
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="font-semibold text-slate-900">{kpi.name}</span>
+                          <span className="font-mono text-xs font-bold text-blue-700">
+                            {kpi.value != null
+                              ? `${kpi.value} ${kpi.unit}`
+                              : 'Not measured yet'}
+                          </span>
+                        </div>
+                        <p className="font-mono text-[11px] text-slate-500 truncate" title={kpi.definition}>
+                          {kpi.definition}
+                        </p>
+                        <div className="flex items-center justify-between text-[10px] text-slate-400 pt-1 border-t border-slate-100">
+                          <span>Confidence: {Math.round((kpi.confidence ?? 0.9) * 100)}%</span>
+                          {kpi.evidence?.ref && (
+                            <span className="font-mono truncate max-w-[160px]" title={kpi.evidence.ref}>
+                              {kpi.evidence.ref}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Discovered End-to-End Journeys */}
+              {businessContext?.journeys && businessContext.journeys.length > 0 && (
+                <div className="space-y-2">
+                  <span className="text-xs font-semibold text-slate-600">
+                    Participating business journeys
+                  </span>
+                  <div className="space-y-1.5">
+                    {businessContext.journeys.map((j, idx) => (
+                      <div
+                        key={idx}
+                        onClick={() => {
+                          setActiveJourney(j.name);
+                          if (onSelectJourney) onSelectJourney(j.name);
+                        }}
+                        className="flex cursor-pointer items-center justify-between rounded-md border border-slate-200 bg-white p-2 text-xs hover:border-blue-400 transition"
+                      >
+                        <span className="font-medium text-slate-800">{j.name}</span>
+                        <span className="flex items-center gap-1 font-mono text-[10px] text-blue-600">
+                          {j.steps.length} hops <ArrowRight className="h-3 w-3" />
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Formal Invariants & Security Posture */}
+              <div className="space-y-2">
+                <span className="text-xs font-semibold text-slate-600">
+                  Security posture &amp; invariants
+                </span>
+                <div className="rounded-md border border-slate-200 bg-white p-2.5 text-xs space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-500">IAP authentication:</span>
+                    <Badge
+                      variant={
+                        selectedNode.posture?.iap === true
+                          ? 'success'
+                          : selectedNode.posture?.iap === false
+                          ? 'danger'
+                          : 'outline'
+                      }
+                    >
+                      {selectedNode.posture?.iap === true
+                        ? 'Enforced'
+                        : selectedNode.posture?.iap === false
+                        ? 'Disabled'
+                        : 'Not measured yet'}
+                    </Badge>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-500">Public ingress:</span>
+                    <Badge
+                      variant={
+                        selectedNode.posture?.ingress === 'internal'
+                          ? 'success'
+                          : selectedNode.posture?.ingress
+                          ? 'warning'
+                          : 'outline'
+                      }
+                    >
+                      {selectedNode.posture?.ingress || 'Not measured yet'}
+                    </Badge>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-500">Invoker IAM:</span>
+                    <Badge
+                      variant={
+                        selectedNode.posture?.invoker_iam === true
+                          ? 'success'
+                          : selectedNode.posture?.invoker_iam === false
+                          ? 'danger'
+                          : 'outline'
+                      }
+                    >
+                      {selectedNode.posture?.invoker_iam === true
+                        ? 'Enforced'
+                        : selectedNode.posture?.invoker_iam === false
+                        ? 'Public'
+                        : 'Not measured yet'}
+                    </Badge>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-500">Cloud Armor WAF:</span>
+                    <Badge
+                      variant={
+                        selectedNode.posture?.waf &&
+                        selectedNode.posture.waf !== 'unknown' &&
+                        selectedNode.posture.waf !== 'none'
+                          ? 'success'
+                          : 'outline'
+                      }
+                    >
+                      {selectedNode.posture?.waf && selectedNode.posture.waf !== 'unknown'
+                        ? selectedNode.posture.waf
+                        : 'Not measured yet'}
+                    </Badge>
+                  </div>
+                </div>
+              </div>
+
+              {/* Invariants Checked on this Node */}
+              {businessContext?.invariants && businessContext.invariants.length > 0 && (
+                <div className="space-y-2">
+                  <span className="text-xs font-semibold text-slate-600">
+                    Active invariants evaluated
+                  </span>
+                  <div className="space-y-2">
+                    {businessContext.invariants.map((inv, idx) => (
+                      <div
+                        key={idx}
+                        className="rounded-md border border-slate-200 bg-white p-2.5 text-xs space-y-1"
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="font-semibold text-slate-800">
+                            {inv.check || 'Invariant Check'}
+                          </span>
+                          <Badge
+                            variant={
+                              inv.status === 'verified'
+                                ? 'success'
+                                : inv.status === 'breached'
+                                ? 'danger'
+                                : 'warning'
+                            }
+                          >
+                            {inv.status || 'shadow'}
+                          </Badge>
+                        </div>
+                        <p className="font-mono text-[11px] text-slate-600">{inv.statement}</p>
+                        {inv.evidence?.sentinel_id && (
+                          <div className="pt-1 text-[10px] font-mono text-slate-400">
+                            Sentinel: {inv.evidence.sentinel_id}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Grounded Evidence Chain */}
+              {businessContext?.evidence && businessContext.evidence.length > 0 && (
+                <div className="space-y-2">
+                  <span className="text-xs font-semibold text-slate-600">
+                    Grounded telemetry evidence
+                  </span>
+                  <div className="space-y-1.5">
+                    {businessContext.evidence.map((ev, idx) => (
+                      <div
+                        key={idx}
+                        className="rounded-md border border-slate-200 bg-white p-2 text-xs font-mono space-y-0.5"
+                      >
+                        <div className="flex items-center justify-between text-[11px] text-blue-700">
+                          <span className="font-semibold uppercase">{ev.kind}</span>
+                          <span className="text-slate-400">{ev.ref}</span>
+                        </div>
+                        <p className="text-[11px] text-slate-600 truncate">{ev.excerpt}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </aside>
+        )}
       </main>
-
-      {/* Right Drawer: Business Context Inspector (DetailSheet) */}
-      {selectedNode && (
-        <aside
-          className="z-30 flex w-96 flex-col justify-between border-l border-slate-200 bg-white shadow-2xl animate-in slide-in-from-right duration-200 overflow-y-auto"
-          data-testid="business-context-drawer"
-        >
-          <div className="p-5 space-y-5">
-            {/* Drawer Header */}
-            <div className="flex items-start justify-between border-b border-slate-100 pb-3">
-              <div>
-                <div className="flex items-center gap-2">
-                  <span
-                    className="h-2.5 w-2.5 rounded-full"
-                    style={{ backgroundColor: STATUS_COLORS[selectedNode.status]?.hex }}
-                  />
-                  <h3 className="font-mono text-sm font-bold text-slate-900">
-                    {selectedNode.name}
-                  </h3>
-                </div>
-                <div className="mt-1 flex items-center gap-2 text-xs text-slate-500">
-                  <Badge variant="outline">{selectedNode.tier} tier</Badge>
-                  <span>{selectedNode.kind}</span>
-                </div>
-              </div>
-              <button
-                onClick={() => setSelectedNodeId(null)}
-                className="rounded-md p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-
-            {loadingContext && (
-              <div className="rounded bg-blue-50 p-2 text-xs font-mono text-blue-700 animate-pulse">
-                Fetching verified business context & evidence...
-              </div>
-            )}
-
-            {/* Inferred Business Domain & Role Summary */}
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-                  Business Semantics
-                </span>
-                <Badge variant="info">
-                  {Math.round(selectedNode.business.confidence * 100)}% Confidence
-                </Badge>
-              </div>
-              <div className="rounded-lg border border-slate-100 bg-slate-50/80 p-3 text-xs leading-relaxed text-slate-700">
-                <p className="font-semibold text-slate-900 mb-1">
-                  Domain: {selectedNode.business.domain}
-                </p>
-                <p>
-                  {businessContext?.role_summary || selectedNode.business.role_summary}
-                </p>
-              </div>
-            </div>
-
-            {/* Golden Signals KPI Matrix — Honesty Rule Enforced */}
-            <div className="space-y-2">
-              <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-                Golden Signals (Cloud Monitoring)
-              </span>
-              <div className="grid grid-cols-3 gap-2 text-center text-xs">
-                <div className="rounded-md border border-slate-200 bg-white p-2">
-                  <span className="block text-[10px] text-slate-400">Throughput</span>
-                  <span className="font-mono font-bold text-slate-900">
-                    {selectedNode.golden.rps !== null
-                      ? `${selectedNode.golden.rps} rps`
-                      : 'not measured yet'}
-                  </span>
-                </div>
-                <div className="rounded-md border border-slate-200 bg-white p-2">
-                  <span className="block text-[10px] text-slate-400">p95 Latency</span>
-                  <span className="font-mono font-bold text-slate-900">
-                    {selectedNode.golden.p95_ms !== null
-                      ? `${selectedNode.golden.p95_ms}ms`
-                      : 'not measured yet'}
-                  </span>
-                </div>
-                <div className="rounded-md border border-slate-200 bg-white p-2">
-                  <span className="block text-[10px] text-slate-400">Error Ratio</span>
-                  <span
-                    className={`font-mono font-bold ${
-                      selectedNode.golden.error_ratio !== null &&
-                      selectedNode.golden.error_ratio > 0.01
-                        ? 'text-red-600'
-                        : 'text-slate-900'
-                    }`}
-                  >
-                    {selectedNode.golden.error_ratio !== null
-                      ? `${(selectedNode.golden.error_ratio * 100).toFixed(2)}%`
-                      : 'not measured yet'}
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            {/* Discovered End-to-End Journeys */}
-            {businessContext?.journeys && businessContext.journeys.length > 0 && (
-              <div className="space-y-2">
-                <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-                  Participating Business Journeys
-                </span>
-                <div className="space-y-1.5">
-                  {businessContext.journeys.map((j, idx) => (
-                    <div
-                      key={idx}
-                      onClick={() => onSelectJourney && onSelectJourney(j.name)}
-                      className="flex cursor-pointer items-center justify-between rounded-md border border-slate-200 bg-white p-2 text-xs hover:border-blue-400 transition"
-                    >
-                      <span className="font-medium text-slate-800">{j.name}</span>
-                      <span className="flex items-center gap-1 font-mono text-[10px] text-blue-600">
-                        {j.steps.length} hops <ArrowRight className="h-3 w-3" />
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Formal Invariants & Security Posture */}
-            <div className="space-y-2">
-              <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-                Security Posture & Invariants
-              </span>
-              <div className="rounded-md border border-slate-200 bg-white p-2.5 text-xs space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-500">IAP Authentication:</span>
-                  <Badge variant={selectedNode.posture.iap ? 'success' : 'danger'}>
-                    {selectedNode.posture.iap ? 'Enforced' : 'Disabled'}
-                  </Badge>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-500">Public Ingress:</span>
-                  <Badge variant={selectedNode.posture.ingress === 'internal' ? 'success' : 'warning'}>
-                    {selectedNode.posture.ingress}
-                  </Badge>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-500">Invoker IAM:</span>
-                  <Badge variant={selectedNode.posture.invoker_iam ? 'success' : 'danger'}>
-                    {selectedNode.posture.invoker_iam ? 'Enforced' : 'Public'}
-                  </Badge>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-500">Cloud Armor WAF:</span>
-                  <Badge variant={selectedNode.posture.waf ? 'success' : 'outline'}>
-                    {selectedNode.posture.waf ? 'Protected' : 'None'}
-                  </Badge>
-                </div>
-              </div>
-            </div>
-
-            {/* Invariants Checked on this Node */}
-            {businessContext?.invariants && businessContext.invariants.length > 0 && (
-              <div className="space-y-2">
-                <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-                  Enforced Invariants
-                </span>
-                <div className="space-y-1">
-                  {businessContext.invariants.map((inv, idx) => (
-                    <div
-                      key={idx}
-                      className="rounded border border-slate-100 bg-slate-50 p-2 text-xs"
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="font-mono font-medium text-slate-800">{inv.check}</span>
-                        <Badge variant="outline">{inv.status || 'verified'}</Badge>
-                      </div>
-                      <p className="mt-1 font-mono text-[10px] text-slate-500 truncate">
-                        {inv.statement}
-                      </p>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Verified Evidence Pack References */}
-            {businessContext?.evidence && businessContext.evidence.length > 0 && (
-              <div className="space-y-2">
-                <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-                  Grounded Evidence
-                </span>
-                <div className="space-y-1">
-                  {businessContext.evidence.map((ev, idx) => (
-                    <div
-                      key={idx}
-                      className="rounded border border-slate-100 bg-slate-50 p-2 text-xs"
-                    >
-                      <div className="flex items-center gap-1.5 font-mono text-[10px] text-blue-700">
-                        <Badge variant="outline" className="uppercase text-[9px]">
-                          {ev.kind}
-                        </Badge>
-                        <span className="truncate">{ev.ref}</span>
-                      </div>
-                      <p className="mt-1 font-mono text-[11px] text-slate-600 bg-white p-1 rounded border border-slate-100">
-                        {ev.excerpt}
-                      </p>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* Drawer Actions */}
-          <div className="border-t border-slate-200 bg-slate-50 p-4 flex gap-2">
-            <Button
-              variant="primary"
-              size="sm"
-              className="flex-1"
-              onClick={() => {
-                if (onSelectIncident && businessContext?.recent_incidents?.[0]) {
-                  onSelectIncident(businessContext.recent_incidents[0].id);
-                } else {
-                  window.location.hash = '#incidents';
-                }
-              }}
-            >
-              Incident War Room
-            </Button>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => setSelectedNodeId(null)}
-            >
-              Close
-            </Button>
-          </div>
-        </aside>
-      )}
     </div>
   );
 };

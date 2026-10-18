@@ -1,6 +1,7 @@
-import { ArrowLeft, Shield } from 'lucide-react';
-import React from 'react';
-import type { CourtAgent } from '../api/types';
+import { ArrowLeft, Brain, Shield } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { cockpitApi } from '../api/client';
+import type { CourtAgent, HarnessTreeResponse } from '../api/types';
 import {
   Badge,
   Button,
@@ -38,6 +39,34 @@ export const AgentDetailTab: React.FC<AgentDetailTabProps> = ({
 }) => {
   const activeAgent =
     agents.find((a) => a.id === selectedAgentId) ?? agents[0] ?? null;
+
+  const [harnessData, setHarnessData] = useState<HarnessTreeResponse | null>(null);
+  const [harnessLoading, setHarnessLoading] = useState<boolean>(false);
+  const [harnessError, setHarnessError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!activeAgent?.id) return;
+    let cancelled = false;
+    setHarnessLoading(true);
+    setHarnessError(null);
+    cockpitApi
+      .getHarnessTree(activeAgent.id)
+      .then((tree) => {
+        if (!cancelled) {
+          setHarnessData(tree);
+          setHarnessLoading(false);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setHarnessError(err.message || 'Failed to load Harness² tree');
+          setHarnessLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeAgent?.id]);
 
   if (!activeAgent) {
     return (
@@ -195,6 +224,114 @@ export const AgentDetailTab: React.FC<AgentDetailTabProps> = ({
             </p>
           </div>
         </div>
+      </Card>
+
+      {/* Agent Brain (Harness² Tree & Living Skills) per §3.7 */}
+      <Card className="p-5" data-testid="agent-brain-harness">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
+          <div>
+            <div className="flex items-center gap-2">
+              <Brain className="h-4 w-4 text-blue-600" />
+              <h3 className="text-sm font-semibold text-slate-900">
+                Agent Brain (Harness² Tree &amp; Living Skills)
+              </h3>
+            </div>
+            <p className="mt-0.5 text-xs text-slate-500">
+              Evolutionary decision tree and autonomous skill library compiled by the Recursive Self-Improvement (RSI) engine.
+            </p>
+          </div>
+          {harnessData && (
+            <div className="flex items-center gap-2">
+              <Badge variant="outline" className="font-mono">
+                Tree {harnessData.version || 'v1.2'}
+              </Badge>
+              {(harnessData as any).accuracy_gain_pct != null && (
+                <Badge variant="success">
+                  +{(harnessData as any).accuracy_gain_pct}% accuracy
+                </Badge>
+              )}
+            </div>
+          )}
+        </div>
+
+        {harnessLoading && (
+          <div className="py-4 text-xs font-mono text-blue-700 animate-pulse">
+            Loading Harness² decision tree from Sovereign...
+          </div>
+        )}
+
+        {harnessError && (
+          <div className="mt-3 rounded border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+            Harness tree unavailable: {harnessError}
+          </div>
+        )}
+
+        {harnessData && (
+          <div className="mt-4 space-y-4 text-xs">
+            {/* Tree Root & Decision Nodes */}
+            <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-3.5 space-y-2">
+              <span className="font-semibold text-slate-700">Root Decision Strategy</span>
+              <div className="rounded border border-slate-200 bg-white p-3 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="font-mono font-semibold text-slate-900">
+                    {harnessData.tree?.label || 'Incident Triage & Heuristic Synthesis'}
+                  </span>
+                  <Badge variant="info">
+                    {harnessData.tree?.type || 'condition'}
+                  </Badge>
+                </div>
+                <p className="text-slate-600">
+                  {harnessData.tree?.description || 'Analyzes incoming evidence pack and determines remediation path.'}
+                </p>
+
+                {/* Child Nodes */}
+                {(harnessData.tree?.children || []).map((child: any, idx: number) => (
+                  <div key={idx} className="ml-4 border-l-2 border-blue-400 pl-3 pt-2 mt-2 space-y-1">
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono font-medium text-slate-800">{child.label}</span>
+                      <Badge variant="outline" className="text-[10px]">{child.type}</Badge>
+                    </div>
+                    {child.description && (
+                      <p className="text-[11px] text-slate-500">{child.description}</p>
+                    )}
+                    {(child.children || []).map((grandChild: any, gIdx: number) => (
+                      <div key={gIdx} className="ml-4 border-l-2 border-emerald-400 pl-3 pt-1 text-[11px] space-y-0.5">
+                        <span className="font-mono font-medium text-emerald-800">{grandChild.label}</span>
+                        {grandChild.description && (
+                          <p className="text-slate-500">{grandChild.description}</p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Skills */}
+            {harnessData.skills && harnessData.skills.length > 0 && (
+              <div className="space-y-2">
+                <span className="font-semibold text-slate-700">Equipped Agent Skills</span>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                  {harnessData.skills.map((skill: any, idx: number) => (
+                    <div key={idx} className="rounded border border-slate-200 bg-white p-2.5 space-y-1">
+                      <div className="flex items-center justify-between">
+                        <span className="font-mono font-semibold text-slate-900">
+                          {typeof skill === 'string' ? skill : skill.name || skill.id}
+                        </span>
+                        {skill.version && (
+                          <span className="font-mono text-[10px] text-slate-400">v{skill.version}</span>
+                        )}
+                      </div>
+                      {skill.description && (
+                        <p className="text-[11px] text-slate-500">{skill.description}</p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </Card>
 
       {/* Earned-Autonomy Trust Records & Owner L4 Whitelist */}

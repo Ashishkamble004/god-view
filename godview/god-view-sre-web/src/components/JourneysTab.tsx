@@ -120,18 +120,15 @@ export const JourneysTab: React.FC<JourneysTabProps> = ({
             <span className="text-xs text-slate-500">
               Informational Tenant P95 Latency
             </span>
-            <Badge variant="success">Target &lt; 3,500ms</Badge>
+            <Badge variant="outline">Observed P95</Badge>
           </div>
           <p className="mt-2 text-xl font-semibold text-slate-900 num-tabular">
-            {formatNumber(
-              journey.kpi_rollups.find(
-                (k) => k.kpi === 'journey_p95_latency_ms'
-              )?.value ?? 2140
-            )}{' '}
-            ms
+            {journey.kpi_rollups.find((k) => k.kpi === 'journey_p95_latency_ms')?.value != null
+              ? `${formatNumber(journey.kpi_rollups.find((k) => k.kpi === 'journey_p95_latency_ms')!.value)} ms`
+              : 'Not measured yet'}
           </p>
           <p className="mt-1 text-xs text-slate-600">
-            Excludes specimen image generation
+            Measured from span duration telemetry
           </p>
         </Card>
       </div>
@@ -336,8 +333,8 @@ export const JourneysTab: React.FC<JourneysTabProps> = ({
       <div className="grid grid-cols-1 items-start gap-6 xl:grid-cols-12">
         <Card className="p-4 xl:col-span-5">
           <SectionHeader
-            title="Funnel Conversion & Drop-Off ₹ Exposure"
-            subtitle="Step-by-step cohort progression and principal at risk"
+            title="Funnel Conversion & Drop-Off Value Exposure"
+            subtitle="Step-by-step cohort progression and value at risk"
           />
           <div className="mt-3 overflow-x-auto">
             <table className="w-full border-collapse text-left text-xs">
@@ -349,7 +346,7 @@ export const JourneysTab: React.FC<JourneysTabProps> = ({
                   </th>
                   <th className="px-3 py-2 text-right font-semibold">Conv %</th>
                   <th className="px-3 py-2 text-right font-semibold">
-                    Drop-off ₹ Risk
+                    Drop-off Value Risk
                   </th>
                 </tr>
               </thead>

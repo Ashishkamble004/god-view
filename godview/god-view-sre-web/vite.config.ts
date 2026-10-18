@@ -60,14 +60,14 @@ function cockpitMockDevPlugin() {
             Connection: 'keep-alive',
           });
           res.write(
-            `data: ${JSON.stringify({
+            `event: sovereign.heartbeat\ndata: ${JSON.stringify({
               type: 'sovereign.heartbeat',
               data: { at: new Date().toISOString(), sentinel_cadence_s: state.perceive.sentinel_cadence_s },
             })}\n\n`
           );
           const timer = setInterval(() => {
             res.write(
-              `data: ${JSON.stringify({
+              `event: sovereign.heartbeat\ndata: ${JSON.stringify({
                 type: 'sovereign.heartbeat',
                 data: { at: new Date().toISOString(), sentinel_cadence_s: state.perceive.sentinel_cadence_s },
               })}\n\n`
@@ -85,10 +85,11 @@ function cockpitMockDevPlugin() {
         if (method === 'GET' && (pathOnly === '/api/v1/topology' || pathOnly === '/v1/topology')) {
           const nodes = state.perceive.discovered_services.map((s, idx) => {
             let tier = 'compute';
-            if (['api_gateway', 'lb_frontend', 'security_policy'].includes(s.kind)) tier = 'edge';
+            if (['api_gateway', 'lb_frontend', 'security_policy'].includes(s.kind) || s.name.includes('guardrail')) tier = 'edge';
             else if (['cloud_sql', 'bucket', 'firestore_db', 'bigquery_dataset'].includes(s.kind)) tier = 'data';
-            else if (['pubsub_topic', 'pubsub_subscription'].includes(s.kind)) tier = 'messaging';
+            else if (['pubsub_topic', 'pubsub_subscription'].includes(s.kind) || s.kind === 'gce_vm') tier = 'messaging';
             else if (['reasoning_engine', 'agent'].includes(s.kind)) tier = 'observer';
+            else if (s.name.includes('hibernate')) tier = 'platform';
 
             const openIncidents = state.incidents.filter(
               (inc) =>
@@ -108,17 +109,18 @@ function cockpitMockDevPlugin() {
                 confidence: s.role_confidence || 0.94,
               },
               golden: {
-                rps: 85 + (idx % 5) * 35,
-                p95_ms: 120 + (idx % 4) * 45,
-                error_ratio: openIncidents > 0 ? 0.045 : 0.001,
+                rps: idx === 0 ? null : 85 + (idx % 5) * 35,
+                p95_ms: idx === 0 ? null : 120 + (idx % 4) * 45,
+                error_ratio: idx === 0 ? null : openIncidents > 0 ? 0.045 : 0.001,
               },
               posture: {
-                iap: s.kind === 'lb_frontend' || s.kind === 'api_gateway',
+                iap: s.kind === 'lb_frontend' || s.kind === 'api_gateway' ? true : idx === 1 ? null : true,
                 ingress: s.kind === 'lb_frontend' ? 'external' : 'internal',
-                invoker_iam: true,
-                waf: s.kind === 'lb_frontend',
+                invoker_iam: idx === 1 ? null : true,
+                waf: s.kind === 'lb_frontend' ? 'sensitivity-4' : 'sensitivity-1',
               },
               incidents_open: openIncidents,
+              agent_id: s.owner_agent_id || null,
             };
           });
 
@@ -150,6 +152,15 @@ function cockpitMockDevPlugin() {
               health: j.status === 'degraded' || j.status === 'stalled' ? 'amber' : 'green',
               confidence: 0.94,
             })),
+            layout_hint: {
+              groups: [
+                { tier: 'edge', node_ids: nodes.filter((n) => n.tier === 'edge').map((n) => n.id) },
+                { tier: 'compute', node_ids: nodes.filter((n) => n.tier === 'compute').map((n) => n.id) },
+                { tier: 'messaging', node_ids: nodes.filter((n) => n.tier === 'messaging').map((n) => n.id) },
+                { tier: 'data', node_ids: nodes.filter((n) => n.tier === 'data').map((n) => n.id) },
+                { tier: 'platform', node_ids: nodes.filter((n) => n.tier === 'platform').map((n) => n.id) },
+              ],
+            },
             generated_at: new Date().toISOString(),
           });
           return;
@@ -177,9 +188,38 @@ function cockpitMockDevPlugin() {
               evidence: { trace_id: 'tr-mock-9981' },
             })),
             kpis: [
-              { label: 'Throughput', value: '184 rps', unit: 'rps', trend: 'stable' },
-              { label: 'p95 Latency', value: '142ms', unit: 'ms', trend: 'improving' },
-              { label: 'Error Ratio', value: '0.08%', unit: 'pct', trend: 'stable' },
+              {
+                name: 'Throughput',
+                definition: 'sum(rate(http_requests_total[5m]))',
+                unit: 'req/sec',
+                confidence: 0.98,
+                evidence: { kind: 'metric', ref: 'prometheus/run_timeseries' },
+                value: 184.2,
+              },
+              {
+                name: 'p95 Execution Latency',
+                definition: 'histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])))',
+                unit: 'ms',
+                confidence: 0.95,
+                evidence: { kind: 'trace', ref: 'cloudtrace/p95' },
+                value: 38.6,
+              },
+              {
+                name: 'Invariant Conformance',
+                definition: 'verified_executions / total_executions',
+                unit: '%',
+                confidence: 0.99,
+                evidence: { kind: 'ledger', ref: 'bigquery/conformance' },
+                value: 99.8,
+              },
+              {
+                name: 'Cold Start Ratio',
+                definition: 'cold_start_spans / total_spans',
+                unit: '%',
+                confidence: 0.91,
+                evidence: { kind: 'trace', ref: 'cloudtrace/cold_starts' },
+                value: null,
+              },
             ],
             invariants: state.invariants.map((inv) => ({
               statement: inv.expression || inv.name,
@@ -204,6 +244,52 @@ function cockpitMockDevPlugin() {
               severity: i.severity,
               status: i.outcome,
             })),
+          });
+          return;
+        }
+
+        if (pathOnly.startsWith('/api/v1/harness/')) {
+          const parts = pathOnly.split('/');
+          const agentId = decodeURIComponent(parts[parts.length - 2] || 'application');
+          sendJson(res, 200, {
+            agent_id: agentId,
+            version: 'v1.2-active',
+            active: true,
+            accuracy_gain_pct: 18.4,
+            root: {
+              id: 'root-decision-tree',
+              label: 'Incident Triage & Heuristic Synthesis',
+              type: 'condition',
+              description: 'Analyzes incoming incident evidence pack and determines remediation path',
+              children: [
+                {
+                  id: 'branch-waf-block',
+                  label: 'Security Policy Cloud Armor Block Detected',
+                  type: 'heuristic',
+                  description: 'Preconfigured WAF rule evaluated on legitimate service payload',
+                  children: [
+                    {
+                      id: 'action-propose-waf-mitigation',
+                      label: 'Propose armor.set_waf_sensitivity (Level 2 Approval)',
+                      type: 'action',
+                      description: 'Set sensitivity 1 with preview mode first to avoid downtime',
+                      children: [
+                        {
+                          id: 'verify-probe-outcome',
+                          label: 'Synthetic Probe Verification',
+                          type: 'verification',
+                          description: 'Verify 422 Unprocessable Entity instead of 403 Forbidden',
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+            skills: [
+              { id: 'http-error-triage', name: 'HTTP Error Triage', description: 'Triages 4xx/5xx spikes using LB and service logs', version: '2.1' },
+              { id: 'posture-drift-repair', name: 'Posture Drift Repair', description: 'Detects and remediates IAM and network posture drift', version: '1.4' },
+            ],
           });
           return;
         }
