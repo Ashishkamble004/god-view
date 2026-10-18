@@ -63,7 +63,7 @@
 | `customer-loan-portal-web` | Cloud Run (`us-central1`, port 8080) | `frontends-tenant` | `frontend-verifier` PASS | `us-central1-docker.pkg.dev/general-ak/god-view-containers/customer-loan-portal-web@sha256:01d710e41e20a1358f82ca95e250c7d7d774cc8e404d1d5cd65d5696b9c3d7c7` | `customer-loan-portal-web-00002-9vt` | `https://customer-loan-portal-web-mcj3w7ujpq-uc.a.run.app` (`https://cymbal.ak-demos.com`) | **Deployed & Serving (Tenant Frozen)** |
 | `internal-bank-los-web` | Cloud Run (`us-central1`, port 8080) | `frontends-tenant` | `frontend-verifier` PASS | `us-central1-docker.pkg.dev/general-ak/god-view-containers/internal-bank-los-web@sha256:f2ef782277ed6e9a40483c32eac78877d16fa150719af78e78fc5fd6773ba2d5` | `internal-bank-los-web-00002-qgj` | `https://internal-bank-los-web-mcj3w7ujpq-uc.a.run.app` (`https://los.cymbal.ak-demos.com`) | **Deployed & Serving (Tenant Frozen)** |
 | `god-view-sre-web` | Cloud Run (`us-central1`, port 8080) | `cockpit` | Pending `verifier-edge` PASS | `us-central1-docker.pkg.dev/general-ak/god-view-containers/god-view-sre-web@sha256:016809f6dc8719c8f2472a7dc54334f396864b047ce54f8f5628de6a714281e9` (stale v4) | `god-view-sre-web-00002-rgp` | `https://god-view-sre-web-mcj3w7ujpq-uc.a.run.app` (`https://godview.ak-demos.com`) | **Pending v5 3D Globe Deploy** |
-| `god-view-sovereign` | Cloud Run (`us-central1`, port 8080) | `runtime-core` + `discovery` + `sentinels` + `remediation` | Pending `verifier-core` PASS | `us-central1-docker.pkg.dev/general-ak/god-view-containers/god-view-sovereign@sha256:93fae7d66dc8254c794ce8b99d141e6c3fa983196c14175373307fc14ea8ec46` (stale v4) | `god-view-sovereign-00006-mfk` | `https://god-view-sovereign-mcj3w7ujpq-uc.a.run.app` (`https://godview.ak-demos.com/api/*`) | **Pending v5 Real Core Deploy** |
+| `god-view-sovereign` | Cloud Run (`us-central1`, port 8080) | `runtime-core` + `discovery` + `sentinels` + `remediation` | `verifier-core` PASS | `us-central1-docker.pkg.dev/general-ak/god-view-containers/god-view-sovereign@sha256:33f61bd59024058bc154afad7b480a712540bda9561cb019152ce66fd0d1c213` | `god-view-sovereign-00010-9jz` | `https://god-view-sovereign-mcj3w7ujpq-uc.a.run.app` (`https://godview.ak-demos.com/api/*`) | **Deployed & Serving (v5 Real Core)** |
 | `kyc-model-armor-svc` | GKE Autopilot (`cymbal`, port 8080) | `tenant-gke-utilities` | `agents-verifier` PASS | `us-central1-docker.pkg.dev/general-ak/god-view-containers/kyc-model-armor-svc@sha256:b0c15dd124dd80ddba5ebad4229744941c48812d7b2c74d3d30f97802d1c5dfa` | `pod/kyc-model-armor-svc-59cc4cb697-7972w` (`1/1 Running`) | `http://10.10.0.3:8080` (`god-view-kyc-ilb-ip`) | **Deployed & Running (Tenant Frozen)** |
 | `underwriting-los-svc` | GKE Autopilot (`cymbal`, port 8080) | `tenant-gke-utilities` | `agents-verifier` PASS | `us-central1-docker.pkg.dev/general-ak/god-view-containers/underwriting-los-svc@sha256:5eaa5d1d2a737880ebb101ce6328e5b48f134698d6cbf864d9fbf86a45cbe45c` | `pod/underwriting-los-svc-7f87d55f7f-nnxvv` (`1/1 Running`) | `http://10.10.0.2:8080` (`god-view-los-ilb-ip`) | **Deployed & Running (Tenant Frozen)** |
 
@@ -296,6 +296,16 @@ gcloud scheduler jobs run godview-tenant-resume --location=us-central1 --project
   - **Command**: `terraform -chdir=infra/terraform/platform apply -input=false $HOME/tmp/platform-infra-rev7.tfplan` (targets: `module.data.google_firestore_field.change_events_ttl`, `module.godview.google_cloud_run_v2_service.sovereign`)
   - **Result**: 1 added, 1 changed, 0 destroyed. Firestore TTL policy on `change_events.expires_at` created in `god-view-memory-db`. Sovereign Cloud Run updated with `GODVIEW_SOVEREIGN_URL`, `SERVICE_URL`, and tightened `GODVIEW_SERVICE_PRINCIPALS`. New revision `god-view-sovereign-00008-l86` is Ready and `/public/healthz` verified 200 OK.
   - **Rollback**: `terraform destroy -target=module.data.google_firestore_field.change_events_ttl ...`
+
+- **2026-10-18T07:44:08Z**
+  - **Command**: `terraform -chdir=infra/terraform/platform apply -input=false $HOME/tmp/sovereign-v5.tfplan` (target: `module.godview.google_cloud_run_v2_service.sovereign`)
+  - **Result**: 0 added, 1 changed, 0 destroyed. Injected `GODVIEW_TRACE_PRINCIPALS` into `god-view-sovereign` environment.
+  - **Rollback**: Remove `GODVIEW_TRACE_PRINCIPALS` from `05-godview/main.tf` and re-apply.
+
+- **2026-10-18T07:44:54Z**
+  - **Command**: `./infra/deploy/deploy_run.sh god-view-sovereign us-central1-docker.pkg.dev/general-ak/god-view-containers/god-view-sovereign@sha256:33f61bd59024058bc154afad7b480a712540bda9561cb019152ce66fd0d1c213`
+  - **Result**: Deployed v5 unified Sovereign image (Cloud Build `f2c48c20-0efd-4b72-b24f-cc818823902f`). Cloud Run deployed revision `god-view-sovereign-00010-9jz` (Ready, serving 100%). `/public/healthz` verified 200 OK: `mode=gcp`, real GCP stores (`FirestoreStore`, `BigQueryLedger`, `PubSubBus`, `AgentEngineRuntime`), 15/20 adapters healthy, and 4 loop heartbeats active.
+  - **Rollback**: `gcloud run services update-traffic god-view-sovereign --to-revisions=god-view-sovereign-00008-l86=100 --project=general-ak --region=us-central1`
 
 
 

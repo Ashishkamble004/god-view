@@ -197,6 +197,16 @@
   - **Result**: 1 added, 1 changed, 0 destroyed. Firestore TTL policy on `change_events.expires_at` created in `god-view-memory-db`. Sovereign Cloud Run updated with `GODVIEW_SOVEREIGN_URL`, `SERVICE_URL`, and tightened `GODVIEW_SERVICE_PRINCIPALS`. New revision `god-view-sovereign-00008-l86` is Ready and `/public/healthz` verified 200 OK.
   - **Rollback**: `terraform destroy -target=module.data.google_firestore_field.change_events_ttl ...`
 
+- **2026-10-18T07:44:08Z**
+  - **Command**: `terraform -chdir=infra/terraform/platform apply -input=false $HOME/tmp/sovereign-v5.tfplan` (target: `module.godview.google_cloud_run_v2_service.sovereign`)
+  - **Result**: 0 added, 1 changed, 0 destroyed. Injected `GODVIEW_TRACE_PRINCIPALS` into `god-view-sovereign` environment.
+  - **Rollback**: Remove `GODVIEW_TRACE_PRINCIPALS` from `05-godview/main.tf` and re-apply.
+
+- **2026-10-18T07:44:54Z**
+  - **Command**: `./infra/deploy/deploy_run.sh god-view-sovereign us-central1-docker.pkg.dev/general-ak/god-view-containers/god-view-sovereign@sha256:33f61bd59024058bc154afad7b480a712540bda9561cb019152ce66fd0d1c213`
+  - **Result**: Deployed v5 unified Sovereign image (Cloud Build `f2c48c20-0efd-4b72-b24f-cc818823902f`). Cloud Run deployed revision `god-view-sovereign-00010-9jz` (Ready, serving 100%). `/public/healthz` verified 200 OK: `mode=gcp`, real GCP stores (`FirestoreStore`, `BigQueryLedger`, `PubSubBus`, `AgentEngineRuntime`), 15/20 adapters healthy, and 4 loop heartbeats active.
+  - **Rollback**: `gcloud run services update-traffic god-view-sovereign --to-revisions=god-view-sovereign-00008-l86=100 --project=general-ak --region=us-central1`
+
 
 
 
