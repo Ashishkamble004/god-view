@@ -8,6 +8,10 @@ from typing import Any
 import pytest
 from godview_shared.contracts import (
     BusinessContext,
+    BusinessContextEvidence,
+    BusinessContextInvariant,
+    BusinessContextJourney,
+    BusinessContextKpi,
     DiscoveredEdgeDoc,
     DiscoveredServiceDoc,
 )
@@ -43,6 +47,13 @@ class _FakeLlm:
                 kpis=[],
                 invariants=[],
                 confidence=0.88,
+                evidence=[
+                    BusinessContextEvidence(
+                        kind="openapi",
+                        ref="openapi:GET /v1/records",
+                        excerpt="List records",
+                    )
+                ],
                 inferred_by=self.model_name,
             )
         if "journeys" in contents.lower():
@@ -223,3 +234,193 @@ async def test_journey_inference_with_and_without_llm() -> None:
     journeys_llm = await inferencer_llm.infer_journeys_from_topology(services, edges)
     assert len(journeys_llm) >= 1
     assert journeys_llm[0].name == "Order Placement Flow"
+
+
+@pytest.mark.unit
+async def test_uncited_model_output_marks_status_uncited_and_caps_confidence() -> None:
+    """Verify that a model returning 0 refs is marked uncited, has confidence capped <0.5, and is scheduled for retry."""
+    class _UncitedLlm:
+        async def generate(self, role: str, contents: str, response_schema: Any = None) -> Any:
+            return BusinessContext(
+                role_summary="Processor with no cited evidence",
+                domain="processing",
+                capabilities=["processBatch"],
+                confidence=0.95,
+                evidence=[],  # 0 refs emitted
+            )
+
+    inferencer = BusinessContextInferencer(llm=_UncitedLlm())
+    now = datetime.now(tz=UTC).isoformat()
+    svc = DiscoveredServiceDoc(
+        env_id="test-env",
+        name="svc-processor",
+        kind="cloud_run",
+        adapter_family="gcp",
+        locator="https://svc-processor.run.app",
+        routes=[{"method": "POST", "path": "/v1/batch", "summary": "Process batch"}],
+        first_seen=now,
+        last_seen=now,
+    )
+    res = await inferencer.infer_service_context(svc, edges=[])
+    assert res.evidence == []
+    assert res.confidence <= 0.3
+    assert getattr(res, "inference_status", None) == "uncited"
+
+
+@pytest.mark.unit
+async def test_model_ref_absent_from_bundle_is_dropped() -> None:
+    """Verify that evidence refs absent from the bundle are dropped, and if all are absent, marks uncited."""
+    class _PartiallyValidLlm:
+        async def generate(self, role: str, contents: str, response_schema: Any = None) -> Any:
+            return BusinessContext(
+                role_summary="Processor with one valid and one fake ref",
+                domain="processing",
+                capabilities=["processBatch"],
+                confidence=0.85,
+                evidence=[
+                    BusinessContextEvidence(
+                        kind="openapi",
+                        ref="openapi:POST /v1/batch",
+                        excerpt="Process batch",
+                    ),
+                    BusinessContextEvidence(
+                        kind="openapi",
+                        ref="openapi:DELETE /nonexistent/route",
+                        excerpt="Fabricated route citation",
+                    ),
+                ],
+            )
+
+    inferencer = BusinessContextInferencer(llm=_PartiallyValidLlm())
+    now = datetime.now(tz=UTC).isoformat()
+    svc = DiscoveredServiceDoc(
+        env_id="test-env",
+        name="svc-processor",
+        kind="cloud_run",
+        adapter_family="gcp",
+        locator="https://svc-processor.run.app",
+        routes=[{"method": "POST", "path": "/v1/batch", "summary": "Process batch"}],
+        first_seen=now,
+        last_seen=now,
+    )
+    res = await inferencer.infer_service_context(svc, edges=[])
+    # The valid ref is kept, the absent one is dropped
+    assert len(res.evidence) == 1
+    assert res.evidence[0].ref == "openapi:POST /v1/batch"
+    assert res.confidence == 0.85
+    assert getattr(res, "inference_status", None) == "inferred"
+
+    # Now verify when ALL refs are absent from bundle
+    class _AllAbsentLlm:
+        async def generate(self, role: str, contents: str, response_schema: Any = None) -> Any:
+            return BusinessContext(
+                role_summary="Processor with only fabricated refs",
+                domain="processing",
+                confidence=0.90,
+                evidence=[
+                    BusinessContextEvidence(
+                        kind="openapi",
+                        ref="openapi:GET /totally/fake",
+                        excerpt="Fake route",
+                    ),
+                    BusinessContextEvidence(
+                        kind="env",
+                        ref="env:NONEXISTENT_VAR",
+                        excerpt="Fake env",
+                    ),
+                ],
+            )
+
+    inferencer_absent = BusinessContextInferencer(llm=_AllAbsentLlm())
+    res_absent = await inferencer_absent.infer_service_context(svc, edges=[])
+    assert res_absent.evidence == []
+    assert res_absent.confidence <= 0.3
+    assert getattr(res_absent, "inference_status", None) == "uncited"
+
+
+@pytest.mark.unit
+async def test_kpis_invariants_journeys_uncited_or_absent_refs_dropped() -> None:
+    """Verify KPIs, invariants, and journeys are dropped if their evidence does not resolve to bundle items."""
+    class _ClaimsLlm:
+        async def generate(self, role: str, contents: str, response_schema: Any = None) -> Any:
+            return BusinessContext(
+                role_summary="Service with valid and invalid claim citations",
+                domain="processing",
+                confidence=0.80,
+                evidence=[
+                    BusinessContextEvidence(
+                        kind="openapi",
+                        ref="openapi:POST /v1/batch",
+                        excerpt="Process batch",
+                    )
+                ],
+                kpis=[
+                    BusinessContextKpi(
+                        name="batch_throughput",
+                        definition="sum(records) / time",
+                        unit="records/sec",
+                        evidence="openapi:POST /v1/batch",  # in bundle -> kept
+                    ),
+                    BusinessContextKpi(
+                        name="fake_kpi",
+                        definition="fake",
+                        unit="none",
+                        evidence="openapi:GET /fake_endpoint",  # absent -> dropped
+                    ),
+                    BusinessContextKpi(
+                        name="uncited_kpi",
+                        definition="uncited",
+                        unit="none",
+                        evidence="",  # empty -> dropped
+                    ),
+                ],
+                invariants=[
+                    BusinessContextInvariant(
+                        statement="Payload must be valid",
+                        check="len(body) > 0",
+                        evidence="openapi:POST /v1/batch",  # in bundle -> kept
+                    ),
+                    BusinessContextInvariant(
+                        statement="Fabricated assertion",
+                        check="unknown()",
+                        evidence="openapi:PUT /nonexistent",  # absent -> dropped
+                    ),
+                ],
+                journeys=[
+                    BusinessContextJourney(
+                        name="Batch Intake Journey",
+                        steps=[{"node": "svc-processor", "operation": "processBatch"}],
+                        confidence=0.9,
+                        evidence="openapi:POST /v1/batch",  # in bundle -> kept
+                    ),
+                    BusinessContextJourney(
+                        name="Fabricated Journey",
+                        steps=["step1"],
+                        confidence=0.2,
+                        evidence="invented_flow",  # absent -> dropped
+                    ),
+                ],
+            )
+
+    inferencer = BusinessContextInferencer(llm=_ClaimsLlm())
+    now = datetime.now(tz=UTC).isoformat()
+    svc = DiscoveredServiceDoc(
+        env_id="test-env",
+        name="svc-processor",
+        kind="cloud_run",
+        adapter_family="gcp",
+        locator="https://svc-processor.run.app",
+        routes=[{"method": "POST", "path": "/v1/batch", "summary": "Process batch"}],
+        first_seen=now,
+        last_seen=now,
+    )
+    res = await inferencer.infer_service_context(svc, edges=[])
+    # Surviving KPIs: only batch_throughput
+    assert len(res.kpis) == 1
+    assert res.kpis[0].name == "batch_throughput"
+    # Surviving Invariants: only the valid assertion
+    assert len(res.invariants) == 1
+    assert res.invariants[0].statement == "Payload must be valid"
+    # Surviving Journeys: only Batch Intake Journey
+    assert len(res.journeys) == 1
+    assert res.journeys[0].name == "Batch Intake Journey"

@@ -30,6 +30,7 @@ from godview_shared.capabilities import CapabilitySpec, get_capability
 from godview_shared.config import GodViewSettings
 from godview_shared.contracts import (
     BusinessContext,
+    BusinessContextEvidence,
     DiscoveredEdgeDoc,
     DiscoveredServiceDoc,
     JourneyDoc,
@@ -72,6 +73,13 @@ class _FakeLlm:
                 kpis=[],
                 invariants=[],
                 confidence=0.88,
+                evidence=[
+                    BusinessContextEvidence(
+                        kind="openapi",
+                        ref="openapi:GET /v1/records",
+                        excerpt="List records",
+                    )
+                ],
                 inferred_by=self.model_name,
             )
         if "journeys" in contents.lower():

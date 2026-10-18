@@ -58,10 +58,144 @@ class InferredJourneysResponse(BaseModel):
     journeys: list[InferredJourney] = Field(default_factory=list)
 
 
+def _attach_metadata(obj: Any, key: str, value: Any) -> None:
+    """Safely attach non-schema metadata to Pydantic models or objects."""
+    try:
+        object.__setattr__(obj, key, value)
+    except Exception:
+        pass
+
+
 def compute_evidence_hash(evidence_bundle: dict[str, Any]) -> str:
     """Compute deterministic SHA-256 hash of canonical evidence bundle."""
     raw = json.dumps(evidence_bundle, sort_keys=True, default=str)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def extract_bundle_valid_refs(evidence_bundle: dict[str, Any]) -> set[str]:
+    """Extract canonical and exact matchable reference IDs from an evidence bundle."""
+    valid_refs: set[str] = set()
+
+    # 1. Routes and operations
+    routes = evidence_bundle.get("routes", [])
+    for r in routes:
+        if isinstance(r, dict):
+            method = str(r.get("method") or "").strip().upper()
+            path = str(r.get("path") or "").strip()
+            op_id = str(r.get("operation_id") or "").strip()
+            summary = str(r.get("summary") or "").strip()
+            if method and path:
+                valid_refs.add(f"openapi:{method} {path}")
+                valid_refs.add(f"{method} {path}")
+                valid_refs.add(f"openapi:{path}")
+                valid_refs.add(path)
+            elif path:
+                valid_refs.add(f"openapi:{path}")
+                valid_refs.add(path)
+            if op_id:
+                valid_refs.add(f"openapi:{op_id}")
+                valid_refs.add(op_id)
+            if summary:
+                valid_refs.add(f"openapi:{summary}")
+
+    # 2. Environment variables
+    for env in evidence_bundle.get("env_var_names", []):
+        env_str = str(env).strip()
+        if env_str:
+            valid_refs.add(f"env:{env_str}")
+            valid_refs.add(f"env_var:{env_str}")
+            valid_refs.add(env_str)
+
+    # Labels
+    labels = evidence_bundle.get("labels", {})
+    if isinstance(labels, dict):
+        for k, v in labels.items():
+            k_str = str(k).strip()
+            if k_str:
+                valid_refs.add(f"label:{k_str}")
+                valid_refs.add(k_str)
+                if v:
+                    valid_refs.add(f"label:{k_str}={v}")
+
+    # 3. Upstreams / Downstreams
+    for up in evidence_bundle.get("upstreams", []):
+        up_str = str(up).strip()
+        if up_str:
+            valid_refs.add(f"trace:{up_str}")
+            valid_refs.add(f"edge:{up_str}")
+            valid_refs.add(up_str)
+    for down in evidence_bundle.get("downstreams", []):
+        down_str = str(down).strip()
+        if down_str:
+            valid_refs.add(f"trace:{down_str}")
+            valid_refs.add(f"edge:{down_str}")
+            valid_refs.add(down_str)
+
+    # 4. Service name / locator
+    svc_name = str(evidence_bundle.get("service_name") or "").strip()
+    if svc_name:
+        valid_refs.add(f"service:{svc_name}")
+        valid_refs.add(svc_name)
+        valid_refs.add(f"log:{svc_name}")
+    locator = str(evidence_bundle.get("locator") or "").strip()
+    if locator:
+        valid_refs.add(f"locator:{locator}")
+        valid_refs.add(locator)
+
+    # 5. Logs sample
+    for log_item in evidence_bundle.get("logs_sample", []):
+        log_str = str(log_item).strip()
+        if log_str:
+            valid_refs.add(f"log:{log_str}")
+            valid_refs.add(log_str)
+
+    # 6. Doc excerpt
+    if evidence_bundle.get("doc_excerpt"):
+        valid_refs.add("doc")
+        valid_refs.add("doc_excerpt")
+        if svc_name:
+            valid_refs.add(f"doc:{svc_name}")
+
+    return valid_refs
+
+
+def check_ref_resolves(ref_input: Any, valid_refs: set[str]) -> bool:
+    """Check if an evidence ref exact-matches any valid bundle reference ID."""
+    if not ref_input:
+        return False
+    ref_str = str(ref_input).strip().strip("\"'()[]{} ")
+    if not ref_str:
+        return False
+    if ref_str in valid_refs:
+        return True
+    ref_lower = ref_str.lower()
+    return any(ref_lower == v.lower() for v in valid_refs)
+
+
+def check_item_evidence_resolves(evidence_val: Any, valid_refs: set[str]) -> bool:
+    """Check if a KPI/invariant/journey evidence field resolves to bundle items."""
+    if not evidence_val:
+        return False
+    if isinstance(evidence_val, (list, tuple, set)):
+        if not evidence_val:
+            return False
+        return all(check_item_evidence_resolves(item, valid_refs) for item in evidence_val)
+    if isinstance(evidence_val, BaseModel):
+        ref = getattr(evidence_val, "ref", None)
+        return check_ref_resolves(ref, valid_refs)
+    if isinstance(evidence_val, dict):
+        ref = evidence_val.get("ref") or evidence_val.get("id")
+        return check_ref_resolves(ref, valid_refs)
+
+    s = str(evidence_val).strip()
+    if not s:
+        return False
+    if check_ref_resolves(s, valid_refs):
+        return True
+    parts = [p.strip() for p in re.split(r"[,;\n]+", s) if p.strip()]
+    if parts and all(check_ref_resolves(p, valid_refs) for p in parts):
+        return True
+    return False
 
 
 class BusinessContextInferencer:
@@ -208,7 +342,7 @@ class BusinessContextInferencer:
             if existing_good is not None:
                 return existing_good
 
-            return BusinessContext(
+            uncited_ctx = BusinessContext(
                 role_summary=f"Inference failed for {service.name}",
                 domain="unknown",
                 capabilities=[r.get("summary") or r.get("operation_id") or f"{r.get('method')} {r.get('path')}" for r in evidence_bundle.get("routes", [])],
@@ -223,11 +357,39 @@ class BusinessContextInferencer:
                 inferred_by="none",
                 inferred_at=datetime.now(tz=UTC).isoformat(),
             )
+            _attach_metadata(uncited_ctx, "inference_status", "failed")
+            return uncited_ctx
 
-        # Successful inference: cache by evidence hash and persist to Firestore
+        # Check if inference is uncited
+        is_uncited = not ctx.evidence
+        inference_status = getattr(ctx, "inference_status", "uncited" if is_uncited else "inferred")
+        _attach_metadata(ctx, "inference_status", inference_status)
+        _attach_metadata(ctx, "_evidence_hash", ev_hash)
+
+        node_id = service.doc_id or f"{service.env_id}__{service.kind}.{service.name}"
+        now_iso = datetime.now(tz=UTC).isoformat()
+
+        if is_uncited:
+            # Uncited inference: cap confidence below 0.5, schedule retry, and do NOT cache!
+            if self.firestore is not None:
+                try:
+                    self.firestore.set(
+                        "discovered_services",
+                        node_id,
+                        {
+                            "business_context": ctx.model_dump(mode="json"),
+                            "inference_status": "uncited",
+                            "inference_retry_after": now_iso,
+                        },
+                        merge=True,
+                    )
+                except Exception:
+                    pass
+            return ctx
+
+        # Successful cited inference: cache by evidence hash and persist to Firestore
         self._cache_by_evidence_hash[ev_hash] = ctx
         if self.firestore is not None:
-            node_id = service.doc_id or f"{service.env_id}__{service.kind}.{service.name}"
             try:
                 self.firestore.set(
                     "discovered_services",
@@ -316,45 +478,84 @@ class BusinessContextInferencer:
                     return any(bool(v) for v in item.values())
                 return bool(item)
 
-            # Ensure evidence references are never empty objects
-            cleaned_evidence = [e for e in res_bc.evidence if _is_non_empty(e)]
-            if not cleaned_evidence:
-                ev_items: list[BusinessContextEvidence] = []
-                for r in routes[:10]:
-                    ref = f"openapi:{r.get('method', 'GET')} {r.get('path', '/')}"
-                    summary = r.get("summary") or r.get("operation_id") or ""
-                    ev_items.append(
-                        BusinessContextEvidence(
-                            kind="openapi",
-                            ref=ref,
-                            excerpt=summary or f"Route {ref}",
-                        )
-                    )
-                for env_k in list(evidence_bundle.get("env_vars", {}).keys())[:5]:
-                    ev_items.append(
-                        BusinessContextEvidence(
-                            kind="env",
-                            ref=f"env:{env_k}",
-                            excerpt=f"Environment variable {env_k}",
-                        )
-                    )
-                cleaned_evidence = ev_items
+            valid_refs = extract_bundle_valid_refs(evidence_bundle)
+
+            # Keep only refs the model emitted, and drop any whose ref doesn't resolve to an item in the bundle
+            cleaned_evidence: list[BusinessContextEvidence] = []
+            for ev in res_bc.evidence:
+                if not _is_non_empty(ev):
+                    continue
+                ref_val = (
+                    getattr(ev, "ref", None)
+                    if isinstance(ev, BaseModel)
+                    else ev.get("ref")
+                    if isinstance(ev, dict)
+                    else str(ev)
+                )
+                if check_ref_resolves(ref_val, valid_refs):
+                    if isinstance(ev, BusinessContextEvidence):
+                        cleaned_evidence.append(ev)
+                    elif isinstance(ev, dict):
+                        cleaned_evidence.append(BusinessContextEvidence(**ev))
+                    else:
+                        cleaned_evidence.append(BusinessContextEvidence(ref=str(ref_val)))
+
             res_bc.evidence = cleaned_evidence
 
-            # Ensure kpis/invariants/journeys do not contain empty objects
-            res_bc.kpis = [k for k in res_bc.kpis if _is_non_empty(k)]
-            res_bc.invariants = [i for i in res_bc.invariants if _is_non_empty(i)]
-            res_bc.journeys = [j for j in res_bc.journeys if _is_non_empty(j)]
+            # If no usable evidence survived, cap confidence below 0.5 (min(conf, 0.3)) and mark uncited
+            if not res_bc.evidence:
+                res_bc.confidence = min(res_bc.confidence, 0.3)
+                _attach_metadata(res_bc, "inference_status", "uncited")
+            else:
+                _attach_metadata(res_bc, "inference_status", "inferred")
+
+            # Same check for KPIs/invariants/journeys: their evidence must also resolve to bundle items, or the item is dropped
+            res_bc.kpis = [
+                k
+                for k in res_bc.kpis
+                if _is_non_empty(k)
+                and check_item_evidence_resolves(
+                    getattr(k, "evidence", None)
+                    if isinstance(k, BaseModel)
+                    else (k.get("evidence") if isinstance(k, dict) else None),
+                    valid_refs,
+                )
+            ]
+            res_bc.invariants = [
+                i
+                for i in res_bc.invariants
+                if _is_non_empty(i)
+                and check_item_evidence_resolves(
+                    getattr(i, "evidence", None)
+                    if isinstance(i, BaseModel)
+                    else (i.get("evidence") if isinstance(i, dict) else None),
+                    valid_refs,
+                )
+            ]
+            res_bc.journeys = [
+                j
+                for j in res_bc.journeys
+                if _is_non_empty(j)
+                and check_item_evidence_resolves(
+                    getattr(j, "evidence", None)
+                    if isinstance(j, BaseModel)
+                    else (j.get("evidence") if isinstance(j, dict) else None),
+                    valid_refs,
+                )
+            ]
 
             res_bc.inferred_by = model_name
             res_bc.inferred_at = now_iso
             return res_bc
 
         # When LLM is not configured / unavailable, return un-inferred BusinessContext honestly with confidence 0.0
-        return BusinessContext(
+        no_llm_ctx = BusinessContext(
             role_summary=f"Infrastructure service '{service_name}'",
             domain="unknown",
-            capabilities=[r.get("summary") or r.get("operation_id") or f"{r.get('method')} {r.get('path')}" for r in routes],
+            capabilities=[
+                r.get("summary") or r.get("operation_id") or f"{r.get('method')} {r.get('path')}"
+                for r in routes
+            ],
             upstream=upstreams,
             downstream=downstreams,
             journeys=[],
@@ -366,6 +567,8 @@ class BusinessContextInferencer:
             inferred_by="none",
             inferred_at=now_iso,
         )
+        _attach_metadata(no_llm_ctx, "inference_status", "uncited")
+        return no_llm_ctx
 
     async def infer_journeys_from_topology(
         self,
