@@ -105,7 +105,7 @@ function cockpitMockDevPlugin() {
               status: openIncidents > 0 ? 'red' : 'green',
               business: {
                 role_summary: s.inferred_role || `${s.name} handles core transactions and business events.`,
-                domain: s.domain || (idx % 2 === 0 ? 'Payment Core' : 'Credit Decisioning'),
+                domain: s.domain || (idx % 2 === 0 ? 'Platform Core' : 'Data Services'),
                 confidence: s.role_confidence || 0.94,
               },
               golden: {
