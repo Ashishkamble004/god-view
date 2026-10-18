@@ -35,7 +35,6 @@ COPY godview/__init__.py /app/godview/__init__.py
 COPY godview/ledger /app/godview/ledger
 COPY godview/invariants /app/godview/invariants
 COPY godview/adapters /app/godview/adapters
-COPY godview/agent-skills /app/godview/agent-skills
 COPY godview/harness /app/godview/harness
 COPY godview/agents /app/godview/agents
 COPY godview/sovereign /app/godview/sovereign
