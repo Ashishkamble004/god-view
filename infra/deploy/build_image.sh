@@ -115,6 +115,9 @@ if [[ "${SVC}" == "god-view-sovereign" || "${SVC}" == "god-view-hibernate-job" ]
       HASH_PATHS+=("${sub}")
     fi
   done
+  if [[ -d "${REPO_ROOT}/infra/deploy" ]]; then
+    HASH_PATHS+=("${REPO_ROOT}/infra/deploy")
+  fi
 fi
 
 SHA="$(
@@ -144,6 +147,10 @@ if [[ "${SVC}" == "god-view-sovereign" || "${SVC}" == "god-view-hibernate-job" ]
   cp -a "${DOCKERFILE_PATH}" "${STAGE_DIR}/Dockerfile"
   if [[ -d "${REPO_ROOT}/shared" ]]; then
     cp -a "${REPO_ROOT}/shared" "${STAGE_DIR}/shared"
+  fi
+  if [[ -d "${REPO_ROOT}/infra" ]]; then
+    cp -a "${REPO_ROOT}/infra" "${STAGE_DIR}/infra"
+    rm -rf "${STAGE_DIR}/infra/terraform/.terraform"*
   fi
   if [[ -f "${REPO_ROOT}/godview/__init__.py" ]]; then
     cp -a "${REPO_ROOT}/godview/__init__.py" "${STAGE_DIR}/godview/__init__.py"
