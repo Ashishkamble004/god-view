@@ -56,7 +56,7 @@ def _import_file(path: Path, name: str) -> Any:
 
 _services_mod = _import_file(UNKNOWN_DIR / "services.py", "unknown_services")
 
-build_parcel_otlp_spans = _services_mod.build_parcel_otlp_spans
+set_otlp_receiver = _services_mod.set_otlp_receiver
 set_service_fault = _services_mod.set_service_fault
 start_parcel_stack = _services_mod.start_parcel_stack
 stop_parcel_stack = _services_mod.stop_parcel_stack
@@ -167,32 +167,27 @@ def _setup_test_compose_environment(
                 "image": "alpine:3.20",
                 "ports": [f"{ports[intake_name]}:8080"],
                 "environment": [f"ROUTE_SERVICE_URL=http://127.0.0.1:{ports[route_name]}"],
-                "labels": {"godview_managed": "true", "godview_kind": "cloud_run"},
                 "depends_on": [route_name, db_name],
             },
             route_name: {
                 "image": "alpine:3.20",
                 "ports": [f"{ports[route_name]}:8080"],
                 "environment": [f"DISPATCH_SERVICE_URL=http://127.0.0.1:{ports[dispatch_name]}"],
-                "labels": {"godview_managed": "true", "godview_kind": "cloud_run"},
                 "depends_on": [dispatch_name, db_name],
             },
             dispatch_name: {
                 "image": "alpine:3.20",
                 "ports": [f"{ports[dispatch_name]}:8080"],
                 "environment": [f"PROOF_SERVICE_URL=http://127.0.0.1:{ports[proof_name]}"],
-                "labels": {"godview_managed": "true", "godview_kind": "cloud_run"},
                 "depends_on": [proof_name, db_name],
             },
             proof_name: {
                 "image": "alpine:3.20",
                 "ports": [f"{ports[proof_name]}:8080"],
-                "labels": {"godview_managed": "true", "godview_kind": "cloud_run"},
                 "depends_on": [db_name],
             },
             db_name: {
                 "image": "postgres:16-alpine",
-                "labels": {"godview_managed": "true", "godview_kind": "cloud_sql"},
             },
         },
     }
@@ -255,12 +250,10 @@ async def test_unknown_env_e2e_plumbing_without_live_llm(
 
         env_id = resolve_env_id(ctx.settings)
 
-        # 2. Use God-View's generic LocalEnvironmentSenseAdapter (zero test-specific adapter)
-        service_urls = {name: svc.base_url for name, svc in parcel_services.items()}
+        # 2. Use God-View's generic LocalEnvironmentSenseAdapter (zero test-specific adapter, ports inferred)
         local_adapter = LocalEnvironmentSenseAdapter(
             compose_path=compose_file,
             seed_sql_dir=seed_dir,
-            service_urls=service_urls,
             ledger=ctx.ledger,
             env_id=env_id,
             docker_daemon_probe=lambda: True,
@@ -282,8 +275,12 @@ async def test_unknown_env_e2e_plumbing_without_live_llm(
         app = create_app(ctx=ctx)
         client = TestClient(app)
 
+        # Wire services to export OTLP spans directly to Sovereign /v1/traces
+        set_otlp_receiver(lambda payload: client.post("/v1/traces", json=payload))
+
         # 3. Cascaded HTTP execution: intake -> route -> dispatch -> proof
-        intake_url = service_urls[intake_svc_name]
+        # Each service propagates traceparent and emits its own server span to Sovereign /v1/traces
+        intake_url = f"http://127.0.0.1:{ports[intake_svc_name]}"
         cascade_resp = httpx.post(
             f"{intake_url}/v1/packages-{sfx}/intake",
             json={"parcel_id": f"PCL-{sfx.upper()}-001", "origin": "Hub-N", "destination": "Depot-S"},
@@ -291,20 +288,7 @@ async def test_unknown_env_e2e_plumbing_without_live_llm(
         )
         assert cascade_resp.status_code == 200
 
-        # 4. Ingest OTLP spans for this journey into Sovereign /v1/traces
-        otlp_payload = build_parcel_otlp_spans(
-            parcel_id=f"PCL-{sfx.upper()}-001",
-            suffix=sfx,
-            intake_port=ports[intake_svc_name],
-            route_port=ports[route_svc_name],
-            dispatch_port=ports[dispatch_svc_name],
-            proof_port=ports[proof_svc_name],
-        )
-        traces_resp = client.post("/v1/traces", json=otlp_payload)
-        assert traces_resp.status_code == 200
-        assert traces_resp.json()["spans_received"] == 4
-
-        # 5. Run perception pass
+        # 4. Run perception pass
         perc_resp = client.post("/v1/perceive", json={"reset": True})
         assert perc_resp.status_code == 200
         perc_data = perc_resp.json()
@@ -404,7 +388,9 @@ async def test_unknown_env_e2e_live_gemini(
     except Exception as exc:
         pytest.skip(f"Google Cloud ADC credentials unavailable: {exc}")
 
-    project_id = proj or os.environ.get("GOOGLE_CLOUD_PROJECT") or "general-ak"
+    project_id = proj or os.environ.get("GOOGLE_CLOUD_PROJECT")
+    if not project_id:
+        pytest.skip("No Google Cloud project available in ADC or GOOGLE_CLOUD_PROJECT")
 
     sfx = random_suffix
     intake_svc_name = f"svc-pkg-intake-{sfx}"
@@ -427,11 +413,9 @@ async def test_unknown_env_e2e_live_gemini(
 
         env_id = resolve_env_id(ctx.settings)
 
-        service_urls = {name: svc.base_url for name, svc in parcel_services.items()}
         local_adapter = LocalEnvironmentSenseAdapter(
             compose_path=compose_file,
             seed_sql_dir=seed_dir,
-            service_urls=service_urls,
             ledger=ctx.ledger,
             env_id=env_id,
             docker_daemon_probe=lambda: True,
@@ -453,26 +437,17 @@ async def test_unknown_env_e2e_live_gemini(
         app = create_app(ctx=ctx)
         client = TestClient(app)
 
-        # Cascaded HTTP call
-        intake_url = service_urls[intake_svc_name]
+        # Wire services to export OTLP spans directly to Sovereign /v1/traces
+        set_otlp_receiver(lambda payload: client.post("/v1/traces", json=payload))
+
+        # Cascaded HTTP call propagates traceparent and emits spans directly to Sovereign
+        intake_url = f"http://127.0.0.1:{ports[intake_svc_name]}"
         cascade_resp = httpx.post(
             f"{intake_url}/v1/packages-{sfx}/intake",
             json={"parcel_id": f"PCL-{sfx.upper()}-1001", "origin": "Hub-N", "destination": "Depot-S"},
             timeout=5.0,
         )
         assert cascade_resp.status_code == 200
-
-        # Ingest OTLP spans
-        otlp_payload = build_parcel_otlp_spans(
-            parcel_id=f"PCL-{sfx.upper()}-1001",
-            suffix=sfx,
-            intake_port=ports[intake_svc_name],
-            route_port=ports[route_svc_name],
-            dispatch_port=ports[dispatch_svc_name],
-            proof_port=ports[proof_svc_name],
-        )
-        traces_resp = client.post("/v1/traces", json=otlp_payload)
-        assert traces_resp.status_code == 200
 
         # Execute perception pass with real Gemini reasoning
         perc_resp = client.post("/v1/perceive", json={"reset": True})
@@ -496,7 +471,8 @@ async def test_unknown_env_e2e_live_gemini(
         assert topo_resp.status_code == 200
         topo = topo_resp.json()
         node_names = {n["name"] for n in topo.get("nodes", [])}
-        assert db_name in node_names
+        for expected in (intake_svc_name, route_svc_name, dispatch_svc_name, proof_svc_name, db_name):
+            assert expected in node_names, f"Node {expected} missing from topology"
         journeys = topo.get("journeys", [])
         assert len(journeys) >= 1, "Expected >= 1 multi-service journey inferred from trace DAG"
 

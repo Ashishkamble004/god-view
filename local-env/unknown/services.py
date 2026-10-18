@@ -16,6 +16,7 @@ Includes:
 
 from __future__ import annotations
 
+import os
 import socket
 import threading
 import time
@@ -24,12 +25,86 @@ from typing import Any
 
 import httpx
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
 # Global fault state dictionary: service_name -> fault_type (e.g. "404", "500")
 _ACTIVE_FAULTS: dict[str, str | None] = {}
+_OTLP_RECEIVER: Any = None
+
+
+def set_otlp_receiver(receiver: Any) -> None:
+    """Configure OTLP trace receiver (either a URL string or a callback function)."""
+    global _OTLP_RECEIVER
+    _OTLP_RECEIVER = receiver
+
+
+def _parse_traceparent(tp: str | None) -> tuple[str, str | None]:
+    if not tp:
+        return uuid.uuid4().hex, None
+    parts = tp.strip().split("-")
+    if len(parts) >= 3 and len(parts[1]) == 32:
+        return parts[1], parts[2]
+    return uuid.uuid4().hex, None
+
+
+def _emit_service_span(
+    service_name: str,
+    *,
+    trace_id: str,
+    span_id: str,
+    parent_span_id: str | None,
+    name: str,
+    start_ns: int,
+    end_ns: int,
+    attributes: dict[str, Any],
+) -> None:
+    """Build standard OTLP/HTTP JSON resourceSpan and send to configured receiver or OTLP endpoint."""
+    attr_list: list[dict[str, Any]] = []
+    for k, v in attributes.items():
+        if isinstance(v, bool):
+            attr_list.append({"key": k, "value": {"boolValue": v}})
+        elif isinstance(v, int):
+            attr_list.append({"key": k, "value": {"intValue": v}})
+        elif isinstance(v, float):
+            attr_list.append({"key": k, "value": {"doubleValue": v}})
+        else:
+            attr_list.append({"key": k, "value": {"stringValue": str(v)}})
+
+    span_obj: dict[str, Any] = {
+        "traceId": trace_id,
+        "spanId": span_id,
+        "name": name,
+        "startTimeUnixNano": str(start_ns),
+        "endTimeUnixNano": str(end_ns),
+        "attributes": attr_list,
+    }
+    if parent_span_id:
+        span_obj["parentSpanId"] = parent_span_id
+
+    payload = {
+        "resourceSpans": [
+            {
+                "resource": {
+                    "attributes": [
+                        {"key": "service.name", "value": {"stringValue": service_name}}
+                    ]
+                },
+                "scopeSpans": [{"spans": [span_obj]}],
+            }
+        ]
+    }
+
+    receiver = _OTLP_RECEIVER or os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+    if receiver is not None:
+        try:
+            if callable(receiver):
+                receiver(payload)
+            elif isinstance(receiver, str):
+                httpx.post(f"{receiver.rstrip('/')}/v1/traces", json=payload, timeout=2.0)
+        except Exception:
+            pass
 
 
 def set_service_fault(service_name: str, fault_type: str | None) -> None:
@@ -76,6 +151,7 @@ class TransitRouteResponse(BaseModel):
 class CourierDispatchRequest(BaseModel):
     route_id: str
     courier_id: str = "CR-101"
+    parcel_id: str = "PCL-DEFAULT"
 
 
 class CourierDispatchResponse(BaseModel):
@@ -141,24 +217,50 @@ def create_intake_app(*, suffix: str = "", route_service_url: str | None = None)
         summary="Intake new parcel shipment",
         operation_id="intakeParcelShipment",
     )
-    def intake_parcel(req: ParcelIntakeRequest) -> ParcelIntakeResponse:
+    def intake_parcel(req: ParcelIntakeRequest, request: Request) -> ParcelIntakeResponse:
         fault = get_service_fault(svc_name)
         if fault == "500":
             raise HTTPException(status_code=500, detail="Injected parcel intake service failure")
         if fault == "404":
             raise HTTPException(status_code=404, detail="Injected parcel intake route not found")
 
-        # Cascade call to route service over HTTP
+        start_ns = int(time.time() * 1_000_000_000)
+        trace_id, parent_id = _parse_traceparent(request.headers.get("traceparent"))
+        span_id = uuid.uuid4().hex[:16]
+
+        # Cascade call to route service over HTTP propagating traceparent
         if route_service_url:
             try:
                 route_endpoint = f"{route_service_url.rstrip('/')}{prefix}/route"
                 httpx.post(
                     route_endpoint,
                     json={"parcel_id": req.parcel_id, "origin": req.origin, "destination": req.destination},
+                    headers={"traceparent": f"00-{trace_id}-{span_id}-01"},
                     timeout=2.0,
                 )
             except Exception:
                 pass
+
+        end_ns = int(time.time() * 1_000_000_000)
+        _emit_service_span(
+            svc_name,
+            trace_id=trace_id,
+            span_id=span_id,
+            parent_span_id=parent_id,
+            name=f"POST {prefix}/intake",
+            start_ns=start_ns,
+            end_ns=end_ns,
+            attributes={
+                "http.method": "POST",
+                "http.route": f"{prefix}/intake",
+                "http.status_code": 200,
+                "parcel.id": req.parcel_id,
+                "entity_type": "parcel",
+                "entity_id": req.parcel_id,
+                "state_from": "NEW",
+                "state_to": "INTAKEN",
+            },
+        )
 
         return ParcelIntakeResponse(
             parcel_id=req.parcel_id,
@@ -225,24 +327,50 @@ def create_route_app(*, suffix: str = "", dispatch_service_url: str | None = Non
         summary="Calculate optimal parcel route",
         operation_id="calculateParcelRoute",
     )
-    def calculate_route(req: TransitRouteRequest) -> TransitRouteResponse:
+    def calculate_route(req: TransitRouteRequest, request: Request) -> TransitRouteResponse:
         fault = get_service_fault(svc_name)
         if fault == "500":
             raise HTTPException(status_code=500, detail="Injected routing engine 500 burst")
         if fault == "404":
             raise HTTPException(status_code=404, detail="Injected route not found")
 
-        # Cascade call to dispatch service over HTTP
+        start_ns = int(time.time() * 1_000_000_000)
+        trace_id, parent_id = _parse_traceparent(request.headers.get("traceparent"))
+        span_id = uuid.uuid4().hex[:16]
+
+        # Cascade call to dispatch service over HTTP propagating traceparent
         if dispatch_service_url:
             try:
                 dispatch_endpoint = f"{dispatch_service_url.rstrip('/')}{prefix}/dispatch"
                 httpx.post(
                     dispatch_endpoint,
-                    json={"route_id": f"RT-{req.parcel_id}", "courier_id": "CR-101"},
+                    json={"route_id": f"RT-{req.parcel_id}", "courier_id": "CR-101", "parcel_id": req.parcel_id},
+                    headers={"traceparent": f"00-{trace_id}-{span_id}-01"},
                     timeout=2.0,
                 )
             except Exception:
                 pass
+
+        end_ns = int(time.time() * 1_000_000_000)
+        _emit_service_span(
+            svc_name,
+            trace_id=trace_id,
+            span_id=span_id,
+            parent_span_id=parent_id,
+            name=f"POST {prefix}/route",
+            start_ns=start_ns,
+            end_ns=end_ns,
+            attributes={
+                "http.method": "POST",
+                "http.route": f"{prefix}/route",
+                "http.status_code": 200,
+                "parcel.id": req.parcel_id,
+                "entity_type": "parcel",
+                "entity_id": req.parcel_id,
+                "state_from": "INTAKEN",
+                "state_to": "ROUTED",
+            },
+        )
 
         return TransitRouteResponse(
             parcel_id=req.parcel_id,
@@ -309,22 +437,48 @@ def create_dispatch_app(*, suffix: str = "", proof_service_url: str | None = Non
         summary="Dispatch parcel with courier carrier",
         operation_id="dispatchParcelCarrier",
     )
-    def dispatch_parcel(req: CourierDispatchRequest) -> CourierDispatchResponse:
+    def dispatch_parcel(req: CourierDispatchRequest, request: Request) -> CourierDispatchResponse:
         fault = get_service_fault(svc_name)
         if fault == "500":
             raise HTTPException(status_code=500, detail="Injected courier dispatch error")
 
-        # Cascade call to proof service over HTTP
+        start_ns = int(time.time() * 1_000_000_000)
+        trace_id, parent_id = _parse_traceparent(request.headers.get("traceparent"))
+        span_id = uuid.uuid4().hex[:16]
+
+        # Cascade call to proof service over HTTP propagating traceparent
         if proof_service_url:
             try:
                 proof_endpoint = f"{proof_service_url.rstrip('/')}{prefix}/proof"
                 httpx.post(
                     proof_endpoint,
-                    json={"parcel_id": "PCL-101", "recipient_name": "Test Recipient", "signature_hash": "hash_valid_8823"},
+                    json={"parcel_id": req.parcel_id, "recipient_name": "Test Recipient", "signature_hash": "hash_valid_8823"},
+                    headers={"traceparent": f"00-{trace_id}-{span_id}-01"},
                     timeout=2.0,
                 )
             except Exception:
                 pass
+
+        end_ns = int(time.time() * 1_000_000_000)
+        _emit_service_span(
+            svc_name,
+            trace_id=trace_id,
+            span_id=span_id,
+            parent_span_id=parent_id,
+            name=f"POST {prefix}/dispatch",
+            start_ns=start_ns,
+            end_ns=end_ns,
+            attributes={
+                "http.method": "POST",
+                "http.route": f"{prefix}/dispatch",
+                "http.status_code": 200,
+                "parcel.id": req.parcel_id,
+                "entity_type": "parcel",
+                "entity_id": req.parcel_id,
+                "state_from": "ROUTED",
+                "state_to": "DISPATCHED",
+            },
+        )
 
         return CourierDispatchResponse(
             route_id=req.route_id,
@@ -385,10 +539,36 @@ def create_proof_app(*, suffix: str = "") -> FastAPI:
         summary="Submit delivery signature proof",
         operation_id="submitDeliveryProof",
     )
-    def submit_proof(req: DeliveryProofRequest) -> DeliveryProofResponse:
+    def submit_proof(req: DeliveryProofRequest, request: Request) -> DeliveryProofResponse:
         fault = get_service_fault(svc_name)
         if fault == "500":
             raise HTTPException(status_code=500, detail="Injected delivery proof signature verification error")
+
+        start_ns = int(time.time() * 1_000_000_000)
+        trace_id, parent_id = _parse_traceparent(request.headers.get("traceparent"))
+        span_id = uuid.uuid4().hex[:16]
+        end_ns = int(time.time() * 1_000_000_000)
+
+        _emit_service_span(
+            svc_name,
+            trace_id=trace_id,
+            span_id=span_id,
+            parent_span_id=parent_id,
+            name=f"POST {prefix}/proof",
+            start_ns=start_ns,
+            end_ns=end_ns,
+            attributes={
+                "http.method": "POST",
+                "http.route": f"{prefix}/proof",
+                "http.status_code": 200,
+                "parcel.id": req.parcel_id,
+                "entity_type": "parcel",
+                "entity_id": req.parcel_id,
+                "state_from": "DISPATCHED",
+                "state_to": "DELIVERED",
+            },
+        )
+
         return DeliveryProofResponse(
             parcel_id=req.parcel_id,
             verified=True,
@@ -501,157 +681,4 @@ def stop_parcel_stack(services: dict[str, RunningService]) -> None:
             pass
 
 
-# --- OTLP Telemetry Helper ---
 
-
-def build_parcel_otlp_spans(
-    parcel_id: str,
-    *,
-    suffix: str = "",
-    intake_port: int,
-    route_port: int,
-    dispatch_port: int,
-    proof_port: int,
-) -> dict[str, Any]:
-    """Build OTLP/HTTP JSON spans representing an intake->route->dispatch->proof parcel journey."""
-    now_ns = int(time.time() * 1_000_000_000)
-    trace_id = uuid.uuid4().hex
-    span_intake_id = uuid.uuid4().hex[:16]
-    span_route_id = uuid.uuid4().hex[:16]
-    span_dispatch_id = uuid.uuid4().hex[:16]
-    span_proof_id = uuid.uuid4().hex[:16]
-
-    intake_name = f"svc-pkg-intake-{suffix}" if suffix else "parcel-intake-svc"
-    route_name = f"svc-pkg-route-{suffix}" if suffix else "parcel-route-svc"
-    dispatch_name = f"svc-pkg-dispatch-{suffix}" if suffix else "parcel-dispatch-svc"
-    proof_name = f"svc-pkg-proof-{suffix}" if suffix else "parcel-proof-svc"
-
-    prefix = f"/v1/packages-{suffix}" if suffix else "/v1/parcels"
-
-    return {
-        "resourceSpans": [
-            {
-                "resource": {
-                    "attributes": [
-                        {"key": "service.name", "value": {"stringValue": intake_name}}
-                    ]
-                },
-                "scopeSpans": [
-                    {
-                        "spans": [
-                            {
-                                "traceId": trace_id,
-                                "spanId": span_intake_id,
-                                "name": f"POST {prefix}/intake",
-                                "startTimeUnixNano": str(now_ns),
-                                "endTimeUnixNano": str(now_ns + 50_000_000),
-                                "attributes": [
-                                    {"key": "http.method", "value": {"stringValue": "POST"}},
-                                    {"key": "http.route", "value": {"stringValue": f"{prefix}/intake"}},
-                                    {"key": "http.status_code", "value": {"intValue": 200}},
-                                    {"key": "parcel.id", "value": {"stringValue": parcel_id}},
-                                    {"key": "entity_type", "value": {"stringValue": "parcel"}},
-                                    {"key": "entity_id", "value": {"stringValue": parcel_id}},
-                                    {"key": "state_from", "value": {"stringValue": "NEW"}},
-                                    {"key": "state_to", "value": {"stringValue": "INTAKEN"}},
-                                ],
-                            }
-                        ]
-                    }
-                ],
-            },
-            {
-                "resource": {
-                    "attributes": [
-                        {"key": "service.name", "value": {"stringValue": route_name}}
-                    ]
-                },
-                "scopeSpans": [
-                    {
-                        "spans": [
-                            {
-                                "traceId": trace_id,
-                                "spanId": span_route_id,
-                                "parentSpanId": span_intake_id,
-                                "name": f"POST {prefix}/route",
-                                "startTimeUnixNano": str(now_ns + 55_000_000),
-                                "endTimeUnixNano": str(now_ns + 90_000_000),
-                                "attributes": [
-                                    {"key": "http.method", "value": {"stringValue": "POST"}},
-                                    {"key": "http.route", "value": {"stringValue": f"{prefix}/route"}},
-                                    {"key": "http.status_code", "value": {"intValue": 200}},
-                                    {"key": "parcel.id", "value": {"stringValue": parcel_id}},
-                                    {"key": "entity_type", "value": {"stringValue": "parcel"}},
-                                    {"key": "entity_id", "value": {"stringValue": parcel_id}},
-                                    {"key": "state_from", "value": {"stringValue": "INTAKEN"}},
-                                    {"key": "state_to", "value": {"stringValue": "ROUTED"}},
-                                ],
-                            }
-                        ]
-                    }
-                ],
-            },
-            {
-                "resource": {
-                    "attributes": [
-                        {"key": "service.name", "value": {"stringValue": dispatch_name}}
-                    ]
-                },
-                "scopeSpans": [
-                    {
-                        "spans": [
-                            {
-                                "traceId": trace_id,
-                                "spanId": span_dispatch_id,
-                                "parentSpanId": span_route_id,
-                                "name": f"POST {prefix}/dispatch",
-                                "startTimeUnixNano": str(now_ns + 95_000_000),
-                                "endTimeUnixNano": str(now_ns + 140_000_000),
-                                "attributes": [
-                                    {"key": "http.method", "value": {"stringValue": "POST"}},
-                                    {"key": "http.route", "value": {"stringValue": f"{prefix}/dispatch"}},
-                                    {"key": "http.status_code", "value": {"intValue": 200}},
-                                    {"key": "parcel.id", "value": {"stringValue": parcel_id}},
-                                    {"key": "entity_type", "value": {"stringValue": "parcel"}},
-                                    {"key": "entity_id", "value": {"stringValue": parcel_id}},
-                                    {"key": "state_from", "value": {"stringValue": "ROUTED"}},
-                                    {"key": "state_to", "value": {"stringValue": "DISPATCHED"}},
-                                ],
-                            }
-                        ]
-                    }
-                ],
-            },
-            {
-                "resource": {
-                    "attributes": [
-                        {"key": "service.name", "value": {"stringValue": proof_name}}
-                    ]
-                },
-                "scopeSpans": [
-                    {
-                        "spans": [
-                            {
-                                "traceId": trace_id,
-                                "spanId": span_proof_id,
-                                "parentSpanId": span_dispatch_id,
-                                "name": f"POST {prefix}/proof",
-                                "startTimeUnixNano": str(now_ns + 145_000_000),
-                                "endTimeUnixNano": str(now_ns + 180_000_000),
-                                "attributes": [
-                                    {"key": "http.method", "value": {"stringValue": "POST"}},
-                                    {"key": "http.route", "value": {"stringValue": f"{prefix}/proof"}},
-                                    {"key": "http.status_code", "value": {"intValue": 200}},
-                                    {"key": "parcel.id", "value": {"stringValue": parcel_id}},
-                                    {"key": "entity_type", "value": {"stringValue": "parcel"}},
-                                    {"key": "entity_id", "value": {"stringValue": parcel_id}},
-                                    {"key": "state_from", "value": {"stringValue": "DISPATCHED"}},
-                                    {"key": "state_to", "value": {"stringValue": "DELIVERED"}},
-                                ],
-                            }
-                        ]
-                    }
-                ],
-            },
-        ]
-    }

@@ -28,6 +28,16 @@ _BANNED_STEMS_PARTS: tuple[tuple[str, str], ...] = (
     ("vehic", "le"),
     ("cib", "il"),
     ("fo", "ir"),
+    ("amort", "iz"),
+    ("install", "ment"),
+    ("ten", "ure"),
+    ("principal_", "amount"),
+    ("aad", "haar"),
+)
+
+# Currency symbols or specific tokens to strictly disallow
+_BANNED_SYMBOLS: tuple[str, ...] = (
+    "\u20b9",  # Rupee sign ₹
 )
 
 # Acronyms where prefix/suffix boundary is needed to avoid false positives (e.g. emit, emitter)
@@ -60,7 +70,8 @@ _BANNED_ENV_IDENTIFIERS_PARTS: tuple[tuple[str, str], ...] = (
 BANNED_STEMS: tuple[str, ...] = tuple(a + b for a, b in _BANNED_STEMS_PARTS)
 BANNED_ACRONYMS: tuple[str, ...] = tuple(a + b for a, b in _BANNED_ACRONYMS_PARTS)
 BANNED_ENV_IDENTIFIERS: tuple[str, ...] = tuple(a + b for a, b in _BANNED_ENV_IDENTIFIERS_PARTS)
-BANNED_TERMS: tuple[str, ...] = BANNED_STEMS + BANNED_ACRONYMS + BANNED_ENV_IDENTIFIERS
+BANNED_SYMBOLS: tuple[str, ...] = _BANNED_SYMBOLS
+BANNED_TERMS: tuple[str, ...] = BANNED_STEMS + BANNED_ACRONYMS + BANNED_ENV_IDENTIFIERS + BANNED_SYMBOLS
 
 _EXCLUDED_DIR_NAMES: frozenset[str] = frozenset(
     {
@@ -89,6 +100,10 @@ def compile_pattern() -> re.Pattern[str]:
     # Environment identifiers
     for ident in BANNED_ENV_IDENTIFIERS:
         patterns.append(re.escape(ident))
+
+    # Explicit banned symbols (e.g. currency signs)
+    for sym in BANNED_SYMBOLS:
+        patterns.append(re.escape(sym))
 
     return re.compile("|".join(patterns), re.IGNORECASE)
 
