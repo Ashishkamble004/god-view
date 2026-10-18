@@ -363,25 +363,27 @@ class CloudArmorExecutor(BaseExecutor):
         logging_adapter: Any,
         client: httpx.AsyncClient,
         probe_url: str,
+        real_priority: int,
         temp_priority: int,
         env_mode: str,
         timeout_s: float = 300.0,
         interval_s: float = 15.0,
         min_evaluations: int = 1,
     ) -> tuple[bool, list[dict[str, Any]], str]:
-        """Poll LB logs for previewSecurityPolicy outcomes on temp_priority until min_evaluations seen or timeout."""
+        """Poll LB logs during preview window to verify relaxed rule allows currently blocked traffic (Verifier-Live #144, Verifier-Core #145)."""
         is_mock = isinstance(getattr(client, "_transport", None), httpx.MockTransport)
         if env_mode == "hermetic" or is_mock:
             timeout_s = min(timeout_s, 2.0)
             interval_s = 0.05
 
         start_time = asyncio.get_running_loop().time()
-        last_reason = "No preview evaluations observed"
+        last_reason = "No enforced DENY evaluations observed in the window"
 
-        filter_expr = f'jsonPayload.previewSecurityPolicy.priority="{temp_priority}"'
+        # Query entries denied by current rule (1000)
+        filter_expr = f'jsonPayload.enforcedSecurityPolicy.priority="{real_priority}"'
 
         while True:
-            # Proactively trigger probe so LB logs have preview evaluations to record
+            # Proactively trigger probe so current rule (real_priority) produces enforced DENY entries in LB logs
             try:
                 await client.get(probe_url, timeout=5.0)
             except Exception:
@@ -397,19 +399,33 @@ class CloudArmorExecutor(BaseExecutor):
                     },
                 )
                 entries = res.get("entries", res) if isinstance(res, dict) else res
-                if isinstance(entries, list) and len(entries) >= min_evaluations:
-                    deny_entries = [
-                        e for e in entries
-                        if isinstance(e, dict)
-                        and str(
-                            e.get("jsonPayload", {})
-                            .get("previewSecurityPolicy", {})
-                            .get("outcome", "")
-                        ).upper().startswith("DENY")
-                    ]
-                    if deny_entries:
-                        return False, entries, f"Preview rule would deny {len(deny_entries)} legitimate-class samples"
-                    return True, entries, f"Observed {len(entries)} preview evaluations with 0 DENY outcomes"
+                if isinstance(entries, list) and entries:
+                    would_be_allowed_count = 0
+                    would_still_deny_count = 0
+
+                    for e in entries:
+                        if not isinstance(e, dict):
+                            continue
+                        jp = e.get("jsonPayload", {})
+                        enforced = jp.get("enforcedSecurityPolicy", {})
+                        enforced_pri = str(enforced.get("priority", jp.get("enforcedSecurityPolicyPriority", "")))
+                        enforced_outcome = str(enforced.get("outcome", jp.get("enforcedSecurityPolicyOutcome", ""))).upper()
+
+                        if enforced_pri == str(real_priority) and "DENY" in enforced_outcome:
+                            # Check whether temp preview rule ALSO matched and would deny
+                            preview = jp.get("previewSecurityPolicy")
+                            if isinstance(preview, dict) and str(preview.get("priority", "")) == str(temp_priority) and "DENY" in str(preview.get("outcome", "")).upper():
+                                would_still_deny_count += 1
+                            else:
+                                # Temp rule with relaxed sensitivity did not match -> would be allowed!
+                                would_be_allowed_count += 1
+
+                    if would_still_deny_count > 0:
+                        return False, entries, f"Temp preview rule {temp_priority} would still DENY {would_still_deny_count} samples currently blocked by rule {real_priority}"
+
+                    if would_be_allowed_count >= min_evaluations:
+                        return True, entries, f"Observed {would_be_allowed_count} samples blocked by rule {real_priority} that would be allowed under relaxed rule {temp_priority} (0 preview DENYs)"
+
             except Exception as e:
                 logger.debug("Transient error querying preview logs: %s", e)
 
@@ -841,6 +857,7 @@ class CloudArmorExecutor(BaseExecutor):
                         logging_adapter=logging_adapter,
                         client=client,
                         probe_url=effective_probe_url,
+                        real_priority=priority,
                         temp_priority=temp_priority,
                         env_mode=env_mode,
                         timeout_s=float(args.get("preview_window_s", 300.0)),

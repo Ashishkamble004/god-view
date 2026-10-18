@@ -79,15 +79,17 @@ async def test_armor_executor_set_waf_sensitivity_preview_first_and_verify(
             return {"logging.query_lb_requests": {}}
 
         async def execute_capability(self, cap_id: str, args: dict[str, Any]) -> list[dict[str, Any]]:
+            # Enforced DENY on rule 1000 with absent previewSecurityPolicy = allowed under temp rule (Verifier #144, #145)
             return [
                 {
+                    "httpRequest": {"requestUrl": "https://api.example.com/test-probe"},
                     "jsonPayload": {
-                        "previewSecurityPolicy": {
+                        "enforcedSecurityPolicy": {
                             "name": "edge-security-policy",
-                            "priority": 900,
-                            "outcome": "ACCEPT",
-                        }
-                    }
+                            "priority": 1000,
+                            "outcome": "DENY",
+                        },
+                    },
                 }
             ]
 
@@ -215,16 +217,22 @@ async def test_armor_executor_preview_gate_aborts_on_would_deny_logs(
             return {"logging.query_lb_requests": {}}
 
         async def execute_capability(self, cap_id: str, args: dict[str, Any]) -> list[dict[str, Any]]:
-            # Return a preview log entry indicating the rule WOULD DENY legitimate traffic
+            # Return a preview log entry indicating the temp rule WOULD ALSO DENY
             return [
                 {
+                    "httpRequest": {"requestUrl": "https://api.example.com/test-probe"},
                     "jsonPayload": {
+                        "enforcedSecurityPolicy": {
+                            "name": "edge-security-policy",
+                            "priority": 1000,
+                            "outcome": "DENY",
+                        },
                         "previewSecurityPolicy": {
                             "name": "edge-security-policy",
                             "priority": 900,
                             "outcome": "DENY",
-                        }
-                    }
+                        },
+                    },
                 }
             ]
 
