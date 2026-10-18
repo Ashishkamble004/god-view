@@ -389,11 +389,16 @@ class CloudArmorExecutor(BaseExecutor):
         # Tag canary probes with a unique nonce to prove edge live evaluation post-t0
         canary_nonce = f"gv-{uuid.uuid4().hex[:8]}"
         sep = "&" if "?" in probe_url else "?"
-        nonce_probe_url = f"{probe_url}{sep}gv={canary_nonce}"
+        benign_nonce_probe_url = f"{probe_url}{sep}gv={canary_nonce}"
 
-        # Query entries denied by current rule (real_priority) post-t0
+        # Positive control attack probe (Verifier-Live #153): proves temp rule is live at edge
+        parsed_probe = urllib.parse.urlsplit(probe_url)
+        attack_nonce_probe_url = f"{parsed_probe.scheme}://{parsed_probe.netloc}/?gv={canary_nonce}&id=1%27%20OR%20%271%27=%271"
+
+        # Query entries denied by current rule (real_priority) or matched by preview rule post-t0
         filter_expr = (
-            f'jsonPayload.enforcedSecurityPolicy.priority="{real_priority}" AND '
+            f'(jsonPayload.enforcedSecurityPolicy.priority="{real_priority}" OR '
+            f'jsonPayload.previewSecurityPolicy.priority="{temp_priority}") AND '
             f'timestamp>="{t0_iso}"'
         )
 
@@ -401,9 +406,15 @@ class CloudArmorExecutor(BaseExecutor):
 
         while True:
             poll_count += 1
-            # Proactively trigger nonce probe so current rule (real_priority) produces post-t0 enforced DENY entries in LB logs
+            # 1. Benign canary probe (denied by rule 1000, allowed by temp rule)
             try:
-                await client.get(nonce_probe_url, timeout=5.0)
+                await client.get(benign_nonce_probe_url, timeout=5.0)
+            except Exception:
+                pass
+
+            # 2. Positive control attack probe (proves temp rule 900 is active at edge)
+            try:
+                await client.get(attack_nonce_probe_url, timeout=5.0)
             except Exception:
                 pass
 
@@ -421,6 +432,7 @@ class CloudArmorExecutor(BaseExecutor):
                     would_be_allowed_count = 0
                     would_still_deny_count = 0
                     nonce_confirmed = False
+                    temp_liveness_confirmed = False
 
                     for e in entries:
                         if not isinstance(e, dict):
@@ -435,26 +447,36 @@ class CloudArmorExecutor(BaseExecutor):
                         hr = e.get("httpRequest", {})
                         req_url = str(jp.get("requestUrl") or hr.get("requestUrl") or "")
                         has_nonce = canary_nonce in req_url
+                        is_attack = ("id=1" in req_url or "1=1" in req_url)
 
                         enforced = jp.get("enforcedSecurityPolicy", {})
                         enforced_pri = str(enforced.get("priority", jp.get("enforcedSecurityPolicyPriority", "")))
                         enforced_outcome = str(enforced.get("outcome", jp.get("enforcedSecurityPolicyOutcome", ""))).upper()
 
-                        if enforced_pri == str(real_priority) and "DENY" in enforced_outcome:
-                            # Check whether temp preview rule ALSO matched and would deny
-                            preview = jp.get("previewSecurityPolicy")
-                            if isinstance(preview, dict) and str(preview.get("priority", "")) == str(temp_priority) and "DENY" in str(preview.get("outcome", "")).upper():
+                        preview = jp.get("previewSecurityPolicy")
+                        preview_dict = preview if isinstance(preview, dict) else {}
+                        preview_pri = str(preview_dict.get("priority", ""))
+                        preview_outcome = str(preview_dict.get("outcome", "")).upper()
+
+                        # Positive control: attack probe matching temp rule 900 proves edge propagation
+                        if is_attack and has_nonce and preview_pri == str(temp_priority) and "DENY" in preview_outcome:
+                            temp_liveness_confirmed = True
+
+                        # Benign evaluation
+                        if not is_attack:
+                            if preview_pri == str(temp_priority) and "DENY" in preview_outcome:
                                 would_still_deny_count += 1
-                            else:
-                                # Temp rule with relaxed sensitivity did not match -> would be allowed!
+                            elif enforced_pri == str(real_priority) and "DENY" in enforced_outcome:
                                 would_be_allowed_count += 1
                                 if has_nonce:
                                     nonce_confirmed = True
 
                     if would_still_deny_count > 0:
-                        return False, entries, f"Temp preview rule {temp_priority} would still DENY {would_still_deny_count} samples currently blocked by rule {real_priority}"
+                        return False, entries, f"Temp preview rule {temp_priority} would still DENY {would_still_deny_count} benign samples currently blocked by rule {real_priority}"
 
-                    if (
+                    if not temp_liveness_confirmed:
+                        last_reason = f"Waiting for temp rule {temp_priority} liveness confirmation at edge (positive control attack probe not yet observed)"
+                    elif (
                         would_be_allowed_count >= min_evaluations
                         and nonce_confirmed
                         and poll_count >= min_polls
@@ -462,7 +484,8 @@ class CloudArmorExecutor(BaseExecutor):
                         return (
                             True,
                             entries,
-                            f"Observed {would_be_allowed_count} samples (incl. verified post-t0 canary nonce '{canary_nonce}') "
+                            f"Temp rule {temp_priority} liveness confirmed at edge via positive control attack probe; "
+                            f"observed {would_be_allowed_count} benign samples (incl. verified post-t0 canary nonce '{canary_nonce}') "
                             f"blocked by rule {real_priority} that would be allowed under relaxed rule {temp_priority} (0 preview DENYs across {poll_count} polls)",
                         )
 

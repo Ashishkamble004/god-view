@@ -81,24 +81,47 @@ async def test_armor_executor_set_waf_sensitivity_preview_first_and_verify(
             return {"logging.query_lb_requests": {}}
 
         async def execute_capability(self, cap_id: str, args: dict[str, Any]) -> list[dict[str, Any]]:
-            # Return post-t0 entries tagged with the canary nonce
-            latest_url = captured_probe_urls[-1] if captured_probe_urls else "https://api.example.com/test-probe"
+            # Return post-t0 entries:
+            # 1. Positive control attack probe confirms temp rule 900 liveness at edge (Verifier-Live #153)
+            # 2. Benign canary probes confirm would-be-allowed status
             now_iso = "2099-01-01T00:00:00Z"
-            return [
+            benign_urls = [u for u in captured_probe_urls if "id=1" not in u]
+            attack_urls = [u for u in captured_probe_urls if "id=1" in u]
+            benign_url = benign_urls[-1] if benign_urls else "https://api.example.com/test-probe"
+            attack_url = attack_urls[-1] if attack_urls else "https://api.example.com/?id=1%27%20OR%20%271%27=%271"
+
+            entries: list[dict[str, Any]] = [
+                # Positive control: attack probe matching temp rule 900 with DENY
                 {
                     "timestamp": now_iso,
-                    "httpRequest": {"requestUrl": latest_url},
+                    "httpRequest": {"requestUrl": attack_url},
                     "jsonPayload": {
-                        "requestUrl": latest_url,
-                        "enforcedSecurityPolicy": {
+                        "requestUrl": attack_url,
+                        "previewSecurityPolicy": {
                             "name": "edge-security-policy",
-                            "priority": 1000,
+                            "priority": 900,
                             "outcome": "DENY",
                         },
                     },
                 }
-                for _ in range(3)
             ]
+            # Benign canary probes: denied by rule 1000, not matched by preview rule 900
+            for _ in range(3):
+                entries.append(
+                    {
+                        "timestamp": now_iso,
+                        "httpRequest": {"requestUrl": benign_url},
+                        "jsonPayload": {
+                            "requestUrl": benign_url,
+                            "enforcedSecurityPolicy": {
+                                "name": "edge-security-policy",
+                                "priority": 1000,
+                                "outcome": "DENY",
+                            },
+                        },
+                    }
+                )
+            return entries
 
     class MockContext:
         def __init__(self) -> None:
@@ -148,7 +171,7 @@ async def test_armor_executor_set_waf_sensitivity_preview_first_and_verify(
             return httpx.Response(200, json=rule_state)
 
         # probe
-        if "test-probe" in url:
+        if "test-probe" in url or "id=1" in url:
             captured_probe_urls.append(url)
             return httpx.Response(422, json={"detail": "validation error"})
 
