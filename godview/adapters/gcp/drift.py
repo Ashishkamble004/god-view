@@ -294,23 +294,18 @@ def resolve_gcp_bearer_token(explicit_token: str | None = None) -> str:
         val = os.environ.get(env_key, "").strip()
         if val:
             return val
-    try:
-        import google.auth
-        import google.auth.transport.requests
 
-        creds, _ = google.auth.default()
-        req = google.auth.transport.requests.Request()
-        creds.refresh(req)
-        if creds.token:
-            return str(creds.token).strip()
-    except Exception:
-        pass
-    if os.environ.get("GODVIEW_ENV", "").strip().lower() == "gcp" or bool(os.environ.get("K_SERVICE")):
+    env_mode = os.environ.get("GODVIEW_ENV", "").strip().lower()
+    if env_mode == "hermetic":
+        return ""
+
+    is_cloud_run = bool(os.environ.get("K_SERVICE"))
+    if env_mode == "gcp" or is_cloud_run:
         try:
             resp = httpx.get(
                 "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
                 headers={"Metadata-Flavor": "Google"},
-                timeout=1.5,
+                timeout=1.0,
             )
             if resp.status_code == 200:
                 token = str(resp.json().get("access_token", "")).strip()
@@ -318,6 +313,21 @@ def resolve_gcp_bearer_token(explicit_token: str | None = None) -> str:
                     return token
         except httpx.HTTPError:
             pass
+
+    if env_mode in ("gcp", "local"):
+        try:
+            import google.auth
+            import google.auth.transport.requests
+
+            creds, _ = google.auth.default()
+            req = google.auth.transport.requests.Request()
+            creds.refresh(req)
+            if creds.token:
+                return str(creds.token).strip()
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).warning("ADC bearer token resolution failed in %s mode: %s", env_mode, exc)
+
     return ""
 
 

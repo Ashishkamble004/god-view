@@ -24,12 +24,15 @@ Implements SenseAdapter over `httpx` REST transports (live or recorded fixture t
 
 from __future__ import annotations
 
+import base64
 import copy
 import inspect
 import ipaddress
 import json
+import logging
 import re
 import socket
+import ssl
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
@@ -75,6 +78,22 @@ from godview.adapters.gcp.drift import (
 )
 from godview.adapters.gcp.edge import CloudEdgeAdapter
 from godview.adapters.gcp.mcp_clients import GkeMcpClient, ObservabilityMcpClient
+
+logger = logging.getLogger(__name__)
+
+SYSTEM_NAMESPACES: frozenset[str] = frozenset(
+    {
+        "kube-system",
+        "kube-public",
+        "kube-node-lease",
+        "local-path-storage",
+        "gke-managed-system",
+        "gmp-system",
+        "gmp-public",
+        "gke-gmp-system",
+        "istio-system",
+    }
+)
 
 
 class ProbeSafetyError(PermissionError):
@@ -1230,6 +1249,118 @@ class GkeAdapter(_BaseGcpAdapter):
         url = f"https://container.googleapis.com/v1/projects/{self.project_id}/locations/-/clusters"
         return await self._fetch_paginated(url, "clusters")
 
+    async def _fetch_k8s_deployments(
+        self, endpoint: str | None, ca_cert: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Fetch Kubernetes Deployment objects via fixtures, MCP, or Kubernetes API."""
+        if self._fixtures:
+            if "k8s_deployments" in self._fixtures:
+                return list(self._fixtures["k8s_deployments"])
+            if "deployments" in self._fixtures:
+                return list(self._fixtures["deployments"])
+            if (
+                "gke" in self._fixtures
+                and isinstance(self._fixtures["gke"], dict)
+                and "deployments" in self._fixtures["gke"]
+            ):
+                return list(self._fixtures["gke"]["deployments"])
+
+        if self._gke_mcp is not None:
+            try:
+                res = await self._gke_mcp.call_tool(
+                    "k8s.get_resource", {"kind": "Deployment", "namespace": ""}
+                )
+                if isinstance(res, list):
+                    return res
+                if isinstance(res, dict) and "items" in res:
+                    return list(res["items"])
+            except Exception:
+                pass
+
+        if not endpoint or not self.bearer_token:
+            return []
+
+        url = f"https://{endpoint}/apis/apps/v1/deployments"
+        headers = {"Authorization": f"Bearer {self.bearer_token}", "Accept": "application/json"}
+        verify: bool | ssl.SSLContext = False
+        if ca_cert:
+            try:
+                ctx = ssl.create_default_context()
+                ctx.load_verify_locations(cadata=base64.b64decode(ca_cert).decode("utf-8"))
+                ctx.check_hostname = False
+                verify = ctx
+            except Exception:
+                verify = False
+
+        kwargs: dict[str, Any] = {"timeout": 5.0, "verify": verify}
+        if self._transport is not None:
+            kwargs["transport"] = self._transport
+
+        try:
+            async with httpx.AsyncClient(**kwargs) as client:
+                resp = await client.get(url, headers=headers)
+                if resp.status_code == 200:
+                    return list(resp.json().get("items", []))
+        except Exception as exc:
+            logger.debug("Failed to fetch k8s deployments from %s: %s", endpoint, exc)
+        return []
+
+    async def _fetch_k8s_services(
+        self, endpoint: str | None, ca_cert: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Fetch Kubernetes Service objects via fixtures, MCP, or Kubernetes API."""
+        if self._fixtures:
+            if "k8s_services" in self._fixtures:
+                return list(self._fixtures["k8s_services"])
+            if "services" in self._fixtures:
+                return list(self._fixtures["services"])
+            if (
+                "gke" in self._fixtures
+                and isinstance(self._fixtures["gke"], dict)
+                and "services" in self._fixtures["gke"]
+            ):
+                return list(self._fixtures["gke"]["services"])
+
+        if self._gke_mcp is not None:
+            try:
+                res = await self._gke_mcp.call_tool(
+                    "k8s.get_resource", {"kind": "Service", "namespace": ""}
+                )
+                if isinstance(res, list):
+                    return res
+                if isinstance(res, dict) and "items" in res:
+                    return list(res["items"])
+            except Exception:
+                pass
+
+        if not endpoint or not self.bearer_token:
+            return []
+
+        url = f"https://{endpoint}/api/v1/services"
+        headers = {"Authorization": f"Bearer {self.bearer_token}", "Accept": "application/json"}
+        verify: bool | ssl.SSLContext = False
+        if ca_cert:
+            try:
+                ctx = ssl.create_default_context()
+                ctx.load_verify_locations(cadata=base64.b64decode(ca_cert).decode("utf-8"))
+                ctx.check_hostname = False
+                verify = ctx
+            except Exception:
+                verify = False
+
+        kwargs: dict[str, Any] = {"timeout": 5.0, "verify": verify}
+        if self._transport is not None:
+            kwargs["transport"] = self._transport
+
+        try:
+            async with httpx.AsyncClient(**kwargs) as client:
+                resp = await client.get(url, headers=headers)
+                if resp.status_code == 200:
+                    return list(resp.json().get("items", []))
+        except Exception as exc:
+            logger.debug("Failed to fetch k8s services from %s: %s", endpoint, exc)
+        return []
+
     async def discover(self) -> DiscoveryResult:
         try:
             clusters = await self._fetch_clusters()
@@ -1246,7 +1377,6 @@ class GkeAdapter(_BaseGcpAdapter):
         edges: list[DiscoveredEdgeDoc] = []
 
         seen_service_names: set[str] = set()
-        primary_cl_id: str | None = None
 
         for cl in clusters:
             cl_name = str(cl.get("name", ""))
@@ -1260,8 +1390,6 @@ class GkeAdapter(_BaseGcpAdapter):
             if is_observer:
                 labels["godview_role"] = "observer"
             cl_doc_id = f"{self.env_id}__gke_workload.{cl_name}"
-            if not primary_cl_id:
-                primary_cl_id = cl_doc_id
             seen_service_names.add(cl_name)
             services.append(
                 DiscoveredServiceDoc(
@@ -1279,42 +1407,74 @@ class GkeAdapter(_BaseGcpAdapter):
                 )
             )
 
-        # Discover GKE deployments/workloads from Compute Engine NEGs
-        raw_negs: list[dict[str, Any]] = []
-        if self._fixtures and "negs" in self._fixtures:
-            raw_negs.extend(self._fixtures["negs"])
-        else:
-            try:
-                neg_url = f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/aggregated/networkEndpointGroups"
-                raw_negs = await self._fetch_paginated(neg_url, "items")
-            except Exception:
-                for reg in (self.regions or [self.region]):
-                    try:
-                        reg_url = f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/regions/{reg}/networkEndpointGroups"
-                        raw_negs.extend(await self._fetch_paginated(reg_url, "items"))
-                    except Exception:
-                        pass
+            endpoint = cl.get("endpoint")
+            ca_cert = cl.get("masterAuth", {}).get("clusterCaCertificate")
+            deployments = await self._fetch_k8s_deployments(endpoint, ca_cert)
 
-        for neg in raw_negs:
-            neg_name = str(neg.get("name", ""))
-            if not neg_name:
-                continue
-            if "k8s" in neg_name.lower():
-                dep_name = neg_name
-                dep_name = re.sub(r"^k8s[12]?-", "", dep_name)
-                dep_name = re.sub(r"^[a-z0-9]{8}-", "", dep_name)
-                dep_name = re.sub(
-                    r"^(?:us|europe|asia|australia|northamerica|southamerica)-[a-z0-9]+(?:-[a-z])?-",
-                    "",
-                    dep_name,
+            for dep in deployments:
+                meta = dep.get("metadata", {})
+                dep_name = meta.get("name", "")
+                namespace = meta.get("namespace", "default")
+                if not dep_name or namespace in SYSTEM_NAMESPACES:
+                    continue
+
+                dep_labels = dict(meta.get("labels") or {})
+                if is_resource_excluded(dep_name, dep_labels):
+                    continue
+
+                spec = dep.get("spec", {})
+                replicas = spec.get("replicas", 1)
+                template_spec = spec.get("template", {}).get("spec", {})
+                containers = template_spec.get("containers", [])
+
+                has_startup_probe = False
+                has_liveness_probe = False
+                startup_probe_spec = None
+                liveness_probe_spec = None
+                container_summaries: list[dict[str, Any]] = []
+
+                for c in containers:
+                    c_name = c.get("name")
+                    sp = c.get("startupProbe")
+                    lp = c.get("livenessProbe")
+                    rp = c.get("readinessProbe")
+                    if sp:
+                        has_startup_probe = True
+                        startup_probe_spec = sp
+                    if lp:
+                        has_liveness_probe = True
+                        liveness_probe_spec = lp
+                    container_summaries.append({
+                        "name": c_name,
+                        "image": c.get("image"),
+                        "startup_probe": sp,
+                        "liveness_probe": lp,
+                        "readiness_probe": rp,
+                    })
+
+                dep_labels["namespace"] = namespace
+                dep_labels["replicas"] = str(replicas)
+                dep_labels["has_startup_probe"] = "true" if has_startup_probe else "false"
+                dep_labels["has_liveness_probe"] = "true" if has_liveness_probe else "false"
+
+                posture = Posture(
+                    ingress="internal",
+                    iap=False,
+                    invoker_iam=False,
+                    details={
+                        "namespace": namespace,
+                        "replicas": replicas,
+                        "has_startup_probe": has_startup_probe,
+                        "has_liveness_probe": has_liveness_probe,
+                        "startup_probe": startup_probe_spec,
+                        "liveness_probe": liveness_probe_spec,
+                        "containers": container_summaries,
+                    },
                 )
-                dep_name = re.sub(r"^(?:default|prod|staging|kube-system)-", "", dep_name)
-                dep_name = re.sub(r"-\d+-[a-z0-9]+$", "", dep_name)
-                dep_name = re.sub(r"-[a-z0-9]{8,}$", "", dep_name).strip()
 
-                if dep_name and dep_name not in seen_service_names:
+                dep_doc_id = f"{self.env_id}__gke_workload.{dep_name}"
+                if dep_name not in seen_service_names:
                     seen_service_names.add(dep_name)
-                    dep_doc_id = f"{self.env_id}__gke_workload.{dep_name}"
                     services.append(
                         DiscoveredServiceDoc(
                             doc_id=dep_doc_id,
@@ -1322,28 +1482,52 @@ class GkeAdapter(_BaseGcpAdapter):
                             name=dep_name,
                             kind="gke_workload",
                             adapter_family="gcp",
-                            locator=f"gke://workload/{dep_name}",
-                            labels={"managed_by": "gke", "neg_name": neg_name},
+                            locator=f"k8s://{namespace}/{dep_name}",
+                            labels=dep_labels,
+                            posture=posture,
                             classification="journey_linked",
                             first_seen=now_iso,
                             last_seen=now_iso,
                             status="active",
                         )
                     )
-                    if primary_cl_id:
-                        edges.append(
-                            DiscoveredEdgeDoc(
-                                doc_id=f"{primary_cl_id}__to__{dep_doc_id}",
-                                src=primary_cl_id,
-                                dst=dep_doc_id,
-                                protocol="k8s",
-                                evidence="k8s_neg",
-                                evidence_kind="config",
-                                confidence=1.0,
-                                first_seen=now_iso,
-                                last_seen=now_iso,
-                            )
-                        )
+
+                # Edge from cluster to deployment
+                edges.append(
+                    DiscoveredEdgeDoc(
+                        doc_id=f"{cl_doc_id}__to__{dep_doc_id}",
+                        src=cl_doc_id,
+                        dst=dep_doc_id,
+                        protocol="k8s",
+                        evidence="k8s",
+                        confidence=1.0,
+                        first_seen=now_iso,
+                        last_seen=now_iso,
+                    )
+                )
+
+                # Outbound env var references to other services
+                for c in containers:
+                    for env_entry in c.get("env") or []:
+                        env_name = str(env_entry.get("name", ""))
+                        env_val = str(env_entry.get("value", ""))
+                        if env_name.endswith("_URL") and env_val.startswith(("http://", "https://")):
+                            parsed = urlparse(env_val)
+                            if parsed.hostname:
+                                target_host = parsed.hostname.split(".")[0].lower()
+                                target_doc_id = f"{self.env_id}__gke_workload.{target_host}"
+                                edges.append(
+                                    DiscoveredEdgeDoc(
+                                        doc_id=f"{dep_doc_id}__to__{target_doc_id}",
+                                        src=dep_doc_id,
+                                        dst=target_doc_id,
+                                        protocol=parsed.scheme or "http",
+                                        evidence="env_ref",
+                                        confidence=0.9,
+                                        first_seen=now_iso,
+                                        last_seen=now_iso,
+                                    )
+                                )
 
         return DiscoveryResult(
             services=services,

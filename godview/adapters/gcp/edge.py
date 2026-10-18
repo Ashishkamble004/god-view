@@ -498,7 +498,7 @@ class CloudEdgeAdapter(SenseAdapter):
                         is_k8s = "k8s" in group_name.lower()
 
                         if is_k8s:
-                            # Extract deployment/workload name from GKE NEG
+                            # Extract deployment/workload name from GKE NEG to link backend targets to Deployment
                             dep_name = group_name
                             dep_name = re.sub(r"^k8s[12]?-", "", dep_name)
                             dep_name = re.sub(r"^[a-z0-9]{8}-", "", dep_name)
@@ -507,29 +507,12 @@ class CloudEdgeAdapter(SenseAdapter):
                                 "",
                                 dep_name,
                             )
-                            dep_name = re.sub(r"^(?:default|prod|staging|kube-system)-", "", dep_name)
+                            dep_name = re.sub(r"^[a-z0-9]+-", "", dep_name)
                             dep_name = re.sub(r"-\d+-[a-z0-9]+$", "", dep_name)
                             dep_name = re.sub(r"-[a-z0-9]{8,}$", "", dep_name).strip()
 
                             if dep_name:
                                 dep_doc_id = f"{self.env_id}__gke_workload.{dep_name}"
-                                if dep_doc_id not in seen_service_ids:
-                                    seen_service_ids.add(dep_doc_id)
-                                    services.append(
-                                        DiscoveredServiceDoc(
-                                            doc_id=dep_doc_id,
-                                            env_id=self.env_id,
-                                            name=dep_name,
-                                            kind="gke_workload",
-                                            adapter_family="gcp",
-                                            locator=f"gke://workload/{dep_name}",
-                                            labels={"managed_by": "gke", "neg_name": group_name},
-                                            classification="journey_linked",
-                                            status="active",
-                                            first_seen=now_iso,
-                                            last_seen=now_iso,
-                                        )
-                                    )
                                 edges.append(
                                     DiscoveredEdgeDoc(
                                         doc_id=f"{bs_doc_id}__to__{dep_doc_id}",

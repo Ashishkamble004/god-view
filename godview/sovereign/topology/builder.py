@@ -248,17 +248,15 @@ class TopologyBuilder:
             # Status evaluation
             if inc_open > 0:
                 status: TopologyStatus = "red"
+            elif getattr(s, "status", "active") == "gone":
+                status = "red"
             elif err is not None and err > 0.02:
                 status = "red"
             elif p95 is not None and p95 > 3500.0:
                 status = "red"
             elif err is not None and err > 0.005:
                 status = "amber"
-            elif getattr(s, "status", "active") == "gone":
-                status = "red"
-            elif getattr(s, "status", "active") == "active":
-                status = "green"
-            elif rps is not None or p95 is not None:
+            elif (rps is not None and rps > 0) or (p95 is not None and p95 > 0):
                 status = "green"
             else:
                 status = "unknown"
