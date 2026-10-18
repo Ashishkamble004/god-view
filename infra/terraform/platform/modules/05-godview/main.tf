@@ -266,6 +266,10 @@ resource "google_cloud_run_v2_service" "sovereign" {
         ])
       }
       env {
+        name  = "GODVIEW_TRACE_PRINCIPALS"
+        value = "${var.runtime_sa_email},${var.sense_sa_email}"
+      }
+      env {
         name  = "GODVIEW_BUDGET_APPLICATION_USD"
         value = tostring(var.token_budget_daily_application_usd)
       }

@@ -162,8 +162,8 @@ terraform -chdir=infra/terraform/platform apply -input=false \
   -target=module.godview.google_monitoring_alert_policy.sovereign_heartbeat
 ```
 
-### Step 1e: Apply Firestore TTL Policy & Sovereign OIDC / Service Principals Environment (Rev 8)
-Apply the Firestore TTL policy on `change_events.expires_at` and update `god-view-sovereign` environment variables (`GODVIEW_SOVEREIGN_URL`, `SERVICE_URL`, `GODVIEW_SERVICE_PRINCIPALS`):
+### Step 1e: Apply Firestore TTL Policy & Sovereign OIDC / Service Principals Environment (Rev 8/9)
+Apply the Firestore TTL policy on `change_events.expires_at` and update `god-view-sovereign` environment variables (`GODVIEW_SOVEREIGN_URL`, `SERVICE_URL`, `GODVIEW_SERVICE_PRINCIPALS`, `GODVIEW_TRACE_PRINCIPALS`):
 ```bash
 terraform -chdir=infra/terraform/platform apply -input=false \
   -target=module.data.google_firestore_field.change_events_ttl \

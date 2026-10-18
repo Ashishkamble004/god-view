@@ -156,6 +156,10 @@
     - `SERVICE_URL`: alias pointing to the Sovereign service URL.
     - `GODVIEW_SERVICE_PRINCIPALS`: exact project-qualified comma-separated service account emails: `sense_sa_email`, `act_sa_email`, and Monitoring notification SA (`service-769002985772@gcp-sa-monitoring-notification.iam.gserviceaccount.com`). Tenant runtime SA, deploy SA, and internal GCP agent identities excluded per verifier-edge #99.
 
+### Rev 9 — 2026-10-18 — Trace Exporter Principals Environment
+- **Module `05-godview`**:
+  - Added environment variable `GODVIEW_TRACE_PRINCIPALS` = `${var.runtime_sa_email},${var.sense_sa_email}` to `google_cloud_run_v2_service.sovereign` for in-app authorization of OTLP spans on `POST /v1/traces` (addressing verifier-core #128 item 6).
+
 ## v5 deploy log
 
 - **2026-10-17T17:52:45Z**
