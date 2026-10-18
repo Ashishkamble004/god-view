@@ -321,10 +321,6 @@ def build_router(ctx: Any) -> APIRouter:
             "ok": True,
             "kill_switch_enabled": body.enabled,
             "target_policy": target_policy,
-            "tenant_paused": body.enabled,
-            "simulator_enabled": not body.enabled,
-            "active_drills_cleared": 1 if body.enabled else 0,
-            "cloud_event_type": "godview.operator.kill_switch",
             "execution": exec_res.model_dump(mode="json"),
         }
 
@@ -597,8 +593,6 @@ def build_router(ctx: Any) -> APIRouter:
         return {
             "ok": True,
             "hibernate_enabled": body.enabled,
-            "sentinel_cadence_s": 60 if body.enabled else 10,
-            "job_triggered": "god-view-hibernate-job",
             "job_name": job_name,
         }
 

@@ -282,9 +282,19 @@ class TrustGate:
             rec.model_copy(update={"whitelisted": True, "whitelisted_by": cleaned_principal})
         )
 
-    def record_bad_outcome(self, agent_id: str, action_type: str, reason: str) -> TrustRecord:
+    def record_bad_outcome(
+        self,
+        agent_id: str,
+        action_type: str | None = None,
+        reason: str | None = None,
+        *,
+        capability_id: str | None = None,
+        failure_reason: str | None = None,
+    ) -> TrustRecord:
         """Reset action type to L1 (not level - 1) and increment regressions on bad outcome (Decision A10)."""
-        rec = self.get_or_create_record(agent_id, action_type)
+        effective_action = action_type or capability_id or "unknown"
+        effective_reason = reason or failure_reason or "Remediation failed verification"
+        rec = self.get_or_create_record(agent_id, effective_action)
         counters = rec.counters.model_copy(
             update={
                 "regressions": rec.counters.regressions + 1,
@@ -294,7 +304,7 @@ class TrustGate:
         return self._transition(
             rec,
             1,
-            reason,
+            effective_reason,
             counters=counters,
             whitelisted=False,
         )

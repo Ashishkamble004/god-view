@@ -18,7 +18,6 @@ from godview_shared.contracts import TrustViolation
 from pydantic import BaseModel, Field
 
 from godview.sovereign.remediation import (
-    BaseExecutor,
     ExecutionResult,
     NoExecutorError,
     RemediationDispatcher,
@@ -27,58 +26,6 @@ from godview.sovereign.remediation import (
 from godview.sovereign.trust_ladder import TrustGate
 
 logger = logging.getLogger(__name__)
-
-
-class _CallableBaseExecutor(BaseExecutor):
-    def __init__(self, fn: Any):
-        self._fn = fn
-
-    async def execute(
-        self,
-        ctx: Any,
-        args: dict[str, Any],
-        target_resource: str,
-        *,
-        agent_id: str | None = None,
-        **kwargs: Any,
-    ) -> ExecutionResult:
-        import inspect
-
-        try:
-            res = self._fn(**args)
-        except TypeError:
-            clean_args = {k: v for k, v in args.items() if k != "capability_id"}
-            try:
-                res = self._fn(**clean_args)
-            except TypeError:
-                res = self._fn()
-        if inspect.isawaitable(res):
-            res = await res
-        return ExecutionResult(ok=True, after=res, verification=[])
-
-
-class _AdapterBaseExecutor(BaseExecutor):
-    def __init__(self, adapter: Any, cap_id: str):
-        self._adapter = adapter
-        self._cap_id = cap_id
-
-    async def execute(
-        self,
-        ctx: Any,
-        args: dict[str, Any],
-        target_resource: str,
-        *,
-        agent_id: str | None = None,
-        **kwargs: Any,
-    ) -> ExecutionResult:
-        res = await self._adapter.execute_capability(self._cap_id, args)
-        payload = {
-            "adapter_family": getattr(self._adapter, "family", "unknown"),
-            "adapter_result": res,
-        }
-        if isinstance(res, dict):
-            payload.update(res)
-        return ExecutionResult(ok=True, after=payload, verification=[])
 
 
 class CapabilityInvokeRequest(BaseModel):
@@ -150,22 +97,6 @@ def build_router(ctx: Any) -> APIRouter:
         dispatcher = RemediationDispatcher()
         if hasattr(ctx, "__dict__"):
             ctx.dispatcher = dispatcher
-
-    if hasattr(ctx, "executors") and isinstance(ctx.executors, dict):
-        for cid, fn in ctx.executors.items():
-            if cid not in dispatcher._executors:
-                dispatcher.register_executor(cid, _CallableBaseExecutor(fn))
-
-    if hasattr(ctx, "adapters") and isinstance(ctx.adapters, list):
-        for adp in ctx.adapters:
-            caps = (
-                adp.capabilities()
-                if callable(getattr(adp, "capabilities", None))
-                else getattr(adp, "capabilities", ())
-            )
-            for cid in caps:
-                if cid not in dispatcher._executors:
-                    dispatcher.register_executor(cid, _AdapterBaseExecutor(adp, cid))
 
     trust_gate: TrustGate
     if hasattr(ctx, "trust_gate") and ctx.trust_gate is not None:

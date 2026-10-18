@@ -262,12 +262,6 @@ def build_router(ctx: Any) -> APIRouter:
 
             await _trigger_approval_decided_hook(updated_card)
 
-            # Record recommendation correct in TrustGate (Plan §3.4.3)
-            try:
-                trust_gate.record_recommendation_correct(updated_card.agent_id, updated_card.capability)
-            except Exception as e:
-                logger.warning("Failed to record recommendation correct: %s", e)
-
             # Execute the approved remediation using the card's stored parameters
             card_args = getattr(updated_card, "args", {}) or {}
             exec_result: ExecutionResult | None = None
@@ -290,14 +284,13 @@ def build_router(ctx: Any) -> APIRouter:
                     verification=[],
                     error=str(exec_err),
                 )
+
+            # Record trust credit strictly after verified execution (Coordinator #95, Verifier-Core #129 item 5)
+            if exec_result.ok:
                 try:
-                    trust_gate.record_bad_outcome(
-                        agent_id=updated_card.agent_id,
-                        capability_id=updated_card.capability,
-                        failure_reason=str(exec_err),
-                    )
-                except Exception as rec_err:
-                    logger.warning("Failed to record bad outcome: %s", rec_err)
+                    trust_gate.record_recommendation_correct(updated_card.agent_id, updated_card.capability)
+                except Exception as e:
+                    logger.warning("Failed to record recommendation correct in TrustGate: %s", e)
 
             # Write ExecutionResult onto the card in docs store
             docs_store = getattr(ctx, "docs", None)

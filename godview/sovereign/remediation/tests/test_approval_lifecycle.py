@@ -271,3 +271,60 @@ async def test_approval_decided_hook_invoked() -> None:
             headers={"X-Goog-Authenticated-User-Email": "operator@example.com"},
         )
         assert app_id in hook_called
+
+
+@pytest.mark.unit
+async def test_approval_trust_credit_order_and_bad_outcome_demotion() -> None:
+    """Verifier-core #129 item 5: credit awarded only after verified execution; failure demotes via record_bad_outcome."""
+    ctx = MockContext()
+    ctx.env_mode = "hermetic"
+
+    # Pre-promote agent to L2
+    rec = ctx.trust_gate.get_or_create_record("platform__env-01", "armor.set_waf_sensitivity")
+    ctx.trust_gate._transition(rec, 2, "pre-promoted")
+
+    # Case 1: Execution fails verification -> bad outcome recorded, demoted to L1
+    failing_armor = MagicMock()
+    failing_armor.execute = AsyncMock(
+        return_value=ExecutionResult(
+            ok=False,
+            before={"sensitivity": 4},
+            after={"sensitivity": 1},
+            verification=[VerificationCheck(check="probe", passed=False)],
+            error="Canary probe timed out",
+        )
+    )
+    ctx.dispatcher = RemediationDispatcher()
+    ctx.dispatcher.register_executor("armor.set_waf_sensitivity", failing_armor)
+
+    app = FastAPI()
+    app.include_router(build_router(ctx))
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # Create card
+        create_resp = await client.post(
+            "/approvals",
+            headers={"X-Goog-Authenticated-User-Email": "operator@example.com"},
+            json={
+                "incident_id": "inc-bad-01",
+                "agent_id": "platform__env-01",
+                "capability_id": "armor.set_waf_sensitivity",
+                "target_resource": "edge-security-policy",
+                "trust_level_required": 2,
+                "narrative": "Failing remediation",
+            },
+        )
+        card_id = create_resp.json()["approval_id"]
+
+        # Approve card
+        approve_resp = await client.post(
+            f"/approvals/{card_id}:approve",
+            headers={"X-Goog-Authenticated-User-Email": "operator@example.com"},
+        )
+        assert approve_resp.status_code == 200
+        # Demoted to L1 due to bad outcome
+        rec_after = ctx.trust_gate.get_or_create_record("platform__env-01", "armor.set_waf_sensitivity")
+        assert rec_after.level == 1
+        assert rec_after.counters.regressions == 1
+        assert rec_after.counters.approved_executions == 0

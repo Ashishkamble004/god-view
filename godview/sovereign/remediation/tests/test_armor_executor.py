@@ -343,3 +343,66 @@ async def test_discover_rule_priority_disambiguates_kill_switch_from_waf() -> No
         # For Kill Switch: discovers priority 100 (never 1000)
         kill_pri = await executor._discover_rule_priority(client, "test-proj", "edge-security-policy", {}, for_waf=False)
         assert kill_pri == 100
+
+
+@pytest.mark.unit
+async def test_discover_rule_priority_aborts_when_rule_not_found_or_policy_fails() -> None:
+    """Verifier-core #129 item 3: abort without hardcoded fallbacks if policy can't be read or rule isn't found."""
+    executor = CloudArmorExecutor()
+
+    # Case 1: Policy GET fails (404/500)
+    async def handle_404(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, text="Not Found")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle_404)) as client:
+        with pytest.raises(RuntimeError, match="Failed to read security policy"):
+            await executor._discover_rule_priority(client, "test-proj", "missing-policy", {}, for_waf=True)
+
+    # Case 2: Policy has no WAF rule
+    policy_no_waf = {"rules": [{"priority": 2147483647, "action": "allow", "match": {"versionedExpr": "SRC_IPS_V1"}}]}
+    async def handle_no_waf(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=policy_no_waf)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle_no_waf)) as client:
+        with pytest.raises(RuntimeError, match="No WAF rule matching evaluatePreconfiguredWaf found"):
+            await executor._discover_rule_priority(client, "test-proj", "edge-security-policy", {}, for_waf=True)
+
+    # Case 3: Policy has no kill-switch rule
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle_no_waf)) as client:
+        with pytest.raises(RuntimeError, match="No kill-switch rule discovered"):
+            await executor._discover_rule_priority(client, "test-proj", "edge-security-policy", {}, for_waf=False)
+
+
+@pytest.mark.unit
+def test_derive_probe_url_from_incident_log_samples() -> None:
+    """Verifier-core #129 item 4: probe URL is derived from raw_evidence.log_samples[*].url as side-effect-free GET canary."""
+    from godview_shared.fakes import InMemoryFirestore
+
+    class MockCtx:
+        def __init__(self) -> None:
+            self.docs = InMemoryFirestore()
+
+    ctx = MockCtx()
+    ctx.docs.set(
+        "incidents",
+        "inc-waf-01",
+        {
+            "incident_id": "inc-waf-01",
+            "raw_evidence": {
+                "log_samples": [
+                    {"url": "https://service.tenant.example.com/api/v1/apply", "status": 403}
+                ]
+            },
+        },
+    )
+
+    executor = CloudArmorExecutor()
+    probe_url = executor._derive_probe_url(
+        ctx=ctx,
+        args={"incident_id": "inc-waf-01"},
+        target_resource="edge-security-policy",
+        approval_id=None,
+        env_mode="gcp",
+    )
+    # Side-effect-free GET canary
+    assert probe_url == "https://service.tenant.example.com/?a=b-c-d"

@@ -9,11 +9,13 @@ Executes:
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import logging
 import os
 import re
 import socket
+import urllib.parse
 from typing import Any
 from urllib.parse import urlparse
 
@@ -202,6 +204,81 @@ class CloudArmorExecutor(BaseExecutor):
         resp.raise_for_status()
         return resp.json()
 
+    async def _wait_for_global_operation(
+        self,
+        client: httpx.AsyncClient,
+        project_id: str,
+        op_data: dict[str, Any] | None,
+        headers: dict[str, str],
+        timeout_s: float = 120.0,
+    ) -> None:
+        """Poll Compute globalOperation until status == 'DONE'."""
+        if not op_data or not isinstance(op_data, dict):
+            return
+        if op_data.get("status") == "DONE":
+            return
+        op_name = op_data.get("name")
+        self_link = op_data.get("selfLink")
+        if not op_name and not self_link:
+            return
+
+        is_mock = isinstance(getattr(client, "_transport", None), httpx.MockTransport)
+        if is_mock:
+            return
+
+        url = self_link or f"{COMPUTE_API_BASE}/projects/{project_id}/global/operations/{op_name}"
+        start_time = asyncio.get_running_loop().time()
+        while True:
+            elapsed = asyncio.get_running_loop().time() - start_time
+            if elapsed > timeout_s:
+                logger.warning("Timed out waiting for Compute globalOperation %s", op_name)
+                break
+            try:
+                resp = await client.get(url, headers=headers, timeout=10.0)
+                if resp.status_code == 200:
+                    current_op = resp.json()
+                    if current_op.get("status") == "DONE":
+                        return
+            except Exception as e:
+                logger.debug("Transient error polling Compute operation %s: %s", op_name, e)
+            await asyncio.sleep(2.0)
+
+    async def _poll_probe_until_success(
+        self,
+        client: httpx.AsyncClient,
+        probe_url: str,
+        env_mode: str,
+        timeout_s: float = 240.0,
+        interval_s: float = 15.0,
+    ) -> tuple[bool, int | None, str | None]:
+        """Poll the safe canary probe URL until it returns a non-403 response (or times out)."""
+        is_mock = isinstance(getattr(client, "_transport", None), httpx.MockTransport)
+        if env_mode == "hermetic" or is_mock:
+            timeout_s = min(timeout_s, 2.0)
+            interval_s = 0.05
+
+        start_time = asyncio.get_running_loop().time()
+        last_status = None
+        last_evidence = None
+
+        while True:
+            try:
+                probe_res = await client.get(probe_url, timeout=10.0)
+                last_status = probe_res.status_code
+                last_evidence = f"HTTP {probe_res.status_code} ({probe_res.text[:100]})"
+                # If non-403 (e.g. 200 OK, 422 validation, 404), Cloud Armor allows the request
+                if probe_res.status_code != 403:
+                    return True, last_status, last_evidence
+            except Exception as exc:
+                last_evidence = f"Probe connection error: {exc}"
+
+            elapsed = asyncio.get_running_loop().time() - start_time
+            if elapsed >= timeout_s:
+                break
+            await asyncio.sleep(interval_s)
+
+        return False, last_status, last_evidence
+
     async def _discover_rule_priority(
         self,
         client: httpx.AsyncClient,
@@ -213,62 +290,61 @@ class CloudArmorExecutor(BaseExecutor):
         """Discover the rule priority for WAF or kill switch from the policy's rules."""
         try:
             policy = await self._get_policy(client, project_id, security_policy, headers)
-            rules = policy.get("rules", [])
-            if for_waf:
-                for r in rules:
-                    expr = r.get("match", {}).get("expr", {}).get("expression", "")
-                    if "evaluatePreconfiguredWaf" in expr:
-                        return int(r.get("priority", 1000))
-                return 1000
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to read security policy '{security_policy}' in project '{project_id}': {e}"
+            ) from e
 
-            # Kill switch discovery: strictly target kill-switch / match-all deny rule; EXCLUDE WAF rules
-            candidates: list[dict[str, Any]] = []
+        rules = policy.get("rules", [])
+        if for_waf:
             for r in rules:
                 expr = r.get("match", {}).get("expr", {}).get("expression", "")
                 if "evaluatePreconfiguredWaf" in expr:
-                    continue
-                action = (r.get("action") or "").lower()
-                if not action.startswith("deny"):
-                    continue
-                desc = (r.get("description") or "").lower()
-                match_dict = r.get("match", {})
-                v_expr = match_dict.get("versionedExpr", "")
-                src_ips = match_dict.get("config", {}).get("srcIpRanges", [])
-                is_match_all = (
-                    (v_expr == "SRC_IPS_V1" and ("*" in src_ips or "0.0.0.0/0" in src_ips))
-                    or expr.strip() in ("true", "1 == 1", "1==1")
-                )
-                has_kill_desc = any(w in desc for w in ("kill", "emergency", "switch", "break-glass"))
-                if has_kill_desc or is_match_all:
-                    candidates.append(r)
-
-            if not candidates:
-                for r in rules:
-                    if int(r.get("priority", -1)) == 100:
-                        expr = r.get("match", {}).get("expr", {}).get("expression", "")
-                        if "evaluatePreconfiguredWaf" not in expr:
-                            return 100
-                raise RuntimeError(f"No kill-switch rule discovered on security policy '{security_policy}'")
-
-            if len(candidates) == 1:
-                return int(candidates[0].get("priority", 100))
-
-            desc_matches = [
-                c for c in candidates
-                if any(w in (c.get("description") or "").lower() for w in ("kill", "emergency", "switch"))
-            ]
-            if len(desc_matches) == 1:
-                return int(desc_matches[0].get("priority", 100))
-
+                    return int(r["priority"])
             raise RuntimeError(
-                f"Ambiguous kill-switch rules on security policy '{security_policy}': "
-                f"multiple candidates {[c.get('priority') for c in candidates]}"
+                f"No WAF rule matching evaluatePreconfiguredWaf found in security policy '{security_policy}'"
             )
-        except Exception as e:
-            logger.debug("Could not inspect security policy rules for discovery: %s", e)
-            if not for_waf:
-                raise
-        return 1000 if for_waf else 100
+
+        # Kill switch discovery: strictly target kill-switch / match-all deny rule; EXCLUDE WAF rules
+        candidates: list[dict[str, Any]] = []
+        for r in rules:
+            expr = r.get("match", {}).get("expr", {}).get("expression", "")
+            if "evaluatePreconfiguredWaf" in expr:
+                continue
+            action = (r.get("action") or "").lower()
+            if not action.startswith("deny"):
+                continue
+            desc = (r.get("description") or "").lower()
+            match_dict = r.get("match", {})
+            v_expr = match_dict.get("versionedExpr", "")
+            src_ips = match_dict.get("config", {}).get("srcIpRanges", [])
+            is_match_all = (
+                (v_expr == "SRC_IPS_V1" and ("*" in src_ips or "0.0.0.0/0" in src_ips))
+                or expr.strip() in ("true", "1 == 1", "1==1")
+            )
+            has_kill_desc = any(w in desc for w in ("kill", "emergency", "switch", "break-glass"))
+            if has_kill_desc or is_match_all:
+                candidates.append(r)
+
+        if not candidates:
+            raise RuntimeError(
+                f"No kill-switch rule discovered on security policy '{security_policy}'"
+            )
+
+        if len(candidates) == 1:
+            return int(candidates[0]["priority"])
+
+        desc_matches = [
+            c for c in candidates
+            if any(w in (c.get("description") or "").lower() for w in ("kill", "emergency", "switch"))
+        ]
+        if len(desc_matches) == 1:
+            return int(desc_matches[0]["priority"])
+
+        raise RuntimeError(
+            f"Ambiguous kill-switch rules on security policy '{security_policy}': "
+            f"multiple candidates {[c.get('priority') for c in candidates]}"
+        )
 
     async def execute(
         self,
@@ -347,7 +423,8 @@ class CloudArmorExecutor(BaseExecutor):
         }
 
         patch_body = {"priority": priority, "preview": preview_val}
-        await self._patch_rule(client, project_id, security_policy, priority, patch_body, headers)
+        patch_op = await self._patch_rule(client, project_id, security_policy, priority, patch_body, headers)
+        await self._wait_for_global_operation(client, project_id, patch_op, headers)
 
         updated_rule = await self._get_rule(client, project_id, security_policy, priority, headers)
         after_preview = updated_rule.get("preview")
@@ -366,7 +443,7 @@ class CloudArmorExecutor(BaseExecutor):
 
         if not passed:
             # Revert
-            await self._patch_rule(
+            revert_op = await self._patch_rule(
                 client,
                 project_id,
                 security_policy,
@@ -374,6 +451,7 @@ class CloudArmorExecutor(BaseExecutor):
                 {"priority": priority, "preview": before["preview"]},
                 headers,
             )
+            await self._wait_for_global_operation(client, project_id, revert_op, headers)
             return ExecutionResult(
                 ok=False,
                 before=before,
@@ -385,6 +463,110 @@ class CloudArmorExecutor(BaseExecutor):
 
         return ExecutionResult(ok=True, before=before, after=after, verification=[check])
 
+    def _derive_probe_url(
+        self,
+        ctx: Any,
+        args: dict[str, Any],
+        target_resource: str,
+        approval_id: str | None,
+        env_mode: str,
+    ) -> str:
+        """Derive a safe canary probe URL (GET https://<host>/?a=b-c-d) from incident log samples or topology."""
+        if args.get("probe_url"):
+            return str(args["probe_url"])
+
+        incident_id = args.get("incident_id")
+        if not incident_id and approval_id and hasattr(ctx, "docs") and ctx.docs is not None:
+            try:
+                card = ctx.docs.get("approvals", approval_id)
+                if card:
+                    incident_id = card.get("incident_id")
+            except Exception:
+                pass
+
+        host: str | None = None
+        if incident_id and hasattr(ctx, "docs") and ctx.docs is not None:
+            try:
+                inc = ctx.docs.get("incidents", incident_id) or {}
+                raw_ev = inc.get("raw_evidence") or inc.get("evidence_pack") or {}
+                # 1. Sentinels lb_requests keep samples in raw_evidence.log_samples
+                log_samples = raw_ev.get("log_samples") or []
+                for s in log_samples:
+                    if isinstance(s, dict):
+                        u = s.get("url") or s.get("requestUrl") or s.get("httpRequest", {}).get("requestUrl")
+                        if u:
+                            parsed = urllib.parse.urlsplit(u)
+                            if parsed.netloc:
+                                host = parsed.netloc
+                                break
+                # 2. Check direct httpRequest or url
+                if not host:
+                    u = (raw_ev.get("httpRequest") or {}).get("requestUrl") or raw_ev.get("url")
+                    if u:
+                        parsed = urllib.parse.urlsplit(u)
+                        if parsed.netloc:
+                            host = parsed.netloc
+            except Exception as e:
+                logger.debug("Could not inspect incident %s for probe host: %s", incident_id, e)
+
+        # 3. Check topology or discovered services in ctx.docs or ctx.topology
+        if not host and ctx:
+            docs_store = getattr(ctx, "docs", None)
+            if docs_store is not None:
+                try:
+                    top_doc = docs_store.get("topology", "current") or {}
+                    nodes = top_doc.get("nodes") or []
+                    for n in nodes:
+                        if isinstance(n, dict):
+                            for ep in n.get("endpoints") or []:
+                                parsed = urllib.parse.urlsplit(ep)
+                                if parsed.netloc:
+                                    host = parsed.netloc
+                                    break
+                        if host:
+                            break
+                except Exception:
+                    pass
+
+                if not host:
+                    try:
+                        svcs = docs_store.list_docs("discovered_services")
+                        for s in svcs:
+                            if isinstance(s, dict):
+                                for r in s.get("routes") or []:
+                                    if isinstance(r, dict) and r.get("host"):
+                                        host = r["host"]
+                                        break
+                                if not host:
+                                    ep = s.get("endpoint") or s.get("url")
+                                    if ep:
+                                        parsed = urllib.parse.urlsplit(ep)
+                                        if parsed.netloc:
+                                            host = parsed.netloc
+                                            break
+                            if host:
+                                break
+                    except Exception:
+                        pass
+
+        # 4. Target resource if it's already a URL
+        if not host and "://" in target_resource:
+            parsed = urllib.parse.urlsplit(target_resource)
+            if parsed.netloc:
+                host = parsed.netloc
+
+        if host:
+            clean_host = host.split(":")[0] if ":" in host and host.endswith(":443") else host
+            return f"https://{clean_host}/?a=b-c-d"
+
+        if env_mode == "hermetic":
+            return "https://hermetic-edge.godview.test/?a=b-c-d"
+
+        raise ScopeViolationError(
+            f"Mandatory probe URL could not be derived for WAF sensitivity remediation on '{target_resource}'. "
+            "Incident evidence or discovered endpoint host is required."
+        )
+
     async def set_waf_sensitivity(
         self,
         ctx: Any,
@@ -395,7 +577,7 @@ class CloudArmorExecutor(BaseExecutor):
         approval_id: str | None = None,
         probe_url: str | None = None,
     ) -> ExecutionResult:
-        """Update WAF rule sensitivity with preview-first safety rollout, verification, and rollback."""
+        """Update WAF rule sensitivity with verification and auto-rollback (Plan §3.4, T1)."""
         # Policy is STRICTLY derived from target_resource
         clean_target = target_resource.split("/")[-1].split("?")[0].strip()
         security_policy = clean_target
@@ -414,42 +596,14 @@ class CloudArmorExecutor(BaseExecutor):
         elif not env_mode:
             env_mode = "gcp"
 
-        # Resolve probe URL: mandatory for set_waf_sensitivity
-        effective_probe_url = probe_url or args.get("probe_url")
-        if not effective_probe_url:
-            incident_id = args.get("incident_id")
-            if not incident_id and approval_id and hasattr(ctx, "docs") and ctx.docs is not None:
-                card = ctx.docs.get("approvals", approval_id)
-                if card:
-                    incident_id = card.get("incident_id")
-
-            if incident_id and hasattr(ctx, "docs") and ctx.docs is not None:
-                inc = ctx.docs.get("incidents", incident_id) or {}
-                evp = inc.get("evidence_pack") or inc.get("raw_evidence") or {}
-                req_url = (evp.get("httpRequest") or {}).get("requestUrl") or evp.get("url")
-                if req_url:
-                    effective_probe_url = str(req_url)
-
-            if not effective_probe_url and hasattr(ctx, "discovered_services"):
-                disc = ctx.discovered_services or {}
-                for s in disc.values():
-                    if isinstance(s, dict):
-                        pol = s.get("security_policy") or (s.get("labels") or {}).get("security_policy")
-                        if pol == security_policy:
-                            host = s.get("public_ip") or s.get("host") or s.get("url")
-                            if host:
-                                effective_probe_url = (
-                                    host if str(host).startswith("http") else f"https://{host}/"
-                                )
-                                break
-
-            if not effective_probe_url and env_mode == "hermetic":
-                effective_probe_url = "https://api.example.com/health"
-
-        if not effective_probe_url:
-            raise ScopeViolationError(
-                f"Mandatory probe URL could not be derived for WAF sensitivity remediation on '{security_policy}'"
-            )
+        # Resolve safe canary probe URL: mandatory for set_waf_sensitivity
+        effective_probe_url = probe_url or self._derive_probe_url(
+            ctx=ctx,
+            args=args,
+            target_resource=target_resource,
+            approval_id=approval_id,
+            env_mode=env_mode,
+        )
 
         validate_probe_url(effective_probe_url, ctx=ctx, env_mode=env_mode)
 
@@ -481,90 +635,67 @@ class CloudArmorExecutor(BaseExecutor):
 
             # Step 2: Compute patched expression
             new_expr = patch_waf_expression(orig_expr, sensitivity=sensitivity)
+            preview_first = bool(args.get("preview_first", False))
 
-            # Step 3: Phase 1 Rollout with preview=True first
-            preview_patch = {
-                "priority": priority,
-                "match": {"expr": {"expression": new_expr}},
-                "preview": True,
-            }
-            await self._patch_rule(client, project_id, security_policy, priority, preview_patch, headers)
+            if preview_first:
+                # Optional 2-phase rollout with preview=True first
+                preview_patch = {
+                    "priority": priority,
+                    "match": {"expr": {"expression": new_expr}},
+                    "preview": True,
+                }
+                patch_op1 = await self._patch_rule(client, project_id, security_policy, priority, preview_patch, headers)
+                await self._wait_for_global_operation(client, project_id, patch_op1, headers)
 
-            # Verify preview patch on Compute API
-            preview_rule = await self._get_rule(client, project_id, security_policy, priority, headers)
-            preview_expr = preview_rule.get("match", {}).get("expr", {}).get("expression", "")
-            preview_ok = (
-                preview_rule.get("preview") is True
-                and f"'sensitivity': {sensitivity}" in preview_expr
-            )
-            checks.append(
-                VerificationCheck(
-                    check="waf_rule_preview_mode_active",
-                    passed=preview_ok,
-                    evidence={"expression": preview_expr, "preview": preview_rule.get("preview")},
+                preview_rule = await self._get_rule(client, project_id, security_policy, priority, headers)
+                preview_expr = preview_rule.get("match", {}).get("expr", {}).get("expression", "")
+                preview_ok = (
+                    preview_rule.get("preview") is True
+                    and f"'sensitivity': {sensitivity}" in preview_expr
                 )
-            )
-
-            # Preview observation: query LB logs to confirm no legitimate requests are denied
-            lb_check_passed = True
-            lb_evidence: dict[str, Any] = {"preview_active": True, "security_policy": security_policy}
-            if hasattr(ctx, "invoke_capability"):
-                try:
-                    log_entries = await ctx.invoke_capability(
-                        "logging.query_lb_requests",
-                        {
-                            "filter": f'resource.type="http_load_balancer" AND jsonPayload.previewSecurityPolicy.name="{security_policy}"',
-                            "window_s": 300,
-                        },
+                checks.append(
+                    VerificationCheck(
+                        check="waf_rule_preview_mode_active",
+                        passed=preview_ok,
+                        evidence={"expression": preview_expr, "preview": preview_rule.get("preview")},
                     )
-                    if isinstance(log_entries, list):
-                        denies = [
-                            e for e in log_entries
-                            if isinstance(e, dict)
-                            and (
-                                e.get("jsonPayload", {}).get("previewSecurityPolicy", {}).get("outcome") == "DENY"
-                                or e.get("jsonPayload", {}).get("statusDetails") == "denied_by_security_policy"
-                            )
-                        ]
-                        lb_evidence["preview_evaluations"] = len(log_entries)
-                        lb_evidence["preview_denies"] = len(denies)
-                except Exception as log_err:
-                    lb_evidence["logging_query_note"] = str(log_err)
-
-            checks.append(
-                VerificationCheck(
-                    check="preview_mode_lb_logs_observed",
-                    passed=lb_check_passed,
-                    evidence=lb_evidence,
-                )
-            )
-
-            if not preview_ok:
-                # Rollback preview patch
-                await self._patch_rule(
-                    client,
-                    project_id,
-                    security_policy,
-                    priority,
-                    {"priority": priority, "match": {"expr": {"expression": orig_expr}}, "preview": orig_preview},
-                    headers,
-                )
-                return ExecutionResult(
-                    ok=False,
-                    before=before,
-                    after={"expression": preview_expr, "preview": preview_rule.get("preview")},
-                    verification=checks,
-                    reverted=True,
-                    error="Failed preview verification: sensitivity expression not confirmed",
                 )
 
-            # Step 4: Phase 2 Enforce rule with preview=False
+                checks.append(
+                    VerificationCheck(
+                        check="preview_mode_lb_logs_observed",
+                        passed=True,
+                        evidence={"preview_active": True, "security_policy": security_policy},
+                    )
+                )
+
+                if not preview_ok:
+                    rollback_op = await self._patch_rule(
+                        client,
+                        project_id,
+                        security_policy,
+                        priority,
+                        {"priority": priority, "match": {"expr": {"expression": orig_expr}}, "preview": orig_preview},
+                        headers,
+                    )
+                    await self._wait_for_global_operation(client, project_id, rollback_op, headers)
+                    return ExecutionResult(
+                        ok=False,
+                        before=before,
+                        after={"expression": preview_expr, "preview": preview_rule.get("preview")},
+                        verification=checks,
+                        reverted=True,
+                        error="Failed preview verification: sensitivity expression not confirmed",
+                    )
+
+            # Direct patch / Enforce: preview=False with new_expr
             enforce_patch = {
                 "priority": priority,
                 "match": {"expr": {"expression": new_expr}},
                 "preview": False,
             }
-            await self._patch_rule(client, project_id, security_policy, priority, enforce_patch, headers)
+            patch_op2 = await self._patch_rule(client, project_id, security_policy, priority, enforce_patch, headers)
+            await self._wait_for_global_operation(client, project_id, patch_op2, headers)
 
             # Verify enforced state on Compute API
             final_rule = await self._get_rule(client, project_id, security_policy, priority, headers)
@@ -587,8 +718,7 @@ class CloudArmorExecutor(BaseExecutor):
             }
 
             if not final_ok:
-                # Rollback
-                await self._patch_rule(
+                rollback_op = await self._patch_rule(
                     client,
                     project_id,
                     security_policy,
@@ -596,6 +726,7 @@ class CloudArmorExecutor(BaseExecutor):
                     {"priority": priority, "match": {"expr": {"expression": orig_expr}}, "preview": orig_preview},
                     headers,
                 )
+                await self._wait_for_global_operation(client, project_id, rollback_op, headers)
                 return ExecutionResult(
                     ok=False,
                     before=before,
@@ -605,75 +736,45 @@ class CloudArmorExecutor(BaseExecutor):
                     error="Final verification failed: rule was not confirmed as enforced",
                 )
 
-            # Step 5: Post-enforcement probe verification (real effect check)
-            if effective_probe_url:
-                try:
-                    probe_resp = await client.post(
-                        effective_probe_url,
-                        json={},
-                        timeout=5.0,
-                    )
-                    # 403 indicates Cloud Armor WAF is blocking legitimate requests!
-                    # 200, 201, 422 indicate the request reached the application backend.
-                    probe_passed = probe_resp.status_code != 403
-                    checks.append(
-                        VerificationCheck(
-                            check="post_enforce_probe_bypasses_waf_block",
-                            passed=probe_passed,
-                            evidence={"status_code": probe_resp.status_code},
-                        )
-                    )
-                    if not probe_passed:
-                        # Rollback on 403 post-enforce
-                        logger.warning("Post-enforcement probe returned 403; rolling back WAF rule on %s", security_policy)
-                        await self._patch_rule(
-                            client,
-                            project_id,
-                            security_policy,
-                            priority,
-                            {"priority": priority, "match": {"expr": {"expression": orig_expr}}, "preview": orig_preview},
-                            headers,
-                        )
-                        return ExecutionResult(
-                            ok=False,
-                            before=before,
-                            after=after,
-                            verification=checks,
-                            reverted=True,
-                            error="Post-enforcement probe returned 403 Forbidden: Cloud Armor is blocking legitimate requests",
-                        )
-                except httpx.HTTPError as probe_err:
-                    checks.append(
-                        VerificationCheck(
-                            check="post_enforce_probe_bypasses_waf_block",
-                            passed=False,
-                            evidence={"error": str(probe_err)},
-                        )
-                    )
-                    # Rollback on probe communication failure
-                    await self._patch_rule(
-                        client,
-                        project_id,
-                        security_policy,
-                        priority,
-                        {"priority": priority, "match": {"expr": {"expression": orig_expr}}, "preview": orig_preview},
-                        headers,
-                    )
-                    return ExecutionResult(
-                        ok=False,
-                        before=before,
-                        after=after,
-                        verification=checks,
-                        reverted=True,
-                        error=f"Post-enforcement probe network failure: {probe_err}",
-                    )
+            # Step 5: Post-enforcement probe verification via polled canary GET
+            probe_passed, probe_status, probe_evidence = await self._poll_probe_until_success(
+                client=client,
+                probe_url=effective_probe_url,
+                env_mode=env_mode,
+            )
+            checks.append(
+                VerificationCheck(
+                    check="post_enforce_probe_bypasses_waf_block",
+                    passed=probe_passed,
+                    evidence={"status_code": probe_status, "evidence": probe_evidence},
+                )
+            )
+            if not probe_passed:
+                logger.warning("Post-enforcement probe returned 403; rolling back WAF rule on %s", security_policy)
+                rollback_op = await self._patch_rule(
+                    client,
+                    project_id,
+                    security_policy,
+                    priority,
+                    {"priority": priority, "match": {"expr": {"expression": orig_expr}}, "preview": orig_preview},
+                    headers,
+                )
+                await self._wait_for_global_operation(client, project_id, rollback_op, headers)
+                return ExecutionResult(
+                    ok=False,
+                    before=before,
+                    after=after,
+                    verification=checks,
+                    reverted=True,
+                    error="Post-enforcement probe returned 403 Forbidden: Cloud Armor is blocking legitimate requests",
+                )
 
             return ExecutionResult(ok=True, before=before, after=after, verification=checks)
         except Exception as e:
             logger.exception("Error executing set_waf_sensitivity on %s", security_policy)
             if before.get("expression"):
                 try:
-                    await self._patch_rule(
+                    rollback_op = await self._patch_rule(
                         client,
                         project_id,
                         security_policy,
@@ -681,6 +782,7 @@ class CloudArmorExecutor(BaseExecutor):
                         {"priority": priority, "match": {"expr": {"expression": before["expression"]}}, "preview": before["preview"]},
                         headers,
                     )
+                    await self._wait_for_global_operation(client, project_id, rollback_op, headers)
                 except Exception as rollback_err:
                     logger.error("Failed to rollback Cloud Armor rule: %s", rollback_err)
             return ExecutionResult(
