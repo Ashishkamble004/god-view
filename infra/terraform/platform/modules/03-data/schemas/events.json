@@ -5,6 +5,7 @@
   {"name": "journey_id", "type": "STRING", "mode": "NULLABLE"},
   {"name": "trace_id", "type": "STRING", "mode": "NULLABLE"},
   {"name": "span_id", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "parent_span_id", "type": "STRING", "mode": "NULLABLE"},
   {"name": "service", "type": "STRING", "mode": "REQUIRED"},
   {"name": "operation", "type": "STRING", "mode": "NULLABLE"},
   {"name": "event_type", "type": "STRING", "mode": "REQUIRED"},

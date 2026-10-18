@@ -160,6 +160,10 @@
 - **Module `05-godview`**:
   - Added environment variable `GODVIEW_TRACE_PRINCIPALS` = `${var.runtime_sa_email},${var.sense_sa_email}` to `google_cloud_run_v2_service.sovereign` for in-app authorization of OTLP spans on `POST /v1/traces` (addressing verifier-core #128 item 6).
 
+### Rev 10 — 2026-10-18 — BigQuery Events Table parent_span_id Schema Addition
+- **Module `03-data`**:
+  - In `schemas/events.json`, added column `parent_span_id` (STRING NULLABLE) right after `span_id` to mirror the updated `LedgerEventRow` schema in `godview/ledger/schemas/events.json` (resolving verifier-edge #211 blocker).
+
 ## v5 deploy log
 
 - **2026-10-17T17:52:45Z**
@@ -206,6 +210,12 @@
   - **Command**: `./infra/deploy/deploy_run.sh god-view-sovereign us-central1-docker.pkg.dev/general-ak/god-view-containers/god-view-sovereign@sha256:33f61bd59024058bc154afad7b480a712540bda9561cb019152ce66fd0d1c213`
   - **Result**: Deployed v5 unified Sovereign image (Cloud Build `f2c48c20-0efd-4b72-b24f-cc818823902f`). Cloud Run deployed revision `god-view-sovereign-00010-9jz` (Ready, serving 100%). `/public/healthz` verified 200 OK: `mode=gcp`, real GCP stores (`FirestoreStore`, `BigQueryLedger`, `PubSubBus`, `AgentEngineRuntime`), 15/20 adapters healthy, and 4 loop heartbeats active.
   - **Rollback**: `gcloud run services update-traffic god-view-sovereign --to-revisions=god-view-sovereign-00008-l86=100 --project=general-ak --region=us-central1`
+
+- **2026-10-18T08:04:19Z**
+  - **Command**: `./infra/deploy/deploy_run.sh god-view-sovereign us-central1-docker.pkg.dev/general-ak/god-view-containers/god-view-sovereign@sha256:fb9f38720b173704505da8de37a889521dc964d157112c9ece0ebab1acf76815`
+  - **Result**: Deployed v5 Sovereign image (Cloud Build `3b51f364-7851-4d3f-bcdd-15b32b970514`) incorporating runtime-core rev 7 (BigQuery streaming insert json serialization + metadata-server OIDC uniqueId matching) and discovery rev 8 (eliminate post-hoc evidence synthesis + bundle reference validation). Cloud Run deployed revision `god-view-sovereign-00011-trb` (Ready, serving 100%). `/public/healthz` verified 200 OK: `mode=gcp`, real GCP stores (`FirestoreStore`, `BigQueryLedger`, `PubSubBus`, `AgentEngineRuntime`), 15/20 adapters healthy, 50 sentinels registered, and all 4 loop heartbeats active.
+  - **Rollback**: `gcloud run services update-traffic god-view-sovereign --to-revisions=god-view-sovereign-00010-9jz=100 --project=general-ak --region=us-central1`
+
 
 
 
