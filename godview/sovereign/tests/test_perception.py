@@ -198,11 +198,7 @@ async def test_identity_only_boot_and_six_step_self_awareness(
     by_name = {s["name"]: s for s in stored_services}
     assert by_name["svc-ingress-alpha-11"]["classification"] == "journey_linked"
     assert by_name["svc-legacy-readonly-99"]["classification"] == "other_read_only"
-    assert len(by_name["svc-ingress-alpha-11"]["purpose_embedding"]) == 768
-
-    # Batched LLM call count = 1 role inference call + 1 embedding batch call
-    assert organ.role_inference_calls == 1
-    assert organ.embedding_batch_calls == 1
+    assert by_name["svc-ingress-alpha-11"]["purpose_embedding"] is None
 
     # Step 5: Court spawn plan includes app, data, change, business_line, platform
     agent_types = {item["agent_type"] for item in report.spawn_plan}

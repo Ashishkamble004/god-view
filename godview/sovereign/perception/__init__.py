@@ -7,9 +7,7 @@ evidence-only business context inference, canonical topology graph, and zero pla
 
 from __future__ import annotations
 
-import hashlib
 import logging
-import math
 import os
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -33,14 +31,6 @@ from godview.sovereign.nervous_system import NervousSystemRouter
 from godview.sovereign.topology.builder import TopologyBuilder, TopologyReport
 
 logger = logging.getLogger("godview.sovereign.perception")
-
-
-def _deterministic_embedding_768(text: str) -> list[float]:
-    """Generate a deterministic, unit-normalized 768-dim vector for hermetic perception."""
-    digest = hashlib.sha256(text.encode("utf-8")).digest()
-    raw = [((digest[i % len(digest)] / 255.0) - 0.5) for i in range(768)]
-    norm = math.sqrt(sum(v * v for v in raw)) or 1.0
-    return [v / norm for v in raw]
 
 
 def resolve_runtime_identity(settings: GodViewSettings) -> dict[str, Any]:
@@ -119,8 +109,6 @@ class PerceptionOrgan:
         self._inferencer = inferencer or BusinessContextInferencer(llm=llm, firestore=firestore)
         self._env_id = resolve_env_id(self._settings)
         self._topology_builder = topology_builder or TopologyBuilder(env_id=self._env_id)
-        self.role_inference_calls: int = 0
-        self.embedding_batch_calls: int = 0
         self._last_report: PerceptionReport | None = None
         self._last_topology: TopologyReport | None = None
 
@@ -209,10 +197,6 @@ class PerceptionOrgan:
                 continue
             filtered_services.append(svc)
 
-        if filtered_services:
-            self.role_inference_calls += 1
-            self.embedding_batch_calls += 1
-
         seen_service_doc_ids: set[str] = set()
         for svc in filtered_services:
             doc_id = svc.doc_id or f"{svc.env_id}__{svc.kind}.{svc.name}"
@@ -226,9 +210,6 @@ class PerceptionOrgan:
             classification = "observer" if is_observer else ("journey_linked" if is_managed else "other_read_only")
             if is_observer:
                 svc.labels["godview_role"] = "observer"
-
-            inferred_role = svc.inferred_role or f"{svc.kind}:{svc.name}:{classification}"
-            embedding = svc.purpose_embedding or _deterministic_embedding_768(inferred_role)
 
             # Check if business context already exists or can be inferred
             business_ctx = svc.business_context
@@ -253,13 +234,24 @@ class PerceptionOrgan:
                             exc,
                         )
 
+            embedding = svc.purpose_embedding
+            if embedding is None and self._llm is not None and hasattr(self._llm, "embed"):
+                embed_text = (business_ctx.role_summary if business_ctx else "") or (svc.inferred_role or "")
+                if embed_text:
+                    try:
+                        vecs = await self._llm.embed([embed_text])
+                        if vecs and len(vecs[0]) == 768:
+                            embedding = vecs[0]
+                    except Exception:
+                        embedding = None
+
             existing = self._firestore.get("discovered_services", doc_id) if hasattr(self._firestore, "get") else None
             updated_doc = svc.model_copy(
                 update={
                     "doc_id": doc_id,
                     "classification": classification,
-                    "inferred_role": inferred_role,
-                    "role_confidence": svc.role_confidence or (0.92 if is_managed else 0.65),
+                    "inferred_role": svc.inferred_role,
+                    "role_confidence": svc.role_confidence,
                     "purpose_embedding": embedding,
                     "business_context": business_ctx,
                     "status": "active",
@@ -479,8 +471,10 @@ def install(ctx: Any) -> None:
 
     adapters = getattr(ctx, "adapters", None)
     if not adapters:
+        regions = getattr(settings, "gcp_regions", None) or [getattr(settings, "gcp_region", "us-central1")]
         adapters = build_all_gcp_adapters(
             project_id=getattr(settings, "gcp_project_id", None),
+            regions=regions,
             region=getattr(settings, "gcp_region", "us-central1"),
             auth=auth,
             http_transport=http_transport,
@@ -505,6 +499,17 @@ def install(ctx: Any) -> None:
     )
     if hasattr(ctx, "__dict__"):
         ctx.perception = organ
+
+    # Register perception hook on ctx.hooks.perception_tick idempotently
+    if hasattr(ctx, "hooks") and hasattr(ctx.hooks, "perception_tick"):
+        async def _organ_perceive_hook() -> None:
+            await organ.perceive()
+            if hasattr(ctx, "last_perception_at"):
+                ctx.last_perception_at = datetime.now(tz=UTC)
+
+        existing_names = {getattr(fn, "__name__", "") for fn in ctx.hooks.perception_tick}
+        if "_organ_perceive_hook" not in existing_names:
+            ctx.hooks.perception_tick.append(_organ_perceive_hook)
 
 
 __all__ = ["PerceptionOrgan", "PerceptionReport", "install", "resolve_env_id", "resolve_runtime_identity"]

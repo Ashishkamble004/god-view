@@ -68,6 +68,7 @@ class CloudEdgeAdapter(SenseAdapter):
             build_fixture_http_transport(fixtures) if fixtures is not None else None
         )
         self.env_id = f"gcp-{self.project_id}"
+        self._errors: dict[str, str] = {}
 
     def _headers(self) -> dict[str, str]:
         headers: dict[str, str] = {
@@ -182,6 +183,18 @@ class CloudEdgeAdapter(SenseAdapter):
                 return await self._fetch_paginated(global_url, "items")
             raise
 
+    async def _fetch_negs(self) -> list[dict[str, Any]]:
+        agg_url = f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/aggregated/networkEndpointGroups"
+        try:
+            return await self._fetch_paginated(agg_url, "items")
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in (404, 405):
+                global_url = f"https://compute.googleapis.com/compute/v1/projects/{self.project_id}/global/networkEndpointGroups"
+                return await self._fetch_paginated(global_url, "items")
+            return []
+        except Exception:
+            return []
+
     def senses(self) -> list[SenseCategory]:
         return [SenseCategory.CHANGE_PLANE, SenseCategory.SCOPED_OBSERVABILITY]
 
@@ -237,13 +250,13 @@ class CloudEdgeAdapter(SenseAdapter):
         try:
             t_http = await self._fetch_target_http_proxies()
             target_proxies.extend(t_http)
-        except Exception:
-            pass
+        except Exception as exc:
+            errors["target_http_proxies"] = str(exc)
         try:
             t_https = await self._fetch_target_https_proxies()
             target_proxies.extend(t_https)
-        except Exception:
-            pass
+        except Exception as exc:
+            errors["target_https_proxies"] = str(exc)
 
         try:
             url_maps = await self._fetch_url_maps()
@@ -262,6 +275,18 @@ class CloudEdgeAdapter(SenseAdapter):
         except Exception as exc:
             security_policies = []
             errors["security_policies"] = str(exc)
+
+        try:
+            negs = await self._fetch_negs()
+        except Exception as exc:
+            negs = []
+            errors["negs"] = str(exc)
+
+        neg_lookup: dict[str, dict[str, Any]] = {}
+        for n in negs:
+            n_name = str(n.get("name", ""))
+            if n_name:
+                neg_lookup[n_name] = n
 
         now_iso = datetime.now(tz=UTC).isoformat()
         services: list[DiscoveredServiceDoc] = []
@@ -285,7 +310,7 @@ class CloudEdgeAdapter(SenseAdapter):
             else:
                 for um in url_maps:
                     u_name = str(um.get("name", ""))
-                    if u_name == target_proxy or u_name == fr_name or len(url_maps) == 1:
+                    if u_name == target_proxy or u_name == fr_name:
                         fr_to_urlmaps.setdefault(fr_name, []).append(u_name)
 
         # 1. Security Policies
@@ -298,11 +323,20 @@ class CloudEdgeAdapter(SenseAdapter):
             has_waf = False
             waf_sensitivities: list[int] = []
             rules_missing_sensitivity: list[int] = []
+            all_rules_preview = True
 
             for r in rules:
                 expr = str(r.get("match", {}).get("expr", {}).get("expression", ""))
-                if "evaluatePreconfiguredWaf" in expr:
+                is_preview = bool(r.get("preview", False))
+                has_preconfigured = (
+                    "evaluatePreconfiguredWaf" in expr
+                    or "evaluatePreconfiguredExpr" in expr
+                    or bool(r.get("preconfiguredWafConfig"))
+                )
+                if has_preconfigured:
                     has_waf = True
+                    if not is_preview:
+                        all_rules_preview = False
                     match = _SENSITIVITY_RE.search(expr)
                     if match:
                         waf_sensitivities.append(int(match.group(1)))
@@ -311,7 +345,9 @@ class CloudEdgeAdapter(SenseAdapter):
 
             waf_posture_str = "none"
             if has_waf:
-                if rules_missing_sensitivity:
+                if all_rules_preview and rules:
+                    waf_posture_str = "preview"
+                elif rules_missing_sensitivity:
                     waf_posture_str = "missing_sensitivity"
                 elif waf_sensitivities:
                     waf_posture_str = f"sensitivity-{waf_sensitivities[0]}"
@@ -428,8 +464,68 @@ class CloudEdgeAdapter(SenseAdapter):
                 if group_name:
                     if "/networkEndpointGroups/" in group_url or "neg" in group_name.lower():
                         target_id = f"{self.env_id}__neg.{group_name}"
+                        neg_data = neg_lookup.get(group_name, {})
+                        services.append(
+                            DiscoveredServiceDoc(
+                                doc_id=target_id,
+                                env_id=self.env_id,
+                                name=group_name,
+                                kind="other",
+                                adapter_family="gcp",
+                                locator=group_url or f"compute://neg/{group_name}",
+                                labels={"resource_type": "network_endpoint_group"},
+                                status="active",
+                                first_seen=now_iso,
+                                last_seen=now_iso,
+                            )
+                        )
+                        cr_info = neg_data.get("cloudRun") or {}
+                        cr_service = cr_info.get("service")
+                        if cr_service:
+                            cr_doc_id = f"{self.env_id}__cloud_run.{cr_service}"
+                            edges.append(
+                                DiscoveredEdgeDoc(
+                                    doc_id=f"{target_id}__to__{cr_doc_id}",
+                                    src=target_id,
+                                    dst=cr_doc_id,
+                                    protocol="http",
+                                    evidence="neg_cloud_run",
+                                    evidence_kind="config",
+                                    confidence=1.0,
+                                    first_seen=now_iso,
+                                    last_seen=now_iso,
+                                )
+                            )
+                            # Direct edge backend_service -> cloud_run so downstream topology links edge to compute
+                            edges.append(
+                                DiscoveredEdgeDoc(
+                                    doc_id=f"{bs_doc_id}__to__{cr_doc_id}",
+                                    src=bs_doc_id,
+                                    dst=cr_doc_id,
+                                    protocol="http",
+                                    evidence="backend_service_to_cloud_run",
+                                    evidence_kind="config",
+                                    confidence=1.0,
+                                    first_seen=now_iso,
+                                    last_seen=now_iso,
+                                )
+                            )
                     elif "/instanceGroups/" in group_url or "instancegroup" in group_name.lower():
                         target_id = f"{self.env_id}__instance_group.{group_name}"
+                        services.append(
+                            DiscoveredServiceDoc(
+                                doc_id=target_id,
+                                env_id=self.env_id,
+                                name=group_name,
+                                kind="gce_instance",
+                                adapter_family="gcp",
+                                locator=group_url or f"compute://instanceGroup/{group_name}",
+                                labels={"resource_type": "instance_group"},
+                                status="active",
+                                first_seen=now_iso,
+                                last_seen=now_iso,
+                            )
+                        )
                     else:
                         target_id = f"{self.env_id}__backend_group.{group_name}"
                     edges.append(
@@ -499,11 +595,7 @@ class CloudEdgeAdapter(SenseAdapter):
 
             # Map to matching forwarding rule(s)
             matching_fr_names = [frn for frn, ums in fr_to_urlmaps.items() if um_name in ums]
-            frontend_ids = (
-                [f"{self.env_id}__lb_frontend.{frn}" for frn in matching_fr_names]
-                if matching_fr_names
-                else [f"{self.env_id}__lb_frontend.{um_name}"]
-            )
+            frontend_ids = [f"{self.env_id}__lb_frontend.{frn}" for frn in matching_fr_names]
 
             for frontend_id in frontend_ids:
                 for target_bs in all_target_bs:
@@ -553,7 +645,8 @@ class CloudEdgeAdapter(SenseAdapter):
             try:
                 backends = await self._fetch_backend_services()
             except Exception as exc:
-                return {"backends": [], "error": str(exc)}
+                self._errors["describe_backends"] = str(exc)
+                return []
             try:
                 url_maps = await self._fetch_url_maps()
                 backend_hosts: dict[str, list[str]] = {}
@@ -582,7 +675,8 @@ class CloudEdgeAdapter(SenseAdapter):
             try:
                 policies = await self._fetch_security_policies()
             except Exception as exc:
-                return {"policies": [], "error": str(exc)}
+                self._errors["describe_security_policies"] = str(exc)
+                return []
 
             parsed_policies: list[dict[str, Any]] = []
             for p in policies:

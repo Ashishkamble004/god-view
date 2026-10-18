@@ -23,6 +23,7 @@ from godview_shared.contracts import (
     DiscoveredServiceDoc,
     JourneyDoc,
 )
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger("godview.sovereign.business_context.inferencer")
 
@@ -38,6 +39,22 @@ Strict Rules:
 6. Provide a realistic overall confidence score between 0.0 and 1.0 reflecting the completeness and specificity of the evidence.
 7. Return a valid JSON matching the BusinessContext schema.
 """
+
+
+class InferredJourneyStep(BaseModel):
+    node: str = ""
+    operation: str = ""
+
+
+class InferredJourney(BaseModel):
+    name: str
+    steps: list[InferredJourneyStep | str] = Field(default_factory=list)
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    evidence: list[dict[str, Any]] | list[str] | str = Field(default_factory=list)
+
+
+class InferredJourneysResponse(BaseModel):
+    journeys: list[InferredJourney] = Field(default_factory=list)
 
 
 def compute_evidence_hash(evidence_bundle: dict[str, Any]) -> str:
@@ -138,27 +155,86 @@ class BusinessContextInferencer:
         if ev_hash in self._cache_by_evidence_hash:
             return self._cache_by_evidence_hash[ev_hash]
 
-        # Check existing stored business context on service doc
+        # Check existing stored business context on service doc or Firestore
+        existing_good: BusinessContext | None = None
+        if service.business_context is not None and getattr(service.business_context, "confidence", 0.0) > 0.0:
+            existing_good = service.business_context
+        elif self.firestore is not None:
+            node_id = service.doc_id or f"{service.env_id}__{service.kind}.{service.name}"
+            try:
+                stored = self.firestore.get("discovered_services", node_id)
+                if stored and stored.get("business_context"):
+                    candidate = BusinessContext(**stored["business_context"])
+                    if candidate.confidence > 0.0:
+                        existing_good = candidate
+            except Exception:
+                pass
+
         if (
-            service.business_context is not None
-            and getattr(service.business_context, "inferred_at", None) is not None
-            and ev_hash == getattr(service.business_context, "_evidence_hash", None)
+            existing_good is not None
+            and getattr(existing_good, "inferred_at", None) is not None
+            and ev_hash == getattr(existing_good, "_evidence_hash", None)
         ):
-            self._cache_by_evidence_hash[ev_hash] = service.business_context
-            return service.business_context
+            self._cache_by_evidence_hash[ev_hash] = existing_good
+            return existing_good
 
-        # Call Gemini reasoning model with structured output
-        ctx = await self._call_llm_inference(service.name, evidence_bundle, ev_hash)
+        failed = False
+        try:
+            ctx = await self._call_llm_inference(service.name, evidence_bundle, ev_hash)
+            if ctx.confidence == 0.0 and ctx.domain == "unknown" and existing_good is not None:
+                failed = True
+        except Exception as exc:
+            logger.warning("LLM business context inference failed for %s: %s", service.name, exc)
+            failed = True
+
+        if failed:
+            # On failure: keep the last good context, mark inference_status=failed with a retry-after, and don't cache!
+            node_id = service.doc_id or f"{service.env_id}__{service.kind}.{service.name}"
+            if self.firestore is not None:
+                now_iso = datetime.now(tz=UTC).isoformat()
+                try:
+                    self.firestore.set(
+                        "discovered_services",
+                        node_id,
+                        {
+                            "inference_status": "failed",
+                            "inference_retry_after": now_iso,
+                        },
+                        merge=True,
+                    )
+                except Exception:
+                    pass
+            if existing_good is not None:
+                return existing_good
+
+            return BusinessContext(
+                role_summary=f"Inference failed for {service.name}",
+                domain="unknown",
+                capabilities=[r.get("summary") or r.get("operation_id") or f"{r.get('method')} {r.get('path')}" for r in evidence_bundle.get("routes", [])],
+                upstream=evidence_bundle.get("upstreams", []),
+                downstream=evidence_bundle.get("downstreams", []),
+                journeys=[],
+                kpis=[],
+                invariants=[],
+                risk_notes=[],
+                confidence=0.0,
+                evidence=[],
+                inferred_by="none",
+                inferred_at=datetime.now(tz=UTC).isoformat(),
+            )
+
+        # Successful inference: cache by evidence hash and persist to Firestore
         self._cache_by_evidence_hash[ev_hash] = ctx
-
-        # Persist to Firestore if available
         if self.firestore is not None:
             node_id = service.doc_id or f"{service.env_id}__{service.kind}.{service.name}"
             try:
                 self.firestore.set(
                     "discovered_services",
                     node_id,
-                    {"business_context": ctx.model_dump(mode="json")},
+                    {
+                        "business_context": ctx.model_dump(mode="json"),
+                        "inference_status": "inferred",
+                    },
                     merge=True,
                 )
             except Exception:
@@ -185,46 +261,42 @@ class BusinessContextInferencer:
                 f"Evidence for service '{service_name}':\n"
                 f"{json.dumps(evidence_bundle, indent=2)}\n"
             )
-            try:
-                self.total_llm_calls += 1
-                res = await self.llm.generate(
-                    role="reasoning",
-                    contents=prompt,
-                    response_schema=BusinessContext,
-                )
-                model_name = getattr(self.llm, "model_name", getattr(self.llm, "model", "llm-reasoner"))
-                if hasattr(res, "parsed") and res.parsed is not None:
-                    res = res.parsed
-                elif hasattr(res, "text") and res.text:
+            self.total_llm_calls += 1
+            res = await self.llm.generate(
+                role="reasoning",
+                contents=prompt,
+                response_schema=BusinessContext,
+            )
+            model_name = (
+                getattr(res, "model_id", None)
+                or getattr(self.llm, "model_name", getattr(self.llm, "model", "llm-reasoner"))
+            )
+            if isinstance(res, BusinessContext):
+                res_bc = res
+            else:
+                parsed_ctx = getattr(res, "parsed", None)
+                if parsed_ctx is None and hasattr(res, "text") and res.text:
+                    raw_text = res.text.strip()
+                    if raw_text.startswith("```"):
+                        raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text)
+                        raw_text = re.sub(r"\s*```$", "", raw_text)
                     try:
-                        res = json.loads(res.text)
+                        parsed_ctx = json.loads(raw_text)
                     except Exception:
                         pass
-                if isinstance(res, BusinessContext):
-                    res.inferred_by = model_name
-                    res.inferred_at = now_iso
-                    return res
-                if isinstance(res, dict):
-                    res["inferred_by"] = model_name
-                    res["inferred_at"] = now_iso
-                    return BusinessContext(**res)
-            except Exception as exc:
-                logger.warning("LLM business context inference failed for %s: %s", service_name, exc)
-                return BusinessContext(
-                    role_summary=f"Inference failed for {service_name}",
-                    domain="unknown",
-                    capabilities=[],
-                    upstream=upstreams,
-                    downstream=downstreams,
-                    journeys=[],
-                    kpis=[],
-                    invariants=[],
-                    risk_notes=[],
-                    confidence=0.0,
-                    evidence=[],
-                    inferred_by="none",
-                    inferred_at=now_iso,
-                )
+                elif parsed_ctx is None and isinstance(res, dict):
+                    parsed_ctx = res
+
+                if isinstance(parsed_ctx, BusinessContext):
+                    res_bc = parsed_ctx
+                elif isinstance(parsed_ctx, dict):
+                    res_bc = BusinessContext(**parsed_ctx)
+                else:
+                    raise ValueError(f"Could not parse BusinessContext from LLM response: {res}")
+
+            res_bc.inferred_by = model_name
+            res_bc.inferred_at = now_iso
+            return res_bc
 
         # When LLM is not configured / unavailable, return un-inferred BusinessContext honestly with confidence 0.0
         return BusinessContext(
@@ -275,48 +347,85 @@ class BusinessContextInferencer:
 
         try:
             self.total_llm_calls += 1
-            res = await self.llm.generate(
-                role="reasoning",
-                contents=prompt,
-            )
-            if hasattr(res, "parsed") and res.parsed is not None:
-                res = res.parsed
-            elif hasattr(res, "text") and res.text:
-                raw_text = res.text.strip()
-                if raw_text.startswith("```"):
-                    raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text)
-                    raw_text = re.sub(r"\s*```$", "", raw_text)
+            if hasattr(self.llm, "generate_structured"):
                 try:
-                    res = json.loads(raw_text)
-                except Exception as parse_err:
-                    logger.warning("Failed to parse journey JSON: %s (raw=%s)", parse_err, raw_text[:200])
-            if isinstance(res, dict) and "journeys" in res:
-                res = res["journeys"]
+                    res = await self.llm.generate_structured(
+                        role="reasoning",
+                        prompt=prompt,
+                        schema=InferredJourneysResponse,
+                    )
+                except Exception:
+                    res = await self.llm.generate(
+                        role="reasoning",
+                        contents=prompt,
+                        response_schema=InferredJourneysResponse,
+                    )
+            else:
+                res = await self.llm.generate(
+                    role="reasoning",
+                    contents=prompt,
+                    response_schema=InferredJourneysResponse,
+                )
+
             if isinstance(res, list):
-                journeys: list[JourneyDoc] = []
-                for item in res:
-                    if isinstance(item, dict) and "name" in item:
-                        raw_steps = item.get("steps", [])
-                        steps_str: list[str] = []
-                        for s in raw_steps:
-                            if isinstance(s, str):
-                                steps_str.append(s)
-                            elif isinstance(s, dict):
-                                node = s.get("node", "")
-                                op = s.get("operation", "")
-                                steps_str.append(f"{node}.{op}" if op else str(node))
-                            else:
-                                steps_str.append(str(s))
-                        journeys.append(
-                            JourneyDoc(
-                                doc_id=f"journey__{item['name'].lower().replace(' ', '_')}",
-                                name=item["name"],
-                                steps=steps_str,
-                                intended_order_source="trace_dag",
-                                status="active",
-                            )
-                        )
-                return journeys
+                journey_items = res
+            elif isinstance(res, dict) and "journeys" in res:
+                journey_items = res["journeys"]
+            else:
+                parsed = getattr(res, "parsed", None)
+                if parsed is None and isinstance(res, InferredJourneysResponse):
+                    parsed = res
+                elif parsed is None and hasattr(res, "text") and res.text:
+                    raw_text = res.text.strip()
+                    if raw_text.startswith("```"):
+                        raw_text = re.sub(r"^```(?:json)?\s*", "", raw_text)
+                        raw_text = re.sub(r"\s*```$", "", raw_text)
+                    try:
+                        parsed = json.loads(raw_text)
+                    except Exception as parse_err:
+                        logger.warning("Failed to parse journey JSON: %s (raw=%s)", parse_err, raw_text[:200])
+
+                if isinstance(parsed, InferredJourneysResponse):
+                    journey_items = parsed.journeys
+                elif isinstance(parsed, dict) and "journeys" in parsed:
+                    journey_items = parsed["journeys"]
+                elif isinstance(parsed, list):
+                    journey_items = parsed
+                elif hasattr(parsed, "journeys"):
+                    journey_items = getattr(parsed, "journeys", [])
+                else:
+                    journey_items = []
+
+            journeys: list[JourneyDoc] = []
+            for item in journey_items:
+                name = getattr(item, "name", None) or (item.get("name") if isinstance(item, dict) else "")
+                if not name:
+                    continue
+                raw_steps = getattr(item, "steps", None) or (item.get("steps", []) if isinstance(item, dict) else [])
+                steps_str: list[str] = []
+                for s in raw_steps:
+                    if isinstance(s, str):
+                        steps_str.append(s)
+                    elif isinstance(s, dict):
+                        node = s.get("node", "")
+                        op = s.get("operation", "")
+                        steps_str.append(f"{node}.{op}" if op else str(node))
+                    elif hasattr(s, "node"):
+                        node = getattr(s, "node", "")
+                        op = getattr(s, "operation", "")
+                        steps_str.append(f"{node}.{op}" if op else str(node))
+                    else:
+                        steps_str.append(str(s))
+                journeys.append(
+                    JourneyDoc(
+                        doc_id=f"journey__{name.lower().replace(' ', '_')}",
+                        name=name,
+                        steps=steps_str,
+                        intended_order_source="trace_dag",
+                        status="active",
+                    )
+                )
+            return journeys
         except Exception as exc:
             logger.warning("LLM journey inference failed: %s", exc)
 

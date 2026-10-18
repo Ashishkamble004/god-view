@@ -28,15 +28,15 @@ import copy
 import inspect
 import ipaddress
 import json
-import os
 import re
+import socket
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 import httpx
 import sqlglot
@@ -156,44 +156,81 @@ def _validate_single_select_sql(statement: str) -> str:
     return cleaned
 
 
+def _check_ip(
+    ip_obj: ipaddress.IPv4Address | ipaddress.IPv6Address,
+    allow_private: bool,
+    name: str,
+) -> None:
+    if ip_obj.version == 6 and ip_obj.ipv4_mapped:
+        ip_obj = ip_obj.ipv4_mapped
+    ip_str = str(ip_obj)
+    if (
+        ip_str == "169.254.169.254"
+        or ip_obj.is_link_local
+        or ip_obj.is_loopback
+        or ip_obj.is_unspecified
+        or ip_obj.is_reserved
+        or ip_obj.is_multicast
+    ):
+        raise ValueError(
+            f"SSRF violation: probing metadata/link-local/loopback/unspecified IP '{ip_str}' ({name}) is forbidden"
+        )
+    if ip_obj.is_private and not allow_private:
+        raise ValueError(f"SSRF violation: probing private IP '{ip_str}' ({name}) is forbidden")
+
+
 def _assert_ssrf_safe_url(url: str, allow_private: bool = False) -> None:
-    """Validate target URL against SSRF, metadata, decimal, hex, and loopback attacks."""
-    parsed = urlparse(url)
+    """Validate target URL against SSRF, metadata, decimal, hex, octal, loopback, and DNS-rebinding attacks."""
+    parsed = urlsplit(url)
     if parsed.scheme not in ("http", "https"):
         raise ValueError(f"SSRF violation: scheme '{parsed.scheme}' is forbidden")
-    hostname = (parsed.hostname or "").lower()
-    if not hostname:
+    raw_host = (parsed.hostname or "").lower()
+    if not raw_host:
         raise ValueError("SSRF violation: missing target hostname")
 
-    if hostname in ("metadata.google.internal", "metadata", "localhost"):
-        raise ValueError(f"SSRF violation: probing '{hostname}' is forbidden")
+    host = raw_host.rstrip(".")
+    if (
+        host in ("metadata.google.internal", "metadata", "localhost")
+        or host.endswith(".metadata.google.internal")
+    ):
+        raise ValueError(f"SSRF violation: probing '{raw_host}' is forbidden")
 
-    ip_obj: ipaddress.IPv4Address | ipaddress.IPv6Address | None = None
-    if hostname.isdigit():
+    nip_match = re.search(r"(\d+\.\d+\.\d+\.\d+)\.(?:nip|sslip)\.io", host)
+    if nip_match:
         try:
-            ip_obj = ipaddress.ip_address(int(hostname))
-        except (ValueError, TypeError):
-            pass
-    elif hostname.startswith(("0x", "0X")):
-        try:
-            ip_obj = ipaddress.ip_address(int(hostname, 16))
-        except (ValueError, TypeError):
-            pass
-    if ip_obj is None:
-        try:
-            ip_obj = ipaddress.ip_address(hostname)
+            _check_ip(ipaddress.ip_address(nip_match.group(1)), allow_private, raw_host)
         except ValueError:
-            ip_obj = None
+            raise
 
-    if ip_obj is not None:
-        if ip_obj.version == 6 and ip_obj.ipv4_mapped:
-            ip_obj = ip_obj.ipv4_mapped
+    if host.isdigit():
+        try:
+            _check_ip(ipaddress.ip_address(int(host)), allow_private, raw_host)
+        except (ValueError, TypeError):
+            pass
+    elif host.startswith(("0x", "0X")):
+        try:
+            _check_ip(ipaddress.ip_address(int(host, 16)), allow_private, raw_host)
+        except (ValueError, TypeError):
+            pass
 
-        ip_str = str(ip_obj)
-        if ip_str == "169.254.169.254" or ip_obj.is_link_local or ip_obj.is_loopback:
-            raise ValueError(f"SSRF violation: probing metadata/link-local/loopback IP '{hostname}' is forbidden")
-        if ip_obj.is_private and not allow_private:
-            raise ValueError(f"SSRF violation: probing private IP '{hostname}' is forbidden")
+    if "." in host and all(p.isalnum() for p in host.split(".")):
+        try:
+            parts = [int(p, 0) for p in host.split(".")]
+            if len(parts) == 4 and all(0 <= p <= 255 for p in parts):
+                _check_ip(ipaddress.IPv4Address(bytes(parts)), allow_private, raw_host)
+        except Exception:
+            pass
+
+    try:
+        _check_ip(ipaddress.ip_address(host), allow_private, raw_host)
+    except ValueError:
+        pass
+
+    try:
+        for res in socket.getaddrinfo(host, None):
+            _check_ip(ipaddress.ip_address(res[4][0]), allow_private, raw_host)
+    except (socket.gaierror, OSError):
+        pass
 
 
 class _BaseGcpAdapter(SenseAdapter):
@@ -672,17 +709,33 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
                 if s_name == short or full_name == target_name:
                     ingress = svc.get("ingress", "INGRESS_TRAFFIC_ALL")
                     invoker_iam_disabled = bool(svc.get("invokerIamDisabled", False))
-                    has_all_users = bool(svc.get("allUsers", False))
-                    for b in svc.get("bindings", []):
-                        if "allUsers" in b.get("members", []):
-                            has_all_users = True
+                    has_all_users = False
+                    try:
+                        async with self._http_client() as client:
+                            iam_resp = await client.get(
+                                f"https://run.googleapis.com/v2/{full_name}:getIamPolicy"
+                            )
+                            if iam_resp.status_code == 200:
+                                policy_data = iam_resp.json()
+                                for b in policy_data.get("bindings", []):
+                                    if "roles/run.invoker" in b.get("role", ""):
+                                        if "allUsers" in b.get("members", []):
+                                            has_all_users = True
+                                            break
+                            elif self._fixtures and "iam_policies" in self._fixtures:
+                                for b in self._fixtures["iam_policies"].get(short, {}).get("bindings", []):
+                                    if "roles/run.invoker" in b.get("role", "") and "allUsers" in b.get("members", []):
+                                        has_all_users = True
+                    except Exception:
+                        pass
+
                     labels = dict(svc.get("labels") or {})
                     return {
                         "service_name": short,
                         "found": True,
                         "ingress": ingress,
                         "invoker_iam_disabled": invoker_iam_disabled,
-                        "all_users": has_all_users or invoker_iam_disabled,
+                        "all_users": has_all_users,
                         "labels": labels,
                         "iap": False,
                         "waf": None,
@@ -775,7 +828,15 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
             else:
                 points = sample.get("points", [])
                 val_obj = points[0].get("value", {}) if points else {}
-                p95_ms = float(val_obj.get("doubleValue", 0.0))
+                if "distributionValue" in val_obj:
+                    dist = val_obj["distributionValue"]
+                    p95_ms = float(dist.get("mean", 0.0))
+                elif "doubleValue" in val_obj:
+                    p95_ms = float(val_obj["doubleValue"])
+                elif "int64Value" in val_obj:
+                    p95_ms = float(val_obj["int64Value"])
+                else:
+                    p95_ms = 0.0
                 err_pct = float(sample.get("errorRatePct", 0.0))
 
             status = "red" if (p95_ms > 3500.0 or err_pct > 2.0) else "green"
@@ -797,7 +858,7 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
             raise ProbeSafetyError(
                 f"Refusing to probe route '{args.get('url')}': route is not marked x-godview-probe-safe: true (TDD I-07)"
             )
-        method = str(args.get("method", "POST")).upper()
+        method = str(args.get("method", "GET")).upper()
         url = str(args.get("url", "")).strip()
         if not url:
             raise ValueError("probe.execute requires a non-empty target url")
@@ -809,13 +870,16 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
         body = copy.deepcopy(dict(args.get("body") or {}))
         body["is_ai_generated"] = True
 
-        _assert_ssrf_safe_url(url, allow_private=(self._transport is not None or os.environ.get("GODVIEW_ENV") == "hermetic"))
+        _assert_ssrf_safe_url(url, allow_private=bool(args.get("allow_private", False)))
 
-        # Sanitize caller headers: strip platform credentials, metadata headers, and cookies
+        # Sanitize caller headers: strip platform credentials, metadata headers, proxy auth, and cookies
         safe_headers: dict[str, str] = {}
         for k, v in dict(args.get("headers") or {}).items():
             k_lower = k.lower()
-            if k_lower in ("authorization", "metadata-flavor", "cookie") or k_lower.startswith("x-goog-"):
+            if (
+                k_lower in ("authorization", "proxy-authorization", "metadata-flavor", "cookie")
+                or k_lower.startswith(("x-goog-", "x-forwarded-"))
+            ):
                 continue
             safe_headers[k] = str(v)
         headers.update(safe_headers)
@@ -851,9 +915,22 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
             pass
         return None
 
-    async def _lookup_live_service_labels_async(self, service_name: str) -> dict[str, str] | None:
+    async def _lookup_live_service_labels_async(
+        self,
+        service_name: str,
+        region: str | None = None,
+    ) -> dict[str, str] | None:
         short = service_name.rsplit("/", 1)[-1]
-        for svc in await self._fetch_services():
+        target_region = region or self.region
+        try:
+            async with self._http_client() as client:
+                url = f"https://run.googleapis.com/v2/projects/{self.project_id}/locations/{target_region}/services/{short}"
+                resp = await client.get(url)
+                if resp.status_code == 200:
+                    return dict(resp.json().get("labels") or {})
+        except Exception:
+            pass
+        for svc in await self._fetch_services(region=target_region):
             svc_short = str(svc.get("name", "")).rsplit("/", 1)[-1]
             if svc_short == short:
                 return dict(svc.get("labels") or {})
@@ -865,21 +942,39 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
         trust_decision: TrustDecision | None,
     ) -> dict[str, Any]:
         """Synchronous defence-in-depth entrypoint for `run.restore_revision_config`."""
-        td = assert_valid_mutating_trust("run.restore_revision_config", trust_decision)
+        assert_valid_mutating_trust("run.restore_revision_config", trust_decision)
         service_name = str(args.get("service_name", ""))
         caller_labels = (
             dict(args["labels"]) if "labels" in args and args["labels"] is not None else None
         )
-        live_labels = self._lookup_live_service_labels_sync(service_name)
+        target_region = args.get("region")
+        if not target_region and "/locations/" in service_name:
+            parts = service_name.split("/locations/")[1].split("/")
+            if len(parts) >= 2 and parts[0] != "-":
+                target_region = parts[0]
+        if not target_region:
+            target_region = self.region
+
+        short_name = service_name.rsplit("/", 1)[-1]
+        live_labels = None
+        try:
+            with self._sync_http_client() as client:
+                url = f"https://run.googleapis.com/v2/projects/{self.project_id}/locations/{target_region}/services/{short_name}"
+                resp = client.get(url)
+                if resp.status_code == 200:
+                    live_labels = dict(resp.json().get("labels") or {})
+        except Exception:
+            pass
+        if live_labels is None:
+            live_labels = self._lookup_live_service_labels_sync(service_name)
         assert_managed_resource(caller_labels, service_name, live_labels=live_labels)
 
         desired_config = dict(args.get("desired_config") or {})
         previous_config = dict(args.get("previous_config") or {})
         update_mask = "template.scaling,template.containers,template.maxInstanceRequestConcurrency"
-        short_name = service_name.rsplit("/", 1)[-1]
         patch_url = (
             f"https://run.googleapis.com/v2/projects/{self.project_id}/"
-            f"locations/{self.region}/services/{short_name}"
+            f"locations/{target_region}/services/{short_name}"
         )
         with self._sync_http_client() as client:
             resp = client.patch(patch_url, params={"updateMask": update_mask}, json=desired_config)
@@ -890,16 +985,18 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
         return {
             "restored": True,
             "service_name": service_name,
+            "region": target_region,
             "update_mask": update_mask,
             "applied_config": desired_config,
             "api_response": api_response,
-            "sa_used": td.sa_to_impersonate,
+            "sa_used": None,
             "reversal_recipe": {
                 "capability": "run.restore_revision_config",
                 "args": {
                     "service_name": service_name,
                     "desired_config": previous_config,
                     "labels": effective_labels,
+                    "region": target_region,
                 },
             },
         }
@@ -915,20 +1012,43 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
         caller_labels = (
             dict(args["labels"]) if "labels" in args and args["labels"] is not None else None
         )
-        live_labels = await self._lookup_live_service_labels_async(service_name)
+        target_region = args.get("region")
+        if not target_region and "/locations/" in service_name:
+            parts = service_name.split("/locations/")[1].split("/")
+            if len(parts) >= 2 and parts[0] != "-":
+                target_region = parts[0]
+        if not target_region:
+            target_region = self.region
+
+        short_name = service_name.rsplit("/", 1)[-1]
+        live_labels = await self._lookup_live_service_labels_async(service_name, region=target_region)
         assert_managed_resource(caller_labels, service_name, live_labels=live_labels)
 
         desired_config = dict(args.get("desired_config") or {})
         previous_config = dict(args.get("previous_config") or {})
         update_mask = "template.scaling,template.containers,template.maxInstanceRequestConcurrency"
-        short_name = service_name.rsplit("/", 1)[-1]
         patch_url = (
             f"https://run.googleapis.com/v2/projects/{self.project_id}/"
-            f"locations/{self.region}/services/{short_name}"
+            f"locations/{target_region}/services/{short_name}"
         )
+
+        sa_used = None
+        headers = {}
+        if td.sa_to_impersonate and self.auth is not None and hasattr(self.auth, "impersonate_service_account"):
+            try:
+                act_token = await self.auth.impersonate_service_account(td.sa_to_impersonate)
+                if act_token:
+                    headers["Authorization"] = f"Bearer {act_token}"
+                    sa_used = td.sa_to_impersonate
+            except Exception:
+                sa_used = None
+
         async with self._http_client() as client:
             resp = await client.patch(
-                patch_url, params={"updateMask": update_mask}, json=desired_config
+                patch_url,
+                params={"updateMask": update_mask},
+                json=desired_config,
+                headers=headers or None,
             )
             resp.raise_for_status()
             api_response = resp.json()
@@ -937,16 +1057,18 @@ class CloudRunV2Adapter(_BaseGcpAdapter):
         return {
             "restored": True,
             "service_name": service_name,
+            "region": target_region,
             "update_mask": update_mask,
             "applied_config": desired_config,
             "api_response": api_response,
-            "sa_used": td.sa_to_impersonate,
+            "sa_used": sa_used,
             "reversal_recipe": {
                 "capability": "run.restore_revision_config",
                 "args": {
                     "service_name": service_name,
                     "desired_config": previous_config,
                     "labels": effective_labels,
+                    "region": target_region,
                 },
             },
         }
@@ -1754,8 +1876,9 @@ class CloudLoggingAuditAdapter(_BaseGcpAdapter):
 
         entries: list[dict[str, Any]] = []
         page_token: str | None = None
+        empty_pages = 0
         async with self._http_client() as client:
-            while len(entries) < page_size:
+            while len(entries) < page_size and empty_pages < 10:
                 body: dict[str, Any] = {
                     "resourceNames": [f"projects/{self.project_id}"],
                     "filter": full_filter,
@@ -1773,9 +1896,13 @@ class CloudLoggingAuditAdapter(_BaseGcpAdapter):
                 resp.raise_for_status()
                 data = resp.json()
                 page_entries = data.get("entries", [])
-                entries.extend(page_entries)
+                if page_entries:
+                    entries.extend(page_entries)
+                    empty_pages = 0
+                else:
+                    empty_pages += 1
                 page_token = data.get("nextPageToken")
-                if not page_token or not page_entries:
+                if not page_token:
                     break
 
         return entries[:page_size]
@@ -1809,15 +1936,28 @@ class CloudLoggingAuditAdapter(_BaseGcpAdapter):
             entries = await self._query_log_entries(full_filter, page_size, window_s=window_s)
             for e in entries:
                 jp = e.setdefault("jsonPayload", {})
-                if isinstance(jp, dict):
-                    if "statusDetails" not in jp:
-                        jp["statusDetails"] = e.get("httpRequest", {}).get("statusDetails", "")
-                    sec_pol = jp.get("enforcedSecurityPolicy")
-                    if isinstance(sec_pol, dict):
-                        jp["enforcedSecurityPolicyName"] = sec_pol.get("name", "")
-                        jp["enforcedSecurityPolicyOutcome"] = sec_pol.get("outcome", "")
-                    elif "enforcedSecurityPolicy" not in jp:
-                        jp["enforcedSecurityPolicy"] = None
+                if not isinstance(jp, dict):
+                    jp = {"raw": jp}
+                    e["jsonPayload"] = jp
+                hr = e.get("httpRequest") or {}
+                if "statusDetails" not in jp:
+                    jp["statusDetails"] = hr.get("statusDetails", "")
+                if "responseCode" not in jp and "status" in hr:
+                    jp["responseCode"] = hr.get("status")
+                if "remoteIp" not in jp and "remoteIp" in hr:
+                    jp["remoteIp"] = hr.get("remoteIp")
+                if "requestMethod" not in jp and "requestMethod" in hr:
+                    jp["requestMethod"] = hr.get("requestMethod")
+                if "requestUrl" not in jp and "requestUrl" in hr:
+                    jp["requestUrl"] = hr.get("requestUrl")
+                if "latency" not in jp and "latency" in hr:
+                    jp["latency"] = hr.get("latency")
+                sec_pol = jp.get("enforcedSecurityPolicy")
+                if isinstance(sec_pol, dict):
+                    jp["enforcedSecurityPolicyName"] = sec_pol.get("name", "")
+                    jp["enforcedSecurityPolicyOutcome"] = sec_pol.get("outcome", "")
+                elif "enforcedSecurityPolicy" not in jp:
+                    jp["enforcedSecurityPolicy"] = None
             return entries
 
         if capability_id == "logging.query":
@@ -2119,14 +2259,31 @@ class PubSubAdapter(_BaseGcpAdapter):
                 or ""
             ).strip()
             subs = await self._fetch_subscriptions()
+            dlq_topic: str | None = None
+            target_metric_sub: str | None = None
+
             if not sub_raw:
+                # Find subscriptions on deadLetterPolicy.deadLetterTopic
                 dlq_candidates = [s for s in subs if s.get("deadLetterPolicy")]
-                if dlq_candidates:
-                    sub_raw = str(dlq_candidates[0].get("name", "")).rsplit("/", 1)[-1]
-                elif subs:
-                    sub_raw = str(subs[0].get("name", "")).rsplit("/", 1)[-1]
-                else:
-                    sub_raw = "unknown-subscription"
+                for s in dlq_candidates:
+                    d_top = s.get("deadLetterPolicy", {}).get("deadLetterTopic")
+                    if d_top:
+                        dlq_topic = d_top
+                        for candidate in subs:
+                            if candidate.get("topic") == d_top:
+                                target_metric_sub = str(candidate.get("name", "")).rsplit("/", 1)[-1]
+                                sub_raw = str(s.get("name", "")).rsplit("/", 1)[-1]
+                                break
+                        if target_metric_sub:
+                            break
+                if not target_metric_sub:
+                    if dlq_candidates:
+                        sub_raw = str(dlq_candidates[0].get("name", "")).rsplit("/", 1)[-1]
+                        dlq_topic = dlq_candidates[0].get("deadLetterPolicy", {}).get("deadLetterTopic")
+                    elif subs:
+                        sub_raw = str(subs[0].get("name", "")).rsplit("/", 1)[-1]
+                    else:
+                        sub_raw = "unknown-subscription"
 
             short_sub = sub_raw.rsplit("/", 1)[-1]
             full_sub = f"projects/{self.project_id}/subscriptions/{short_sub}" if not sub_raw.startswith("projects/") else sub_raw
@@ -2140,12 +2297,25 @@ class PubSubAdapter(_BaseGcpAdapter):
                     "dlq_topic": None,
                     "num_undelivered_messages": 0,
                     "ack_latency_s": 0.0,
+                    "error": None,
                 }
 
             dlq_policy = matching[0].get("deadLetterPolicy") if matching else None
+            if dlq_policy and not dlq_topic:
+                dlq_topic = dlq_policy.get("deadLetterTopic")
 
-            num_undelivered = 0
-            ack_latency_s = 0.0
+            if not target_metric_sub and dlq_topic:
+                for candidate in subs:
+                    if candidate.get("topic") == dlq_topic:
+                        target_metric_sub = str(candidate.get("name", "")).rsplit("/", 1)[-1]
+                        break
+
+            metric_sub = target_metric_sub or short_sub
+            metric_full_sub = f"projects/{self.project_id}/subscriptions/{metric_sub}"
+
+            num_undelivered: int | None = 0
+            ack_latency_s: float | None = 0.0
+            monitoring_error: str | None = None
             try:
                 now = datetime.now(UTC)
                 start = now - timedelta(seconds=300)
@@ -2155,7 +2325,7 @@ class PubSubAdapter(_BaseGcpAdapter):
                     resp_undelivered = await client.get(
                         ts_url,
                         params={
-                            "filter": f'metric.type = "pubsub.googleapis.com/subscription/num_undelivered_messages" AND (resource.labels.subscription_id = "{short_sub}" OR resource.labels.subscription_id = "{full_sub}")',
+                            "filter": f'metric.type = "pubsub.googleapis.com/subscription/num_undelivered_messages" AND (resource.labels.subscription_id = "{metric_sub}" OR resource.labels.subscription_id = "{metric_full_sub}")',
                             "interval.startTime": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
                             "interval.endTime": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
                         },
@@ -2164,30 +2334,41 @@ class PubSubAdapter(_BaseGcpAdapter):
                         series = resp_undelivered.json().get("timeSeries", [])
                         if series and series[0].get("points"):
                             num_undelivered = int(series[0]["points"][0].get("value", {}).get("int64Value", 0))
+                    else:
+                        monitoring_error = f"Monitoring query HTTP {resp_undelivered.status_code}: {resp_undelivered.text[:120]}"
 
                     # 2. Oldest unacked message age
-                    resp_age = await client.get(
-                        ts_url,
-                        params={
-                            "filter": f'metric.type = "pubsub.googleapis.com/subscription/oldest_unacked_message_age" AND (resource.labels.subscription_id = "{short_sub}" OR resource.labels.subscription_id = "{full_sub}")',
-                            "interval.startTime": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                            "interval.endTime": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                        },
-                    )
-                    if resp_age.status_code == 200:
-                        series = resp_age.json().get("timeSeries", [])
-                        if series and series[0].get("points"):
-                            ack_latency_s = float(series[0]["points"][0].get("value", {}).get("int64Value", 0))
-            except Exception:
-                pass
+                    if monitoring_error is None:
+                        resp_age = await client.get(
+                            ts_url,
+                            params={
+                                "filter": f'metric.type = "pubsub.googleapis.com/subscription/oldest_unacked_message_age" AND (resource.labels.subscription_id = "{metric_sub}" OR resource.labels.subscription_id = "{metric_full_sub}")',
+                                "interval.startTime": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                                "interval.endTime": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                            },
+                        )
+                        if resp_age.status_code == 200:
+                            series = resp_age.json().get("timeSeries", [])
+                            if series and series[0].get("points"):
+                                ack_latency_s = float(series[0]["points"][0].get("value", {}).get("int64Value", 0))
+                        else:
+                            monitoring_error = f"Monitoring query HTTP {resp_age.status_code}: {resp_age.text[:120]}"
+            except Exception as exc:
+                monitoring_error = f"Monitoring query failed: {exc}"
+
+            if monitoring_error is not None:
+                num_undelivered = None
+                ack_latency_s = None
 
             return {
                 "subscription": short_sub,
+                "dlq_subscription": target_metric_sub,
                 "found": bool(matching),
                 "dlq_configured": dlq_policy is not None,
-                "dlq_topic": dlq_policy.get("deadLetterTopic") if dlq_policy else None,
+                "dlq_topic": dlq_topic,
                 "num_undelivered_messages": num_undelivered,
                 "ack_latency_s": ack_latency_s,
+                "error": monitoring_error,
             }
         raise NotImplementedError(capability_id)
 
@@ -2464,14 +2645,20 @@ class AgentEngineAdapter(_BaseGcpAdapter):
         return results
 
     def _fetch_engines_sync(self) -> list[dict[str, Any]]:
-        url = (
-            f"https://{self.region}-aiplatform.googleapis.com/v1beta1/"
-            f"projects/{self.project_id}/locations/{self.region}/reasoningEngines"
-        )
-        with self._sync_http_client() as client:
-            resp = client.get(url)
-            resp.raise_for_status()
-            return list(resp.json().get("reasoningEngines", []))
+        results: list[dict[str, Any]] = []
+        for reg in self.regions:
+            url = (
+                f"https://{reg}-aiplatform.googleapis.com/v1beta1/"
+                f"projects/{self.project_id}/locations/{reg}/reasoningEngines"
+            )
+            try:
+                with self._sync_http_client() as client:
+                    resp = client.get(url)
+                    if resp.status_code == 200:
+                        results.extend(resp.json().get("reasoningEngines", []))
+            except Exception:
+                pass
+        return results
 
     async def discover(self) -> DiscoveryResult:
         try:
@@ -2727,6 +2914,7 @@ class AgentRegistryAdapter(_BaseGcpAdapter):
         agent_id: str,
         display_name: str,
         a2a_card_url: str,
+        region: str | None = None,
     ) -> dict[str, Any]:
         avail, _ = await self._probe_registry()
         if not avail:
@@ -2736,9 +2924,10 @@ class AgentRegistryAdapter(_BaseGcpAdapter):
                 "registry_of_record": "firestore:court_agents",
                 "reason": "agent_registry_unavailable",
             }
+        target_region = region or self.region
         endpoint = (
             f"https://agentregistry.googleapis.com/v1/projects/{self.project_id}/"
-            f"locations/{self.region}/agents"
+            f"locations/{target_region}/agents"
         )
         async with self._http_client() as client:
             resp = await client.post(
@@ -2827,15 +3016,17 @@ class ModelArmorAdapter(_BaseGcpAdapter):
         template_id: str,
         text_fields: dict[str, str | None],
         image_bytes: bytes | None = None,
+        region: str | None = None,
     ) -> dict[str, Any]:
         if image_bytes is not None:
             raise ValueError(
                 "Model Armor policy is text-only: binary or document image bytes must never be sent to Model Armor (SDD §8.1)"
             )
         combined = " ".join(v for v in text_fields.values() if v)
+        target_region = region or self.region
         endpoint = (
-            f"https://modelarmor.{self.region}.rep.googleapis.com/v1/projects/{self.project_id}/"
-            f"locations/{self.region}/templates/{template_id}:sanitizeUserPrompt"
+            f"https://modelarmor.{target_region}.rep.googleapis.com/v1/projects/{self.project_id}/"
+            f"locations/{target_region}/templates/{template_id}:sanitizeUserPrompt"
         )
         async with self._http_client() as client:
             resp = await client.post(
@@ -3030,12 +3221,19 @@ class HttpProbeAdapter(SenseAdapter):
 
             _assert_ssrf_safe_url(
                 url,
-                allow_private=(self._transport is not None or os.environ.get("GODVIEW_ENV") == "hermetic"),
+                allow_private=bool(args.get("allow_private", False)),
             )
 
             # Filter headers: strip sensitive / auth / metadata headers
             raw_headers = dict(args.get("headers") or {})
-            forbidden_prefixes = ("authorization", "metadata-flavor", "cookie", "x-goog-")
+            forbidden_prefixes = (
+                "authorization",
+                "proxy-authorization",
+                "metadata-flavor",
+                "cookie",
+                "x-goog-",
+                "x-forwarded-",
+            )
             safe_headers = {
                 k: v for k, v in raw_headers.items()
                 if not any(k.lower().startswith(p) for p in forbidden_prefixes)

@@ -965,7 +965,14 @@ class TerraformDriftAdapter(SenseAdapter):
         return live_run_by_name, live_vm_by_name, live_sql_by_name
 
     async def _fetch_live_iam_bindings(self) -> list[dict[str, str]]:
-        if self._fixtures is not None and "live_iam_bindings" in self._fixtures:
+        if (
+            (
+                os.environ.get("GODVIEW_ENV") in ("hermetic", "test")
+                or self._transport is not None
+            )
+            and self._fixtures is not None
+            and "live_iam_bindings" in self._fixtures
+        ):
             return list(self._fixtures["live_iam_bindings"])
         bindings_list: list[dict[str, str]] = []
         try:
@@ -980,8 +987,24 @@ class TerraformDriftAdapter(SenseAdapter):
                         role = b.get("role", "")
                         for m in b.get("members", []):
                             bindings_list.append({"resource": self.project_id, "role": role, "member": m})
-        except Exception:
-            pass
+                else:
+                    self._errors["live_iam_bindings"] = f"CRM getIamPolicy HTTP {resp.status_code}"
+
+                # Also inspect resource-level policies for discovered Cloud Run services
+                try:
+                    run_services = await self._fetch_live_resources()
+                    for svc_name in run_services[0].keys():
+                        full_svc = f"projects/{self.project_id}/locations/{self.region}/services/{svc_name}"
+                        run_iam = await client.get(f"https://run.googleapis.com/v2/{full_svc}:getIamPolicy")
+                        if run_iam.status_code == 200:
+                            for b in run_iam.json().get("bindings", []):
+                                role = b.get("role", "")
+                                for m in b.get("members", []):
+                                    bindings_list.append({"resource": svc_name, "role": role, "member": m})
+                except Exception:
+                    pass
+        except Exception as exc:
+            self._errors["live_iam_bindings"] = str(exc)
         return bindings_list
 
     async def _drift_diff(
@@ -1256,15 +1279,45 @@ class TerraformDriftAdapter(SenseAdapter):
         if resource_name != address:
             assert_managed_resource(caller_labels, resource_name, live_labels=live_labels)
 
+        target_region = args.get("region")
+        if not target_region and "/locations/" in resource_name:
+            parts = resource_name.split("/locations/")[1].split("/")
+            if len(parts) >= 2 and parts[0] != "-":
+                target_region = parts[0]
+        if not target_region:
+            target_region = self.region
+
+        short_name = resource_name.rsplit("/", 1)[-1]
         patch_url = (
             f"https://run.googleapis.com/v2/projects/{self.project_id}/"
-            f"locations/{self.region}/services/{resource_name}"
+            f"locations/{target_region}/services/{short_name}"
         )
+
+        # Build nested dict from attribute dot-path
+        body_dict: dict[str, Any] = {}
+        curr = body_dict
+        attr_parts = attribute.split(".")
+        for p in attr_parts[:-1]:
+            curr[p] = {}
+            curr = curr[p]
+        curr[attr_parts[-1]] = desired
+
+        sa_used = td.sa_to_impersonate
+        headers = {}
+        if td.sa_to_impersonate and self.auth is not None and hasattr(self.auth, "impersonate_service_account"):
+            try:
+                act_token = await self.auth.impersonate_service_account(td.sa_to_impersonate)
+                if act_token:
+                    headers["Authorization"] = f"Bearer {act_token}"
+            except Exception:
+                pass
+
         async with self._http_client() as client:
             resp = await client.patch(
                 patch_url,
                 params={"updateMask": attribute},
-                json={"attribute": attribute, "value": desired},
+                json=body_dict,
+                headers=headers or None,
             )
             resp.raise_for_status()
             api_response = resp.json()
@@ -1277,6 +1330,7 @@ class TerraformDriftAdapter(SenseAdapter):
                 "attribute": attribute,
                 "desired": previous_live,
                 "labels": effective_labels,
+                "region": target_region,
             },
         }
         record = {
@@ -1285,7 +1339,7 @@ class TerraformDriftAdapter(SenseAdapter):
             "attribute": attribute,
             "restored_value": desired,
             "previous_live_value": previous_live,
-            "sa_used": td.sa_to_impersonate,
+            "sa_used": sa_used,
             "api_response": api_response,
             "reversal_recipe": reversal_recipe,
             "restored_at": datetime.now(tz=UTC).isoformat(),
