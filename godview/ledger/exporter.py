@@ -421,7 +421,6 @@ class LedgerSpanExporter(SpanExporter):
                 entity_id=str(entity_id_raw) if entity_id_raw else None,
                 state_from=str(status_from) if status_from else None,
                 state_to=str(status_to) if status_to else None,
-                decision=str(decision) if decision else None,
                 http_status=int(http_status) if http_status is not None else None,
                 duration_ms=int(duration_ms),
                 is_synthetic=synthetic,
@@ -432,7 +431,7 @@ class LedgerSpanExporter(SpanExporter):
             raw_dump = ev_model.model_dump()
             valid_cols = {
                 "event_id", "event_time", "env_id", "journey_id", "trace_id", "span_id", "parent_span_id",
-                "service", "operation", "event_type", "entity_type", "entity_id", "decision",
+                "service", "operation", "event_type", "entity_type", "entity_id",
                 "state_from", "state_to", "numeric_attributes", "currency", "http_status",
                 "duration_ms", "is_synthetic", "source", "attributes",
             }
@@ -470,7 +469,12 @@ class LedgerSpanExporter(SpanExporter):
                     is_synthetic=synthetic,
                     attributes=extra_attrs,
                 )
-                transition_rows.append(st_model.model_dump())
+                st_valid_cols = {
+                    "transition_id", "transition_time", "env_id", "entity", "entity_id",
+                    "journey_id", "status_from", "status_to", "actor_service", "source",
+                    "dwell_ms", "is_synthetic", "attributes",
+                }
+                transition_rows.append({k: v for k, v in st_model.model_dump().items() if k in st_valid_cols})
 
             # Stitch journey state by journey_id (exclude synthetic boundary probes without a journey)
             if journey_id and source != "probe":
@@ -586,7 +590,13 @@ class LedgerSpanExporter(SpanExporter):
                 is_synthetic=acc.is_synthetic,
                 journey_model_version="1.0",
             )
-            updated_models.append(j_row.model_dump())
+            journey_valid_cols = {
+                "journey_id", "journey_name", "started_at", "ended_at", "env_id",
+                "customer_id", "steps", "observed_sequence", "conformance",
+                "final_status", "total_value", "total_duration_ms", "is_synthetic",
+                "journey_model_version",
+            }
+            updated_models.append({k: v for k, v in j_row.model_dump().items() if k in journey_valid_cols})
 
         if isinstance(self._bigquery, InMemoryBigQuery):
             existing_rows = {

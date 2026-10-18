@@ -438,3 +438,77 @@ def test_kpi_sql_and_changepoint_cusum_zscore_all_kpis() -> None:
     }
     assert anom_rollups["latency_mean_ms"].breach is True
     assert anom_rollups["completion_rate"].breach is True
+
+
+@pytest.mark.unit
+@pytest.mark.contract
+def test_ledger_exporter_row_keys_subset_of_bigquery_schemas() -> None:
+    """Ensure every row emitted by LedgerSpanExporter is a subset of the BigQuery table schemas (no streaming 500 drift)."""
+    repo_root = Path(__file__).resolve().parents[3]
+    ledger_schema_dir = repo_root / "godview" / "ledger" / "schemas"
+
+    schema_columns: dict[str, set[str]] = {}
+    for table in ("events", "state_transitions", "journeys"):
+        schema_file = ledger_schema_dir / f"{table}.json"
+        assert schema_file.is_file(), f"Missing schema file {schema_file}"
+        fields = json.loads(schema_file.read_text(encoding="utf-8"))
+        schema_columns[table] = {f["name"] for f in fields}
+
+    # Verify parent_span_id is in events schema
+    assert "parent_span_id" in schema_columns["events"]
+
+    bq = InMemoryBigQuery()
+    write_stream = InMemoryStorageWriteStream(bq)
+    exporter = LedgerSpanExporter(
+        bigquery=bq,
+        env_id="env-drift-test",
+        default_journey_name="drift_check_flow",
+        write_stream=write_stream,
+    )
+
+    base_time = datetime(2026, 10, 18, 8, 0, 0, tzinfo=UTC)
+    test_spans = [
+        {
+            "event_id": "evt-drift-1",
+            "trace_id": "tr-drift-1",
+            "span_id": "sp-drift-1",
+            "parent_span_id": "sp-parent-0",
+            "service": "svc-drift-node",
+            "operation": "POST /items",
+            "start_time": base_time,
+            "end_time": base_time + timedelta(milliseconds=50),
+            "attributes": {
+                "journey.id": "jrn-drift-1",
+                "customer.id": "cust-drift-1",
+                "event_type": "item.created",
+                "entity": "item",
+                "entity_id": "it-001",
+                "status_from": "INIT",
+                "status_to": "ACTIVE",
+                "http.status_code": 201,
+                "synthetic": False,
+                "custom_key": "custom_val",
+            },
+        }
+    ]
+
+    res = exporter.export_span_dicts(test_spans)
+    assert res.events_written >= 1
+    assert res.transitions_written >= 1
+    assert res.journeys_updated >= 1
+
+    # Assert row keys in events ⊆ events.json columns
+    for row in bq.get_table("events"):
+        extra_keys = set(row.keys()) - schema_columns["events"]
+        assert not extra_keys, f"events table row has keys not in schema: {extra_keys}"
+
+    # Assert row keys in state_transitions ⊆ state_transitions.json columns
+    for row in bq.get_table("state_transitions"):
+        extra_keys = set(row.keys()) - schema_columns["state_transitions"]
+        assert not extra_keys, f"state_transitions table row has keys not in schema: {extra_keys}"
+
+    # Assert row keys in journeys ⊆ journeys.json columns
+    for row in bq.get_table("journeys"):
+        extra_keys = set(row.keys()) - schema_columns["journeys"]
+        assert not extra_keys, f"journeys table row has keys not in schema: {extra_keys}"
+
