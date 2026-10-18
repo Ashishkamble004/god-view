@@ -22,6 +22,7 @@ from godview.sovereign.sentinels import build_probe_sentinel
 
 class MockContext:
     def __init__(self, fs: Any, ps: Any, ae: Any) -> None:
+        self.env_mode = "hermetic"
         self.docs = fs
         self.bus = ps
         self.agents = ae

@@ -64,6 +64,19 @@ class PostureEvaluator(BaseSentinelEvaluator):
                     details={"status": "unknown", "error": err, "resource_id": resource_id},
                 )
 
+            # If getIamPolicy failed (iam_error present or all_users is None), degrade to unknown and don't write baseline
+            if posture_data.get("all_users") is None or "iam_error" in posture_data:
+                iam_err = posture_data.get("iam_error") or "getIamPolicy failed (all_users is None)"
+                return SentinelEvaluation(
+                    observed=0.0,
+                    breached=False,
+                    details={
+                        "status": "unknown",
+                        "error": str(iam_err),
+                        "resource_id": resource_id,
+                    },
+                )
+
             # If no baseline from spec or tfstate, retrieve or record first-seen snapshot
             if not baseline and ctx.firestore is not None and hasattr(ctx.firestore, "get"):
                 saved_bl = ctx.firestore.get("posture_baselines", resource_id)

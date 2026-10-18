@@ -42,9 +42,12 @@ def _get_env_mode(ctx: Any) -> str:
         return str(settings.env_mode)
     if hasattr(ctx, "env_mode") and ctx.env_mode:
         return str(ctx.env_mode)
+    docs = getattr(ctx, "docs", None) or getattr(ctx, "firestore", None)
+    if docs is not None and type(docs).__name__.startswith("InMemory"):
+        return "hermetic"
     import os
 
-    return os.environ.get("GODVIEW_ENV", "hermetic")
+    return os.environ.get("GODVIEW_ENV", "gcp")
 
 
 def _get_service_auth_dep(ctx: Any) -> Callable[..., Any]:

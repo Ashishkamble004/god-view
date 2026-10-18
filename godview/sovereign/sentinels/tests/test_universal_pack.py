@@ -393,6 +393,19 @@ async def test_posture_drift_and_negative() -> None:
     assert res_clean.breached is False
     assert res_clean.observed == 0.0
 
+    # IAM error / all_users=None: must degrade to status="unknown" without breach or recording baseline
+    iam_err_posture = {
+        "ingress": "internal-and-cloud-load-balancing",
+        "invoker_iam_disabled": False,
+        "all_users": None,
+        "iam_error": "403 Forbidden: Missing roles/resourcemanager.organizationViewer",
+    }
+    invoker.register_handler("run.get_posture", lambda args: iam_err_posture)
+    res_unknown = await evaluator.evaluate(snt, ctx)
+    assert res_unknown.breached is False
+    assert res_unknown.details.get("status") == "unknown"
+    assert "403 Forbidden" in str(res_unknown.details.get("error", ""))
+
 
 @pytest.mark.unit
 async def test_pubsub_health_dlq_and_404_window() -> None:
