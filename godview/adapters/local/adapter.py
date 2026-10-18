@@ -14,6 +14,7 @@ Implements SDD §2.2, §2.3, §10, Coordinator Decision A11 (observer exclusion)
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -444,46 +445,63 @@ class LocalEnvironmentSenseAdapter(SenseAdapter):
             elif hasattr(self._ledger, "events"):
                 trace_events = getattr(self._ledger, "events", [])
 
-            events_by_trace: dict[str, list[dict[str, Any]]] = {}
+            # Index spans by span_id -> service_name
+            span_service: dict[str, str] = {}
             for ev in trace_events:
-                tid = ev.get("trace_id") or ev.get("journey_id")
-                if tid:
-                    events_by_trace.setdefault(str(tid), []).append(ev)
+                svc = ev.get("service") or ev.get("service_name") or ev.get("source")
+                sid = ev.get("span_id")
+                if svc and sid:
+                    span_service[str(sid)] = str(svc)
 
-            for _tid, ev_list in events_by_trace.items():
-                ev_list.sort(key=lambda x: str(x.get("event_time") or x.get("timestamp") or ""))
-                for i in range(len(ev_list) - 1):
-                    src_s = str(ev_list[i].get("service") or ev_list[i].get("service_name") or ev_list[i].get("source") or "")
-                    dst_s = str(ev_list[i + 1].get("service") or ev_list[i + 1].get("service_name") or ev_list[i + 1].get("source") or "")
-                    if src_s and dst_s and src_s != dst_s:
-                        src_doc_id = (by_name[src_s].doc_id if src_s in by_name else f"{self.env_id}__cloud_run.{src_s}")
-                        dst_doc_id = (by_name[dst_s].doc_id if dst_s in by_name else f"{self.env_id}__cloud_run.{dst_s}")
-                        edge_key = (src_doc_id, dst_doc_id)
-                        if edge_key in seen_edges:
-                            # Upgrade config edge to trace evidence
-                            for existing_e in edges:
-                                if existing_e.src == src_doc_id and existing_e.dst == dst_doc_id:
-                                    existing_e.evidence = "trace"
-                                    existing_e.evidence_kind = "trace"
-                                    existing_e.rps = 1.0
-                                    existing_e.confidence = 0.9
-                                    break
-                        else:
-                            seen_edges.add(edge_key)
-                            edges.append(
-                                DiscoveredEdgeDoc(
-                                    doc_id=f"{src_doc_id}__to__{dst_doc_id}",
-                                    src=src_doc_id,
-                                    dst=dst_doc_id,
-                                    protocol="http",
-                                    evidence="trace",
-                                    evidence_kind="trace",
-                                    rps=1.0,
-                                    confidence=0.9,
-                                    first_seen=now_iso,
-                                    last_seen=now_iso,
-                                )
-                            )
+            # Causal call counts: parentSpanId -> child (caller -> callee)
+            call_counts: dict[tuple[str, str], int] = {}
+            for ev in trace_events:
+                parent_id = ev.get("parent_span_id")
+                if not parent_id:
+                    attrs = ev.get("attributes")
+                    if isinstance(attrs, str):
+                        try:
+                            attrs = json.loads(attrs)
+                        except Exception:
+                            attrs = {}
+                    if isinstance(attrs, dict):
+                        parent_id = attrs.get("parent_span_id")
+                child_svc = ev.get("service") or ev.get("service_name") or ev.get("source")
+                if parent_id and child_svc:
+                    parent_svc = span_service.get(str(parent_id))
+                    if parent_svc and parent_svc != child_svc:
+                        key = (str(parent_svc), str(child_svc))
+                        call_counts[key] = call_counts.get(key, 0) + 1
+
+            for (src_s, dst_s), count in call_counts.items():
+                src_doc_id = (by_name[src_s].doc_id if src_s in by_name else f"{self.env_id}__cloud_run.{src_s}")
+                dst_doc_id = (by_name[dst_s].doc_id if dst_s in by_name else f"{self.env_id}__cloud_run.{dst_s}")
+                edge_key = (src_doc_id, dst_doc_id)
+                if edge_key in seen_edges:
+                    # Upgrade config edge to trace evidence
+                    for existing_e in edges:
+                        if existing_e.src == src_doc_id and existing_e.dst == dst_doc_id:
+                            existing_e.evidence = "trace"
+                            existing_e.evidence_kind = "trace"
+                            existing_e.rps = float(count)
+                            existing_e.confidence = 0.9
+                            break
+                else:
+                    seen_edges.add(edge_key)
+                    edges.append(
+                        DiscoveredEdgeDoc(
+                            doc_id=f"{src_doc_id}__to__{dst_doc_id}",
+                            src=src_doc_id,
+                            dst=dst_doc_id,
+                            protocol="http",
+                            evidence="trace",
+                            evidence_kind="trace",
+                            rps=float(count),
+                            confidence=0.9,
+                            first_seen=now_iso,
+                            last_seen=now_iso,
+                        )
+                    )
 
         return DiscoveryResult(
             services=services,

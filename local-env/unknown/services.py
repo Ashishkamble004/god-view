@@ -186,7 +186,7 @@ def create_intake_app(*, suffix: str = "", route_service_url: str | None = None)
     app = FastAPI(
         title=svc_name,
         version="1.0.0",
-        description="Fictional Parcel Logistics Intake Service",
+        description="Inbound package intake and shipment registration gateway",
     )
 
     @app.get("/")
@@ -296,7 +296,7 @@ def create_route_app(*, suffix: str = "", dispatch_service_url: str | None = Non
     app = FastAPI(
         title=svc_name,
         version="1.0.0",
-        description="Fictional Parcel Logistics Route Optimization Service",
+        description="Transit routing hub and regional dispatch assignment service",
     )
 
     @app.get("/")
@@ -406,7 +406,7 @@ def create_dispatch_app(*, suffix: str = "", proof_service_url: str | None = Non
     app = FastAPI(
         title=svc_name,
         version="1.0.0",
-        description="Fictional Parcel Logistics Courier Dispatch Service",
+        description="Outbound courier fulfillment and carrier dispatch coordinator",
     )
 
     @app.get("/")
@@ -508,7 +508,7 @@ def create_proof_app(*, suffix: str = "") -> FastAPI:
     app = FastAPI(
         title=svc_name,
         version="1.0.0",
-        description="Fictional Parcel Logistics Proof of Delivery Service",
+        description="Recipient handover verification and delivery confirmation service",
     )
 
     @app.get("/")

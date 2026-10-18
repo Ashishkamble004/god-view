@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS `godview_ledger.events` (
   journey_id STRING,
   trace_id STRING,
   span_id STRING,
+  parent_span_id STRING,
   service STRING NOT NULL,
   operation STRING,
   event_type STRING NOT NULL,

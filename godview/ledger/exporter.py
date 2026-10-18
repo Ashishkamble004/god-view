@@ -328,6 +328,7 @@ class LedgerSpanExporter(SpanExporter):
             operation = str(raw.get("operation") or raw.get("name") or "unknown-op")
             trace_id = raw.get("trace_id")
             span_id = raw.get("span_id")
+            parent_span_id = raw.get("parent_span_id") or attrs.get("parent_span_id")
 
             start_time = raw.get("start_time") or raw.get("event_time") or datetime.now(tz=UTC)
             if isinstance(start_time, str):
@@ -411,6 +412,7 @@ class LedgerSpanExporter(SpanExporter):
                 journey_id=str(journey_id) if journey_id else None,
                 trace_id=str(trace_id) if trace_id else None,
                 span_id=str(span_id) if span_id else None,
+                parent_span_id=str(parent_span_id) if parent_span_id else None,
                 service=service,
                 operation=operation,
                 event_type=event_type,
@@ -429,7 +431,7 @@ class LedgerSpanExporter(SpanExporter):
             )
             raw_dump = ev_model.model_dump()
             valid_cols = {
-                "event_id", "event_time", "env_id", "journey_id", "trace_id", "span_id",
+                "event_id", "event_time", "env_id", "journey_id", "trace_id", "span_id", "parent_span_id",
                 "service", "operation", "event_type", "entity_type", "entity_id", "decision",
                 "state_from", "state_to", "numeric_attributes", "currency", "http_status",
                 "duration_ms", "is_synthetic", "source", "attributes",

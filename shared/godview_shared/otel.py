@@ -283,6 +283,7 @@ def parse_otlp_spans(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
                     {
                         "trace_id": sp.get("traceId") or sp.get("trace_id"),
                         "span_id": sp.get("spanId") or sp.get("span_id"),
+                        "parent_span_id": sp.get("parentSpanId") or sp.get("parent_span_id"),
                         "service": str(
                             sp.get("service") or attrs.get("service.name") or res_service
                         ),

@@ -37,6 +37,7 @@ class DuckDBLedger:
                 journey_id VARCHAR,
                 trace_id VARCHAR,
                 span_id VARCHAR,
+                parent_span_id VARCHAR,
                 service VARCHAR,
                 operation VARCHAR,
                 event_type VARCHAR,
