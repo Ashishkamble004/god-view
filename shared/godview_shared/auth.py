@@ -374,43 +374,26 @@ class AuthService:
                 return None
 
             email = claims.get("email", "")
-            current_project = (
-                getattr(self.settings, "gcp_project_id", "")
-                or os.environ.get("GOOGLE_CLOUD_PROJECT")
-                or os.environ.get("GCP_PROJECT_ID")
-                or ""
-            )
 
             effective_allowed = (
                 allowed_principals
                 if allowed_principals is not None
                 else self._allowed_service_principals
             )
-            # Strict project-qualified service principal allowlist (Decision #89/#91/#95)
+            # Strict service principal allowlist (Decision #89/#91/#95, Plan §0 fail closed)
             if effective_allowed:
                 if email not in effective_allowed:
-                    logger.warning("OIDC rejected: email %s not in allowed principals %s", email, effective_allowed)
-                    return None
-            else:
-                if current_project:
-                    canonical = {
-                        f"godview-sense-sa@{current_project}.iam.gserviceaccount.com",
-                        f"godview-act-sa@{current_project}.iam.gserviceaccount.com",
-                        f"godview-runtime-sa@{current_project}.iam.gserviceaccount.com",
-                        f"godview-deploy-sa@{current_project}.iam.gserviceaccount.com",
-                        f"godview-apigw-sa@{current_project}.iam.gserviceaccount.com",
-                    }
-                    if email not in canonical:
-                        logger.warning(
-                            "OIDC rejected: %s not in canonical project allowlist %s",
-                            email, canonical
-                        )
-                        return None
-                else:
                     logger.warning(
-                        "OIDC rejected: project is unknown and no service principal allowlist configured"
+                        "OIDC rejected: email %s not in allowed principals %s",
+                        email,
+                        effective_allowed,
                     )
                     return None
+            else:
+                logger.warning(
+                    "OIDC rejected: no service principal allowlist configured (fail closed, no silent fallback)"
+                )
+                return None
 
             sub = claims.get("sub", "")
             aud = claims.get("aud", verified_aud)
