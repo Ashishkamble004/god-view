@@ -284,11 +284,7 @@ class _BaseGcpAdapter(SenseAdapter):
         )
         self.env_id = f"gcp-{self.project_id}"
 
-    def _headers(self) -> dict[str, str]:
-        headers: dict[str, str] = {
-            "Accept": "application/json",
-            "x-goog-user-project": self.project_id,
-        }
+    def _current_token(self) -> str:
         token: str | None = None
         if self.auth is not None and hasattr(self.auth, "access_token"):
             try:
@@ -296,7 +292,15 @@ class _BaseGcpAdapter(SenseAdapter):
             except Exception:
                 token = None
         if not token:
-            token = self.bearer_token or resolve_gcp_bearer_token()
+            token = resolve_gcp_bearer_token() or self.bearer_token
+        return token or ""
+
+    def _headers(self) -> dict[str, str]:
+        headers: dict[str, str] = {
+            "Accept": "application/json",
+            "x-goog-user-project": self.project_id,
+        }
+        token = self._current_token()
         if token:
             headers["Authorization"] = f"Bearer {token}"
         return headers
@@ -1243,6 +1247,7 @@ class GkeAdapter(_BaseGcpAdapter):
             http_transport=http_transport,
         )
         self._gke_mcp = gke_mcp
+        self._last_k8s_error: str | None = None
 
     async def _fetch_clusters(self) -> list[dict[str, Any]]:
         # Plan §3.2: GKE locations/-
@@ -1274,24 +1279,41 @@ class GkeAdapter(_BaseGcpAdapter):
                     return res
                 if isinstance(res, dict) and "items" in res:
                     return list(res["items"])
-            except Exception:
-                pass
+            except Exception as exc:
+                self._last_k8s_error = f"gke_mcp k8s.get_resource error: {exc}"
+                return []
 
-        if not endpoint or not self.bearer_token:
+        if not endpoint:
             return []
 
-        url = f"https://{endpoint}/apis/apps/v1/deployments"
-        headers = {"Authorization": f"Bearer {self.bearer_token}", "Accept": "application/json"}
-        verify: bool | ssl.SSLContext = False
-        if ca_cert:
+        token = self._current_token()
+        if not token:
+            self._last_k8s_error = "No bearer token available for Kubernetes API authentication"
+            logger.warning(self._last_k8s_error)
+            return []
+
+        # Enforce secure TLS verification: require cluster CA certificate unless using mock transport
+        if self._transport is None:
+            if not ca_cert:
+                self._last_k8s_error = (
+                    "Cluster CA certificate missing; refusing unverified TLS connection to Kubernetes API"
+                )
+                logger.warning(self._last_k8s_error)
+                return []
             try:
                 ctx = ssl.create_default_context()
                 ctx.load_verify_locations(cadata=base64.b64decode(ca_cert).decode("utf-8"))
-                ctx.check_hostname = False
-                verify = ctx
-            except Exception:
-                verify = False
+                # Keep hostname checking enabled (GKE serves endpoint IP in certificate SAN)
+                verify: bool | ssl.SSLContext = ctx
+            except Exception as exc:
+                self._last_k8s_error = f"Failed to load cluster CA certificate: {exc}"
+                logger.warning(self._last_k8s_error)
+                return []
+        else:
+            verify = True
 
+        url = f"https://{endpoint}/apis/apps/v1/deployments"
+        headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
         kwargs: dict[str, Any] = {"timeout": 5.0, "verify": verify}
         if self._transport is not None:
             kwargs["transport"] = self._transport
@@ -1300,9 +1322,16 @@ class GkeAdapter(_BaseGcpAdapter):
             async with httpx.AsyncClient(**kwargs) as client:
                 resp = await client.get(url, headers=headers)
                 if resp.status_code == 200:
+                    self._last_k8s_error = None
                     return list(resp.json().get("items", []))
+                else:
+                    self._last_k8s_error = (
+                        f"GET /apis/apps/v1/deployments returned HTTP {resp.status_code}: {resp.text[:120]}"
+                    )
+                    logger.warning(self._last_k8s_error)
         except Exception as exc:
-            logger.debug("Failed to fetch k8s deployments from %s: %s", endpoint, exc)
+            self._last_k8s_error = f"Kubernetes API deployments error from {endpoint}: {exc}"
+            logger.warning(self._last_k8s_error)
         return []
 
     async def _fetch_k8s_services(
@@ -1330,24 +1359,39 @@ class GkeAdapter(_BaseGcpAdapter):
                     return res
                 if isinstance(res, dict) and "items" in res:
                     return list(res["items"])
-            except Exception:
-                pass
+            except Exception as exc:
+                self._last_k8s_error = f"gke_mcp k8s.get_resource error: {exc}"
+                return []
 
-        if not endpoint or not self.bearer_token:
+        if not endpoint:
             return []
 
-        url = f"https://{endpoint}/api/v1/services"
-        headers = {"Authorization": f"Bearer {self.bearer_token}", "Accept": "application/json"}
-        verify: bool | ssl.SSLContext = False
-        if ca_cert:
+        token = self._current_token()
+        if not token:
+            self._last_k8s_error = "No bearer token available for Kubernetes API authentication"
+            logger.warning(self._last_k8s_error)
+            return []
+
+        if self._transport is None:
+            if not ca_cert:
+                self._last_k8s_error = (
+                    "Cluster CA certificate missing; refusing unverified TLS connection to Kubernetes API"
+                )
+                logger.warning(self._last_k8s_error)
+                return []
             try:
                 ctx = ssl.create_default_context()
                 ctx.load_verify_locations(cadata=base64.b64decode(ca_cert).decode("utf-8"))
-                ctx.check_hostname = False
-                verify = ctx
-            except Exception:
-                verify = False
+                verify: bool | ssl.SSLContext = ctx
+            except Exception as exc:
+                self._last_k8s_error = f"Failed to load cluster CA certificate: {exc}"
+                logger.warning(self._last_k8s_error)
+                return []
+        else:
+            verify = True
 
+        url = f"https://{endpoint}/api/v1/services"
+        headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
         kwargs: dict[str, Any] = {"timeout": 5.0, "verify": verify}
         if self._transport is not None:
             kwargs["transport"] = self._transport
@@ -1357,8 +1401,14 @@ class GkeAdapter(_BaseGcpAdapter):
                 resp = await client.get(url, headers=headers)
                 if resp.status_code == 200:
                     return list(resp.json().get("items", []))
+                else:
+                    self._last_k8s_error = (
+                        f"GET /api/v1/services returned HTTP {resp.status_code}: {resp.text[:120]}"
+                    )
+                    logger.warning(self._last_k8s_error)
         except Exception as exc:
-            logger.debug("Failed to fetch k8s services from %s: %s", endpoint, exc)
+            self._last_k8s_error = f"Kubernetes API services error from {endpoint}: {exc}"
+            logger.warning(self._last_k8s_error)
         return []
 
     async def discover(self) -> DiscoveryResult:
@@ -1529,13 +1579,17 @@ class GkeAdapter(_BaseGcpAdapter):
                                     )
                                 )
 
+        evidence_dict: dict[str, Any] = {
+            "clusters_count": len(clusters),
+            "workloads_count": len(services) - len(clusters),
+        }
+        if self._last_k8s_error:
+            evidence_dict["k8s_api_error"] = self._last_k8s_error
+
         return DiscoveryResult(
             services=services,
             edges=edges,
-            evidence={
-                "clusters_count": len(clusters),
-                "workloads_count": len(services) - len(clusters),
-            },
+            evidence=evidence_dict,
         )
 
     def senses(self) -> list[SenseCategory]:
@@ -1568,6 +1622,10 @@ class GkeAdapter(_BaseGcpAdapter):
         }
         if error:
             evidence["error"] = error
+        if self._last_k8s_error:
+            evidence["k8s_api_error"] = self._last_k8s_error
+            if state == "available":
+                state = "partial"
         return AdapterHealth(
             adapter_name=self.name,
             family="gcp",
