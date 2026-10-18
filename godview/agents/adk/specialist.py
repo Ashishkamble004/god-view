@@ -279,7 +279,7 @@ class SpecialistTools:
             try:
                 import httpx
 
-                url = f"{self.sovereign_url}/capabilities/{capability_id}:invoke"
+                url = f"{self.sovereign_url}/api/v1/capabilities/{capability_id}:invoke"
                 headers = self._get_auth_headers()
                 with httpx.Client(timeout=15.0) as client:
                     resp = client.post(url, json={"args": arg_dict}, headers=headers)
@@ -289,6 +289,56 @@ class SpecialistTools:
                 logger.warning("Remote invoke_capability failed for %s: %s", capability_id, exc)
 
         # Zero Echo: Never return fabricated status string when unhandled. Fail closed with NoExecutorError.
+        from godview.sovereign.remediation.types import NoExecutorError
+
+        raise NoExecutorError(capability_id)
+
+    async def invoke_capability_async(
+        self, capability_id: str, args: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Asynchronously invoke a capability over HTTP or in-process executor."""
+        arg_dict = args or {}
+        if is_mutating_capability(capability_id):
+            return {
+                "status": "approval_required",
+                "requires_approval": True,
+                "capability_id": capability_id,
+                "args": arg_dict,
+                "message": (
+                    f"Capability '{capability_id}' is a mutating action and requires operator "
+                    "approval through TrustGate. Use propose_remediation to queue for approval."
+                ),
+            }
+
+        if self.ctx is not None and hasattr(self.ctx, "executors") and self.ctx.executors is not None:
+            executor = self.ctx.executors.get(capability_id)
+            if executor is not None:
+                res = executor(**arg_dict)
+                if inspect.isawaitable(res):
+                    res = await res
+                return res if isinstance(res, dict) else {"status": "ok", "result": res}
+
+        if self.ctx is not None and hasattr(self.ctx, "remediation_dispatcher") and self.ctx.remediation_dispatcher is not None:
+            dispatcher = self.ctx.remediation_dispatcher
+            if hasattr(dispatcher, "invoke_read"):
+                res = dispatcher.invoke_read(capability_id, arg_dict)
+                if inspect.isawaitable(res):
+                    res = await res
+                return res
+
+        if self.sovereign_url:
+            try:
+                import httpx
+
+                url = f"{self.sovereign_url}/api/v1/capabilities/{capability_id}:invoke"
+                headers = self._get_auth_headers()
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    resp = await client.post(url, json={"args": arg_dict}, headers=headers)
+                    if resp.status_code == 200:
+                        return resp.json()
+            except Exception as exc:
+                logger.warning("Remote async invoke_capability failed for %s: %s", capability_id, exc)
+
         from godview.sovereign.remediation.types import NoExecutorError
 
         raise NoExecutorError(capability_id)
@@ -306,7 +356,7 @@ class SpecialistTools:
             try:
                 import httpx
 
-                url = f"{self.sovereign_url}/business-context/{target_id}"
+                url = f"{self.sovereign_url}/api/v1/business-context/{target_id}"
                 headers = self._get_auth_headers()
                 with httpx.Client(timeout=15.0) as client:
                     resp = client.get(url, headers=headers)
@@ -316,6 +366,29 @@ class SpecialistTools:
                 logger.warning("Remote fetch get_business_context failed for %s: %s", target_id, exc)
         return {"service_id": target_id, "status": "no_business_context_found"}
 
+    async def get_business_context_async(self, service_id: str | None = None) -> dict[str, Any]:
+        """Asynchronously fetch discovered BusinessContext for a service."""
+        target_id = service_id or "default"
+        if self.ctx is not None and hasattr(self.ctx, "docs") and self.ctx.docs is not None:
+            doc = self.ctx.docs.get("discovered_services", target_id)
+            if doc and "business_context" in doc:
+                return doc["business_context"]
+            if doc:
+                return doc
+        if self.sovereign_url:
+            try:
+                import httpx
+
+                url = f"{self.sovereign_url}/api/v1/business-context/{target_id}"
+                headers = self._get_auth_headers()
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    resp = await client.get(url, headers=headers)
+                    if resp.status_code == 200:
+                        return resp.json()
+            except Exception as exc:
+                logger.warning("Remote async get_business_context failed for %s: %s", target_id, exc)
+        return {"service_id": target_id, "status": "no_business_context_found"}
+
     def query_ledger(
         self, query: str, params: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:
@@ -323,6 +396,12 @@ class SpecialistTools:
         if self.ctx is not None and hasattr(self.ctx, "ledger") and self.ctx.ledger is not None:
             return self.ctx.ledger.query(query, params)
         return []
+
+    async def query_ledger_async(
+        self, query: str, params: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
+        """Asynchronously query event ledger."""
+        return self.query_ledger(query, params)
 
     def get_incident(self, incident_id: str) -> dict[str, Any]:
         """Fetch incident details including the full evidence pack."""
@@ -334,7 +413,7 @@ class SpecialistTools:
             try:
                 import httpx
 
-                url = f"{self.sovereign_url}/incidents/{incident_id}"
+                url = f"{self.sovereign_url}/api/v1/incidents/{incident_id}"
                 headers = self._get_auth_headers()
                 with httpx.Client(timeout=15.0) as client:
                     resp = client.get(url, headers=headers)
@@ -342,6 +421,26 @@ class SpecialistTools:
                         return resp.json()
             except Exception as exc:
                 logger.warning("Remote fetch get_incident failed for %s: %s", incident_id, exc)
+        return {"incident_id": incident_id, "status": "incident_not_found"}
+
+    async def get_incident_async(self, incident_id: str) -> dict[str, Any]:
+        """Asynchronously fetch incident details including the full evidence pack."""
+        if self.ctx is not None and hasattr(self.ctx, "docs") and self.ctx.docs is not None:
+            doc = self.ctx.docs.get("incidents", incident_id)
+            if doc:
+                return doc
+        if self.sovereign_url:
+            try:
+                import httpx
+
+                url = f"{self.sovereign_url}/api/v1/incidents/{incident_id}"
+                headers = self._get_auth_headers()
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    resp = await client.get(url, headers=headers)
+                    if resp.status_code == 200:
+                        return resp.json()
+            except Exception as exc:
+                logger.warning("Remote async get_incident failed for %s: %s", incident_id, exc)
         return {"incident_id": incident_id, "status": "incident_not_found"}
 
     def propose_remediation(
@@ -377,8 +476,45 @@ class SpecialistTools:
         ]
 
     def build_adk_tools(self) -> list[FunctionTool]:
-        """Wrap each tool function in an ADK FunctionTool."""
-        return [FunctionTool(func=f) for f in self.build_tool_callables()]
+        """Wrap each tool function in an ADK FunctionTool with async support."""
+        async def invoke_capability(
+            capability_id: str, args: dict[str, Any] | None = None
+        ) -> dict[str, Any]:
+            """Invoke a capability. Read capabilities execute freely; mutating capabilities require approval."""
+            return await self.invoke_capability_async(capability_id, args)
+
+        async def get_business_context(service_id: str | None = None) -> dict[str, Any]:
+            """Fetch discovered BusinessContext for a service."""
+            return await self.get_business_context_async(service_id)
+
+        async def query_ledger(
+            query: str, params: dict[str, Any] | None = None
+        ) -> list[dict[str, Any]]:
+            """Query the event ledger for historical state transitions or KPIs."""
+            return await self.query_ledger_async(query, params)
+
+        async def get_incident(incident_id: str) -> dict[str, Any]:
+            """Fetch incident details including the full evidence pack."""
+            return await self.get_incident_async(incident_id)
+
+        def propose_remediation(
+            capability_id: str,
+            args: dict[str, Any] | None = None,
+            rationale: str = "",
+            confidence: float = 0.9,
+        ) -> dict[str, Any]:
+            """Queue a proposed remediation action for TrustGate evaluation and operator approval."""
+            return self.propose_remediation(
+                capability_id, args=args, rationale=rationale, confidence=confidence
+            )
+
+        return [
+            FunctionTool(func=invoke_capability),
+            FunctionTool(func=get_business_context),
+            FunctionTool(func=query_ledger),
+            FunctionTool(func=get_incident),
+            FunctionTool(func=propose_remediation),
+        ]
 
 
 def _clean_adk_identifier(name: str) -> str:

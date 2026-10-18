@@ -712,13 +712,15 @@ async def test_remote_specialist_parses_reasoning_engine_query_output_shape(monk
     assert diag.root_cause_category == "memory_leak"
 
 
-def test_specialist_tools_remote_dispatch_with_id_token(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.asyncio
+async def test_specialist_tools_remote_dispatch_with_id_token(monkeypatch: pytest.MonkeyPatch) -> None:
     from types import SimpleNamespace
     from unittest.mock import MagicMock
 
     import httpx
 
-    captured_requests: list[tuple[str, str, dict[str, Any]]] = []
+    captured_sync_requests: list[tuple[str, str, dict[str, Any]]] = []
+    captured_async_requests: list[tuple[str, str, dict[str, Any]]] = []
 
     class MockHttpClient:
         def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -731,23 +733,51 @@ def test_specialist_tools_remote_dispatch_with_id_token(monkeypatch: pytest.Monk
             pass
 
         def get(self, url: str, headers: dict[str, str]) -> Any:
-            captured_requests.append(("GET", url, headers))
+            captured_sync_requests.append(("GET", url, headers))
             resp = MagicMock()
             resp.status_code = 200
-            if "incidents" in url:
+            if "/incidents/" in url:
                 resp.json.return_value = {"incident_id": "inc-456", "title": "DB Latency Spike"}
-            elif "business-context" in url:
+            elif "/business-context/" in url:
                 resp.json.return_value = {"service_id": "order-api", "domain": "checkout"}
             return resp
 
         def post(self, url: str, json: dict[str, Any], headers: dict[str, str]) -> Any:
-            captured_requests.append(("POST", url, headers))
+            captured_sync_requests.append(("POST", url, headers))
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.json.return_value = {"status": "ok", "result": {"rows": 42}}
+            return resp
+
+    class MockAsyncHttpClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> MockAsyncHttpClient:
+            return self
+
+        async def __aexit__(self, *args: Any) -> None:
+            pass
+
+        async def get(self, url: str, headers: dict[str, str]) -> Any:
+            captured_async_requests.append(("GET", url, headers))
+            resp = MagicMock()
+            resp.status_code = 200
+            if "/incidents/" in url:
+                resp.json.return_value = {"incident_id": "inc-456", "title": "DB Latency Spike"}
+            elif "/business-context/" in url:
+                resp.json.return_value = {"service_id": "order-api", "domain": "checkout"}
+            return resp
+
+        async def post(self, url: str, json: dict[str, Any], headers: dict[str, str]) -> Any:
+            captured_async_requests.append(("POST", url, headers))
             resp = MagicMock()
             resp.status_code = 200
             resp.json.return_value = {"status": "ok", "result": {"rows": 42}}
             return resp
 
     monkeypatch.setattr(httpx, "Client", MockHttpClient)
+    monkeypatch.setattr(httpx, "AsyncClient", MockAsyncHttpClient)
 
     class FakeAuth:
         def id_token_for(self, audience: str) -> str:
@@ -756,26 +786,71 @@ def test_specialist_tools_remote_dispatch_with_id_token(monkeypatch: pytest.Monk
     ctx = SimpleNamespace(auth=FakeAuth(), docs=None, executors=None, ledger=None)
     tools = SpecialistTools(ctx=ctx, sovereign_url="https://godview-sovereign.a.run.app")
 
-    # 1. Remote get_incident
+    # 1. Synchronous dispatch with exact /api/v1 routes
     inc = tools.get_incident("inc-456")
     assert inc["incident_id"] == "inc-456"
-    method, url, headers = captured_requests[-1]
+    method, url, headers = captured_sync_requests[-1]
     assert method == "GET"
-    assert url == "https://godview-sovereign.a.run.app/incidents/inc-456"
+    assert url == "https://godview-sovereign.a.run.app/api/v1/incidents/inc-456"
     assert headers["Authorization"] == "Bearer mock-oidc-token-for-https://godview-sovereign.a.run.app"
 
-    # 2. Remote get_business_context
     bctx = tools.get_business_context("order-api")
     assert bctx["domain"] == "checkout"
-    method, url, headers = captured_requests[-1]
+    method, url, headers = captured_sync_requests[-1]
     assert method == "GET"
-    assert url == "https://godview-sovereign.a.run.app/business-context/order-api"
-    assert "Bearer mock-oidc-token" in headers["Authorization"]
+    assert url == "https://godview-sovereign.a.run.app/api/v1/business-context/order-api"
+    assert headers["Authorization"] == "Bearer mock-oidc-token-for-https://godview-sovereign.a.run.app"
 
-    # 3. Remote invoke_capability (read)
     res = tools.invoke_capability("sql.list_tables", {"database": "prod"})
     assert res["status"] == "ok"
-    method, url, headers = captured_requests[-1]
+    method, url, headers = captured_sync_requests[-1]
     assert method == "POST"
-    assert url == "https://godview-sovereign.a.run.app/capabilities/sql.list_tables:invoke"
-    assert "Bearer mock-oidc-token" in headers["Authorization"]
+    assert url == "https://godview-sovereign.a.run.app/api/v1/capabilities/sql.list_tables:invoke"
+    assert headers["Authorization"] == "Bearer mock-oidc-token-for-https://godview-sovereign.a.run.app"
+
+    # 2. Asynchronous dispatch with AsyncClient and exact /api/v1 routes
+    inc_async = await tools.get_incident_async("inc-456")
+    assert inc_async["incident_id"] == "inc-456"
+    method, url, headers = captured_async_requests[-1]
+    assert method == "GET"
+    assert url == "https://godview-sovereign.a.run.app/api/v1/incidents/inc-456"
+    assert headers["Authorization"] == "Bearer mock-oidc-token-for-https://godview-sovereign.a.run.app"
+
+    bctx_async = await tools.get_business_context_async("order-api")
+    assert bctx_async["domain"] == "checkout"
+    method, url, headers = captured_async_requests[-1]
+    assert method == "GET"
+    assert url == "https://godview-sovereign.a.run.app/api/v1/business-context/order-api"
+    assert headers["Authorization"] == "Bearer mock-oidc-token-for-https://godview-sovereign.a.run.app"
+
+    res_async = await tools.invoke_capability_async("sql.list_tables", {"database": "prod"})
+    assert res_async["status"] == "ok"
+    method, url, headers = captured_async_requests[-1]
+    assert method == "POST"
+    assert url == "https://godview-sovereign.a.run.app/api/v1/capabilities/sql.list_tables:invoke"
+    assert headers["Authorization"] == "Bearer mock-oidc-token-for-https://godview-sovereign.a.run.app"
+
+    # 3. ADK FunctionTool wrappers invoking async methods
+    adk_tools = {t.name: t for t in tools.build_adk_tools()}
+    assert "get_incident" in adk_tools
+    assert "get_business_context" in adk_tools
+    assert "invoke_capability" in adk_tools
+
+    t_inc = adk_tools["get_incident"]
+    await t_inc.func(incident_id="inc-789")
+    method, url, headers = captured_async_requests[-1]
+    assert method == "GET"
+    assert url == "https://godview-sovereign.a.run.app/api/v1/incidents/inc-789"
+
+    t_bctx = adk_tools["get_business_context"]
+    await t_bctx.func(service_id="payment-svc")
+    method, url, headers = captured_async_requests[-1]
+    assert method == "GET"
+    assert url == "https://godview-sovereign.a.run.app/api/v1/business-context/payment-svc"
+
+    t_inv = adk_tools["invoke_capability"]
+    await t_inv.func(capability_id="obs.query_logs_scoped", args={"service": "payment-svc"})
+    method, url, headers = captured_async_requests[-1]
+    assert method == "POST"
+    assert url == "https://godview-sovereign.a.run.app/api/v1/capabilities/obs.query_logs_scoped:invoke"
+
