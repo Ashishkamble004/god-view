@@ -324,7 +324,7 @@ async def test_mcp_clients_allowlist_is_error_and_persistent_handshake(
 async def test_scoped_log_query_enforces_page_size_cap_and_pii_detector(
     gcp_fixtures: dict[str, Any],
 ) -> None:
-    """TDD §3.7 & UC-13: obs.query_logs_scoped enforces pageSize <= 50 and detects PAN/Aadhaar in logs."""
+    """TDD §3.7 & UC-13: obs.query_logs_scoped enforces pageSize <= 50 and detects sensitive PII in logs."""
     log_adapter = CloudLoggingAuditAdapter(
         fixtures=gcp_fixtures,
         log_entries_fixture=[

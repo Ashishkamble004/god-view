@@ -1378,7 +1378,9 @@ class TerraformDriftAdapter(SenseAdapter):
         if resource_name != address:
             assert_managed_resource(caller_labels, resource_name, live_labels=live_labels)
 
-        if "google_cloud_run_v2_service" not in address:
+        addr_parts = address.split(".")
+        resource_type = addr_parts[-2] if len(addr_parts) >= 2 else address
+        if resource_type != "google_cloud_run_v2_service":
             raise NotImplementedError(
                 f"tf.restore_attribute fast-restore currently supports google_cloud_run_v2_service resources (got '{address}'). "
                 "Use remediation orchestrator for infrastructure-level mutations."
