@@ -400,6 +400,10 @@ class JourneyDoc(BaseModel):
     conformance_rules: list[dict[str, Any]] = Field(default_factory=list)
     funnel_kpis: list[str] = Field(default_factory=list)
     impact_model: dict[str, Any] = Field(default_factory=dict)
+    confidence: float = 0.0
+    evidence: list[dict[str, Any]] | list[str] = Field(default_factory=list)
+    inferred_by: str = ""
+    inferred_at: str | None = None
     owner_agent_id: str | None = None
     status: str = "active"
 
