@@ -1,3 +1,4 @@
+import { AlertTriangle } from 'lucide-react';
 import React from 'react';
 import type { ChangeEvent } from '../api/types';
 import {
@@ -18,6 +19,20 @@ export const ChangesTab: React.FC<ChangesTabProps> = ({
   changes,
   onSelectIncident,
 }) => {
+  if (!changes) {
+    return (
+      <Card className="p-8 text-center">
+        <AlertTriangle className="mx-auto h-8 w-8 text-amber-500" />
+        <h3 className="mt-3 text-base font-semibold text-slate-900">
+          Change Telemetry Not Measured Yet
+        </h3>
+        <p className="mt-1 text-xs text-slate-500 max-w-md mx-auto">
+          The Sovereign control plane <code>/api/v1/changes</code> endpoint returned no data or is currently unreachable.
+        </p>
+      </Card>
+    );
+  }
+
   if (changes.length === 0) {
     return (
       <EmptyState

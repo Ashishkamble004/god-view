@@ -1,4 +1,4 @@
-import { Moon, RefreshCw, Sliders, Sun, UserCheck, UserX, X } from 'lucide-react';
+import { RefreshCw, Sliders, UserCheck, UserX, X } from 'lucide-react';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   CockpitApiError,
@@ -20,7 +20,7 @@ import { IncidentsTab } from './components/IncidentsTab';
 import { InvariantsTab } from './components/InvariantsTab';
 import { JourneysTab } from './components/JourneysTab';
 import { OrganismTab } from './components/OrganismTab';
-import { Badge, Button, TableSkeleton, formatEnumLabel } from './components/ui';
+import { Badge, Button, EmptyState, TableSkeleton, formatEnumLabel } from './components/ui';
 
 export type CockpitRouteTab =
   | 'globe'
@@ -178,17 +178,6 @@ export function App() {
     'connected' | 'reconnecting' | 'polling'
   >('polling');
   const [drawerOpen, setDrawerOpen] = useState<boolean>(false);
-  const [theme, setTheme] = useState<'light' | 'dark'>('light');
-
-  const toggleTheme = useCallback(() => {
-    setTheme((curr) => {
-      const next = curr === 'light' ? 'dark' : 'light';
-      if (typeof document !== 'undefined') {
-        document.documentElement.setAttribute('data-theme', next);
-      }
-      return next;
-    });
-  }, []);
 
   const drawerTriggerRef = useRef<HTMLButtonElement | null>(null);
   const drawerCloseRef = useRef<HTMLButtonElement | null>(null);
@@ -596,7 +585,7 @@ export function App() {
 
   return (
     <div
-      className={`min-h-screen bg-white dark:bg-[#0f141b] text-slate-700 dark:text-slate-200 ${
+      className={`min-h-screen bg-white text-slate-700 ${
         route.tab === 'globe' ? 'h-screen flex flex-col overflow-hidden' : ''
       }`}
     >
@@ -604,7 +593,7 @@ export function App() {
       <div className="google-top-hairline w-full shrink-0" />
 
       {/* Global Top Bar */}
-      <header className="sticky top-0 z-30 shrink-0 border-b border-slate-200 dark:border-slate-800 bg-white/95 dark:bg-[#141a22]/95 backdrop-blur-sm">
+      <header className="sticky top-0 z-30 shrink-0 border-b border-slate-200 bg-white/95 backdrop-blur-sm">
         <div className="mx-auto flex max-w-[1440px] flex-wrap items-center justify-between gap-3 px-6 py-3">
           {/* Brand & Environment Chip */}
           <div className="flex flex-wrap items-center gap-3">
@@ -692,27 +681,13 @@ export function App() {
                 )}
               </div>
             )}
-
-            <button
-              type="button"
-              aria-label={`Switch to ${theme === 'light' ? 'dark' : 'light'} theme`}
-              title={`Switch to ${theme === 'light' ? 'dark' : 'light'} theme`}
-              onClick={toggleTheme}
-              className="inline-flex items-center justify-center rounded border border-slate-200 bg-slate-50 p-1.5 text-slate-600 hover:bg-slate-100"
-            >
-              {theme === 'light' ? (
-                <Moon className="h-3.5 w-3.5" />
-              ) : (
-                <Sun className="h-3.5 w-3.5 text-amber-500" />
-              )}
-            </button>
           </div>
         </div>
 
         {/* Hash-Routed Navigation Bar */}
         <nav
           aria-label="Cockpit primary navigation"
-          className="mx-auto flex max-w-[1440px] items-center gap-1 overflow-x-auto border-t border-slate-100 dark:border-slate-800 px-6"
+          className="mx-auto flex max-w-[1440px] items-center gap-1 overflow-x-auto border-t border-slate-100 px-6"
         >
           {navItems.map((item) => {
             const active = route.tab === item.tab;
@@ -723,8 +698,8 @@ export function App() {
                 onClick={() => navigateToHash(item.hash)}
                 className={`inline-flex items-center gap-1.5 border-b-2 px-3 py-2.5 text-xs whitespace-nowrap transition-colors focus:outline-none focus:ring-2 focus:ring-inset focus:ring-blue-600 ${
                   active
-                    ? 'border-blue-600 text-blue-700 dark:text-blue-400 font-semibold'
-                    : 'border-transparent text-slate-600 dark:text-slate-400 hover:border-slate-300 dark:hover:border-slate-700 hover:text-slate-900 dark:hover:text-slate-200'
+                    ? 'border-blue-600 text-blue-700 font-semibold'
+                    : 'border-transparent text-slate-600 hover:border-slate-300 hover:text-slate-900'
                 }`}
               >
                 <span>{item.label}</span>
@@ -732,8 +707,8 @@ export function App() {
                   <span
                     className={`rounded px-1.5 py-0.2 font-mono text-[11px] num-tabular ${
                       active
-                        ? 'bg-blue-50 dark:bg-blue-900/60 text-blue-800 dark:text-blue-300 font-semibold'
-                        : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300'
+                        ? 'bg-blue-50 text-blue-800 font-semibold'
+                        : 'bg-slate-100 text-slate-700'
                     }`}
                   >
                     {item.badge}
@@ -849,7 +824,7 @@ export function App() {
         )}
 
         {dataset && (
-          <ErrorBoundary>
+          <ErrorBoundary key={`${route.tab}-${route.param ?? ''}-${route.journeyName ?? ''}`}>
             {(route.tab === 'globe' || route.tab === 'globe-2d') && (
               <GlobeView
                 initialForce2D={route.tab === 'globe-2d'}
@@ -1034,7 +1009,7 @@ export function App() {
 
             {route.tab === 'approvals' && (
               <ApprovalsTab
-                approvals={dataset.approvals ?? []}
+                approvals={dataset.approvals}
                 currentUserEmail={dataset.me?.email || ''}
                 approvalWindowLabel={dataset.perceive?.approval_window_label || 'Not measured yet'}
                 referenceNowIso={dataset.perceive?.heartbeat_at || new Date().toISOString()}
@@ -1048,7 +1023,7 @@ export function App() {
                       prev
                         ? {
                             ...prev,
-                            approvals: prev.approvals.map((a) =>
+                            approvals: (prev.approvals || []).map((a) =>
                               a.approval_id === updated.approval_id
                                 ? updated
                                 : a
@@ -1246,82 +1221,95 @@ export function App() {
           }}
         >
           <div className="h-full w-full max-w-lg overflow-y-auto border-l border-slate-200 bg-white p-5 shadow-sm">
-            <div className="flex items-center justify-between border-b border-slate-200 pb-3">
-              <div>
-                <h2 className="text-sm font-semibold text-slate-900">
-                  Opt-In Chaos Drills Drawer ({dataset.perceive?.managed_scope_label ?? 'Estate scope'})
-                </h2>
-                <p className="text-xs text-slate-500">
-                  Trigger or halt proving-ground faults while watching live sentinels
-                </p>
-              </div>
-              <button
-                ref={drawerCloseRef}
-                type="button"
-                aria-label="Close Chaos Drills Drawer"
-                onClick={closeDrawer}
-                className="rounded p-1 text-slate-600 hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-600"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-
-            <div className="mt-4 space-y-2.5">
-              {dataset.drills.map((drill) => (
-                <div
-                  key={drill.drill_id}
-                  className="rounded border border-slate-200 bg-slate-50 p-3 text-xs"
+            <ErrorBoundary key="chaos-drills-drawer">
+              <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-900">
+                    Opt-In Chaos Drills Drawer ({dataset.perceive?.managed_scope_label ?? 'Estate scope'})
+                  </h2>
+                  <p className="text-xs text-slate-500">
+                    Trigger or halt proving-ground faults while watching live sentinels
+                  </p>
+                </div>
+                <button
+                  ref={drawerCloseRef}
+                  type="button"
+                  aria-label="Close Chaos Drills Drawer"
+                  onClick={closeDrawer}
+                  className="rounded p-1 text-slate-600 hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-600"
                 >
-                  <div className="flex items-start justify-between gap-2">
-                    <div>
-                      <div className="flex items-center gap-1.5">
-                        <span className="font-semibold text-slate-900">
-                          {drill.title}
-                        </span>
-                        <Badge
-                          variant={
-                            drill.fault_class === 'BUSINESS'
-                              ? 'info'
-                              : 'warning'
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              <div className="mt-4 space-y-2.5">
+                {dataset.drills && dataset.drills.length > 0 ? (
+                  dataset.drills.map((drill) => (
+                    <div
+                      key={drill.drill_id}
+                      className="rounded border border-slate-200 bg-slate-50 p-3 text-xs"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-semibold text-slate-900">
+                              {drill.title}
+                            </span>
+                            <Badge
+                              variant={
+                                drill.fault_class === 'BUSINESS'
+                                  ? 'info'
+                                  : 'warning'
+                              }
+                            >
+                              {formatEnumLabel(drill.fault_class)}
+                            </Badge>
+                          </div>
+                          <p className="mt-0.5 font-mono text-slate-600">
+                            target: {drill.target_service} · {drill.mttd_target}
+                          </p>
+                        </div>
+                        <Button
+                          variant={drill.is_active ? 'secondary' : 'primary'}
+                          size="sm"
+                          onClick={() =>
+                            void runMutation(`drill:${drill.drill_id}`, async () => {
+                              const updated = await cockpitApi.controlChaosDrill(
+                                drill.drill_id,
+                                drill.is_active ? 'stop' : 'start'
+                              );
+                              setDataset((prev) =>
+                                prev
+                                  ? {
+                                      ...prev,
+                                      drills: (prev.drills || []).map((d) =>
+                                        d.drill_id === updated.drill_id
+                                          ? updated
+                                          : d
+                                      ),
+                                    }
+                                  : prev
+                              );
+                            })
                           }
                         >
-                          {formatEnumLabel(drill.fault_class)}
-                        </Badge>
+                          {drill.is_active ? 'Stop' : 'Start'}
+                        </Button>
                       </div>
-                      <p className="mt-0.5 font-mono text-slate-600">
-                        target: {drill.target_service} · {drill.mttd_target}
-                      </p>
                     </div>
-                    <Button
-                      variant={drill.is_active ? 'secondary' : 'primary'}
-                      size="sm"
-                      onClick={() =>
-                        void runMutation(`drill:${drill.drill_id}`, async () => {
-                          const updated = await cockpitApi.controlChaosDrill(
-                            drill.drill_id,
-                            drill.is_active ? 'stop' : 'start'
-                          );
-                          setDataset((prev) =>
-                            prev
-                              ? {
-                                  ...prev,
-                                  drills: prev.drills.map((d) =>
-                                    d.drill_id === updated.drill_id
-                                      ? updated
-                                      : d
-                                  ),
-                                }
-                              : prev
-                          );
-                        })
-                      }
-                    >
-                      {drill.is_active ? 'Stop' : 'Start'}
-                    </Button>
-                  </div>
-                </div>
-              ))}
-            </div>
+                  ))
+                ) : (
+                  <EmptyState
+                    title="No Chaos Drills Available"
+                    description={
+                      dataset.drills === null
+                        ? 'The Sovereign control plane /chaos/drills endpoint returned no data or is currently unreachable.'
+                        : 'No opt-in chaos drills are currently registered for this environment.'
+                    }
+                  />
+                )}
+              </div>
+            </ErrorBoundary>
           </div>
         </div>
       )}

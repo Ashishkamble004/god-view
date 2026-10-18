@@ -17,9 +17,9 @@ const NOUNS = [
   'orchestrator',
   'guardrail',
   'evaluator',
-  'creditline',
-  'protection',
-  'settlement',
+  'allocator',
+  'validator',
+  'pipeline',
   'datastore',
   'repository',
   'substrate',
@@ -41,7 +41,7 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
   const svcSettlement = `vm-${pickWord(ADJECTIVES, seed, 6)}-${NOUNS[5]}`;
   const dbPrimary = `db-${pickWord(ADJECTIVES, seed, 7)}-${NOUNS[6]}`;
   const repoSlug = `org-${pickWord(ADJECTIVES, seed, 8)}/core-monorepo`;
-  const journeyKey = `workflow_${pickWord(ADJECTIVES, seed, 9)}_origination`;
+  const journeyKey = `workflow_${pickWord(ADJECTIVES, seed, 9)}_pipeline`;
   const reasoningModel = `model-flash-v3.8-${seed % 10}@global`;
   const escalationModel = `model-argon-v4.0-${seed % 10}@global`;
   const embeddingModel = `model-embed-005@us-central1`;
@@ -178,7 +178,7 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
           adapter_family: 'kubernetes',
           locator: `k8s://cluster-main/ns-core/deployment/${svcEvaluator}`,
           labels: { godview_managed: 'true', tf_module: 'workloads' },
-          inferred_role: 'Obligation ratio, pricing schedule, and eligibility decision engine',
+          inferred_role: 'Resource allocation, capacity scheduling, and policy evaluation engine',
           role_confidence: 0.96,
           classification: 'journey_linked',
           routes: ['POST /internal/decision/evaluate', 'GET /metrics', 'GET /healthz'],
@@ -198,10 +198,10 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
           adapter_family: 'gcp',
           locator: `projects/${envId}/locations/us-central1/services/${svcCreditline}`,
           labels: { godview_managed: 'true', tf_module: '04-tenant-compute' },
-          inferred_role: 'Commercial credit line and working-capital limit authorization service',
+          inferred_role: 'Partition allocation, quota budgeting, and capacity authorization service',
           role_confidence: 0.93,
           classification: 'journey_linked',
-          routes: ['POST /internal/credit-limit/evaluate'],
+          routes: ['POST /internal/allocation/evaluate'],
           metrics_endpoint: '/metrics',
           repo_ref: repoSlug,
           tf_address: `module.tenant_compute.google_cloud_run_v2_service.creditline`,
@@ -218,10 +218,10 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
           adapter_family: 'gcp',
           locator: `projects/${envId}/locations/us-central1/services/${svcProtection}`,
           labels: { godview_managed: 'true', tf_module: '04-tenant-compute' },
-          inferred_role: 'Asset protection contract issuance and toll-tag wallet linkage',
+          inferred_role: 'Asset integrity verification, contract validation, and schema compliance checking',
           role_confidence: 0.94,
           classification: 'journey_linked',
-          routes: ['POST /internal/protection/issue'],
+          routes: ['POST /internal/validation/issue'],
           metrics_endpoint: '/metrics',
           repo_ref: repoSlug,
           tf_address: `module.tenant_compute.google_cloud_run_v2_service.protection`,
@@ -238,10 +238,10 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
           adapter_family: 'gcp',
           locator: `projects/${envId}/zones/us-central1-a/instances/${svcSettlement}:8090`,
           labels: { godview_managed: 'true', tf_module: '04-tenant-compute' },
-          inferred_role: 'Credit bureau scoring, e-mandate registration, and RTGS/NEFT UTR settlement',
+          inferred_role: 'Node health verification, partition registration, and ledger commit pipeline',
           role_confidence: 0.95,
           classification: 'journey_linked',
-          routes: ['POST /internal/settlement/score-and-settle', 'POST /internal/settlement/execute'],
+          routes: ['POST /internal/settlement/commit', 'POST /internal/settlement/execute'],
           metrics_endpoint: ':8090/metrics',
           repo_ref: repoSlug,
           tf_address: `module.tenant_compute.google_compute_instance.settlement_vm`,
@@ -336,7 +336,7 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
             { from: 'APPROVED', to: 'PROTECTED' },
             { from: 'PROTECTED', to: 'SETTLED' },
           ],
-          rules_ref: ['rule-obligation-ratio-cap', 'rule-bureau-minimum'],
+          rules_ref: ['rule-allocation-ratio-cap', 'rule-node-health-minimum'],
           provenance: `${repoSlug}@9f1c2ab:services/${svcEvaluator}/app/rules_engine.py`,
         },
       ],
@@ -443,34 +443,34 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
           entities: [
             {
               name: 'decision_audit_record',
-              fields: ['audit_id', 'application_id', 'bureau_score', 'obligation_ratio_pct', 'ltv_pct', 'rules_version', 'decision'],
-              correlation_keys: ['application_id', 'audit_id'],
-              tables: ['decision_audits', 'applications'],
+              fields: ['audit_id', 'transaction_id', 'node_health_score', 'allocation_ratio_pct', 'capacity_quota_pct', 'rules_version', 'decision'],
+              correlation_keys: ['transaction_id', 'audit_id'],
+              tables: ['decision_audits', 'transactions'],
               provenance: `services/${svcEvaluator}/app/models.py@9f1c2ab#L12-L44`,
             },
           ],
           rules: [
             {
-              id: 'rule-obligation-ratio-cap',
-              expression: 'decision == "APPROVED" implies obligation_ratio_pct <= 60.0 and bureau_score >= 680',
-              description: 'Approval requires fixed-obligation-to-income ratio at most 60% and credit bureau score at least 680',
+              id: 'rule-allocation-ratio-cap',
+              expression: 'decision == "CONFIRMED" implies allocation_ratio_pct <= 60.0 and node_health_score >= 680',
+              description: 'Confirmation requires resource allocation ratio at most 60% and node health score at least 680',
               source_path: `services/${svcEvaluator}/app/rules_engine.py#L41-L58`,
               source_sha: '9f1c2ab',
               confidence: 0.96,
             },
             {
-              id: 'rule-pricing-formula',
+              id: 'rule-capacity-formula',
               expression: 'abs(scheduled_amount - calculate_schedule(base_amount, rate_pct, cycle_periods)) <= 1.0',
               description: 'Periodic amount matches standard schedule calculation within 1.0 rounding tolerance',
-              source_path: `services/${svcEvaluator}/app/pricing.py#L19-L37`,
+              source_path: `services/${svcEvaluator}/app/capacity.py#L19-L37`,
               source_sha: '9f1c2ab',
               confidence: 0.94,
             },
           ],
           state_machines: [
             {
-              entity: 'credit_application',
-              states: ['IDENTITY_PENDING', 'IDENTITY_VERIFIED', 'APPROVED', 'REJECTED', 'PROTECTED', 'SETTLED'],
+              entity: 'workload_transaction',
+              states: ['IDENTITY_PENDING', 'IDENTITY_VERIFIED', 'CONFIRMED', 'REJECTED', 'PROTECTED', 'SETTLED'],
               transitions: [
                 {
                   from: 'IDENTITY_PENDING',
@@ -541,7 +541,7 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
           ],
           decision_boundaries: [
             {
-              input: 'obligation_ratio_pct',
+              input: 'allocation_ratio_pct',
               boundary: '40.0% (regressed from 60.0%)',
               expected: '<= 60.0%',
               method: 'bisection',
@@ -550,7 +550,7 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
               status: 'drifted',
             },
             {
-              input: 'bureau_score',
+              input: 'node_health_score',
               boundary: '>= 680',
               expected: '>= 680',
               method: 'bisection',
@@ -571,7 +571,7 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
               sha: 'a1b2c3d',
               author: 'dev-release-bot',
               occurred_at: '2026-10-16T14:04:12Z',
-              business_summary: 'PR #42 changed MAX_OBLIGATION_RATIO_PCT threshold from 60 to 40 in rules_engine.py',
+              business_summary: 'PR #42 changed MAX_ALLOCATION_RATIO_PCT threshold from 60 to 40 in rules_engine.py',
               files_changed: [`services/${svcEvaluator}/app/rules_engine.py`],
             },
             {
@@ -833,7 +833,7 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
               sha: 'a1b2c3d',
               author: 'dev-release-bot',
               occurred_at: '2026-10-16T14:04:12Z',
-              business_summary: 'PR #42 lowered obligation ratio cap from 60% to 40% in rules_engine.py',
+              business_summary: 'PR #42 lowered allocation ratio cap from 60% to 40% in rules_engine.py',
               files_changed: [`services/${svcEvaluator}/app/rules_engine.py`],
             },
           ],
@@ -929,7 +929,7 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
           dialect: 'bigquery',
           window_s: 300,
           statement:
-            "SELECT COUNT(*) AS violations FROM godview_ledger.events WHERE event_type = 'application.decided' AND decision = 'APPROVED' AND (obligation_ratio_pct > 60 OR bureau_score < 680) AND source != 'probe'",
+            "SELECT COUNT(*) AS violations FROM godview_ledger.events WHERE event_type = 'transaction.confirmed' AND decision = 'CONFIRMED' AND (allocation_ratio_pct > 60 OR node_health_score < 680) AND source != 'probe'",
         },
         severity: 'sev1',
         wake_condition: {
@@ -947,19 +947,19 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
           breaches: 14,
           false_positive_rate: 0.004,
         },
-        sentinel_id: 'snt-invariant_sql-approved-implies-ratio-and-score',
-        git_path: `godview/invariants/${journeyKey}/approved-implies-ratio-and-score/INVARIANT.md`,
+        sentinel_id: 'snt-invariant_sql-confirmed-implies-ratio-and-score',
+        git_path: `godview/invariants/${journeyKey}/confirmed-implies-ratio-and-score/INVARIANT.md`,
         git_sha: '9f1c2ab',
-        body_md: `### Invariant: APPROVED ⇒ Obligation Ratio ≤ 60% ∧ Bureau Score ≥ 680
+        body_md: `### Invariant: CONFIRMED ⇒ Allocation Ratio ≤ 60% ∧ Node Health Score ≥ 680
 
-**Business meaning**: Every \`APPROVED\` eligibility decision requires a fixed-obligation-to-income ratio of at most **60%** and a credit bureau score of at least **680**.
+**Business meaning**: Every \`CONFIRMED\` allocation decision requires a resource allocation ratio of at most **60%** and a node health score of at least **680**.
 
 - **Provenance**: Extracted from \`services/${svcEvaluator}/app/rules_engine.py\` lines 41–58.
-- **Value at risk**: Sum of \`requested_amount\` across non-compliant approvals in the 300s evaluation window.
+- **Value at risk**: Sum of \`requested_capacity\` across non-compliant allocations in the 300s evaluation window.
 - **Remediation protocol**:
   1. Correlate with recent commits/deploys on \`${svcEvaluator}\`.
   2. Open rollback PR via \`git.create_rollback_pr\` (Trust Level L3).
-  3. Request L4 approval for \`biz.reevaluate_application\` on the affected cohort.`,
+  3. Request L4 approval for \`biz.reevaluate_transaction\` on the affected cohort.`,
         history: [
           {
             at: '2026-10-15T09:10:00Z',
@@ -1030,11 +1030,11 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
         name: 'schedule-tolerance',
         scope: {
           service: svcEvaluator,
-          entity: 'credit_application',
+          entity: 'workload_transaction',
           journey: journeyKey,
         },
         provenance: 'policy',
-        provenance_ref: `docs/credit-pricing-policy.md#section-4.2`,
+        provenance_ref: `docs/allocation-capacity-policy.md#section-4.2`,
         check: {
           dialect: 'python',
           window_s: 300,
@@ -1073,11 +1073,11 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
         ],
       },
       {
-        id: 'inv-legacy-mandate-timeout-guard',
-        name: 'legacy-mandate-timeout-guard',
+        id: 'inv-legacy-lease-timeout-guard',
+        name: 'legacy-lease-timeout-guard',
         scope: {
           service: svcSettlement,
-          entity: 'settlement_ledger',
+          entity: 'pipeline_ledger',
           journey: journeyKey,
         },
         provenance: 'observed',
@@ -1103,10 +1103,10 @@ export function createRandomCockpitDataset(seed = 42): CockpitDataset {
           breaches: 1,
           false_positive_rate: 0.012,
         },
-        sentinel_id: 'snt-invariant_sql-legacy-mandate-timeout-guard',
-        git_path: `godview/invariants/${journeyKey}/legacy-mandate-timeout-guard/INVARIANT.md`,
+        sentinel_id: 'snt-invariant_sql-legacy-lease-timeout-guard',
+        git_path: `godview/invariants/${journeyKey}/legacy-lease-timeout-guard/INVARIANT.md`,
         git_sha: '9f1c2ab',
-        body_md: `### Proposed Invariant: Settlement Dwell Time Guard
+        body_md: `### Proposed Invariant: Ledger Dwell Time Guard
 
 Proposed during nightly reflection to flag settlement transitions exceeding 45s dwell time.`,
         history: [],
@@ -1153,13 +1153,13 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
     ],
     sentinels: [
       {
-        sentinel_id: 'snt-invariant_sql-approved-implies-ratio-and-score',
+        sentinel_id: 'snt-invariant_sql-confirmed-implies-ratio-and-score',
         class: 'invariant_sql',
-        source_ref: 'inv-approved-implies-ratio-and-score',
+        source_ref: 'inv-confirmed-implies-ratio-and-score',
         check: {
           dialect: 'bigquery',
           statement:
-            "SELECT COUNT(*) AS violations FROM godview_ledger.events WHERE event_type = 'application.decided' AND decision = 'APPROVED' AND (obligation_ratio_pct > 60 OR bureau_score < 680)",
+            "SELECT COUNT(*) AS violations FROM godview_ledger.events WHERE event_type = 'transaction.confirmed' AND decision = 'CONFIRMED' AND (allocation_ratio_pct > 60 OR node_health_score < 680)",
         },
         cadence_s: 10,
         baseline: { model: 'same_hour', window_days: 7 },
@@ -1195,7 +1195,7 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
     journeys: [
       {
         journey_key: journeyKey,
-        name: `Multi-Utility Origination & Settlement (${journeyKey})`,
+        name: `Multi-Utility Processing & Dispatch (${journeyKey})`,
         owner_agent_id: bizAgentId,
         status: 'degraded',
         intended_order_source: `${repoSlug}@9f1c2ab:services/${svcOrchestrator}/app/coordinator.py`,
@@ -1220,27 +1220,27 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
           },
           {
             id: 'STEP_CREDITLINE',
-            label: '3. Commercial Credit Top-Up',
+            label: '3. Capacity Allocation Top-Up',
             service: svcCreditline,
-            operation: 'POST /internal/credit-limit/evaluate',
+            operation: 'POST /internal/allocation/evaluate',
             completion_rate_pct: 94.8,
             avg_dwell_ms: 280,
             p95_dwell_ms: 490,
           },
           {
             id: 'STEP_PROTECTION',
-            label: '4. Asset Protection & Tag',
+            label: '4. Integrity Validation & Check',
             service: svcProtection,
-            operation: 'POST /internal/protection/issue',
+            operation: 'POST /internal/validation/issue',
             completion_rate_pct: 96.5,
             avg_dwell_ms: 260,
             p95_dwell_ms: 450,
           },
           {
             id: 'STEP_SETTLEMENT',
-            label: '5. Bureau & RTGS Settlement',
+            label: '5. Partition & Ledger Settlement',
             service: svcSettlement,
-            operation: 'POST /internal/settlement/score-and-settle',
+            operation: 'POST /internal/settlement/commit',
             completion_rate_pct: 97.9,
             avg_dwell_ms: 610,
             p95_dwell_ms: 1120,
@@ -1344,7 +1344,7 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
           },
           {
             step_id: 'STEP_SETTLEMENT',
-            step_name: 'Bureau & RTGS Settlement',
+            step_name: 'Partition & Ledger Settlement',
             entered: 256,
             completed: 251,
             conversion_pct: 98.0,
@@ -1477,13 +1477,13 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
         opened_at: '2026-10-16T14:05:10Z',
         closed_at: null,
         severity: 'sev1',
-        symptom_summary: `Green-but-broken business invariant breach on ${svcEvaluator}: 14 applications decided under regressed 40% obligation ratio threshold while HTTP 200 and P95 (420ms) remain healthy`,
+        symptom_summary: `Green-but-broken business invariant breach on ${svcEvaluator}: 14 transactions processed under regressed 40% allocation ratio threshold while HTTP 200 and P95 (420ms) remain healthy`,
         lead_agent_id: appAgentEvalId,
         participants: [appAgentEvalId, changeAgentId, dataAgentId, bizAgentId, platformAgentId],
-        root_cause: `Commit a1b2c3d (PR #42) modified MAX_OBLIGATION_RATIO_PCT from 60 to 40 in services/${svcEvaluator}/app/rules_engine.py at 14:04:12Z`,
+        root_cause: `Commit a1b2c3d (PR #42) modified MAX_ALLOCATION_RATIO_PCT from 60 to 40 in services/${svcEvaluator}/app/rules_engine.py at 14:04:12Z`,
         causal_chain: [
           `14:04:12Z — PR #42 merged & deployed to ${svcEvaluator} (sha a1b2c3d)`,
-          `14:05:00Z — Sentinel snt-invariant_sql-approved-implies-ratio-and-score observed 14 violations in 300s window`,
+          `14:05:00Z — Sentinel snt-invariant_sql-confirmed-implies-ratio-and-score observed 14 violations in 300s window`,
           `14:05:10Z — Sovereign woke lead ${appAgentEvalId} with EvidencePack evp-20261016-0007 ($18,400,000 at risk across 212 rows)`,
           `14:05:51Z — Swarm converged in 2 rounds (41s, consensus 0.92): autonomous L3 rollback PR #43 created; L4 cohort re-evaluation awaiting approval apr-inc-20261016-0003-2`,
         ],
@@ -1515,7 +1515,7 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
 1. **Verify Golden Signals**: Confirm infrastructure P95 and 5xx rates are green via \`obs.list_timeseries\`.
 2. **Correlate Change Plane**: Inspect \`git.get_commit\` on the SHA cited in \`decision_audits.rules_version\`.
 3. **Autonomous L3 Rollback**: Execute 5-call \`git.create_rollback_pr\` recipe as \`godview-act-sa\`.
-4. **L4 Cohort Remediation**: Request approval for \`biz.reevaluate_application\` on the affected applications.`,
+4. **L4 Cohort Remediation**: Request approval for \`biz.reevaluate_transaction\` on the affected transactions.`,
           },
         ],
         evidence_pack: {
@@ -1524,13 +1524,13 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
           incident_id: 'inc-20261016-0003',
           fired_at: '2026-10-16T14:05:10Z',
           sentinel: {
-            id: 'snt-invariant_sql-approved-implies-ratio-and-score',
+            id: 'snt-invariant_sql-confirmed-implies-ratio-and-score',
             class: 'invariant_sql',
-            source_ref: 'inv-approved-implies-ratio-and-score',
+            source_ref: 'inv-confirmed-implies-ratio-and-score',
           },
           breach: {
             statement:
-              "SELECT COUNT(*) FROM godview_ledger.events WHERE decision='APPROVED' AND (obligation_ratio_pct > 60 OR bureau_score < 680)",
+              "SELECT COUNT(*) FROM godview_ledger.events WHERE decision='CONFIRMED' AND (allocation_ratio_pct > 60 OR node_health_score < 680)",
             observed: { count: 14, window_s: 300 },
             first_seen: '2026-10-16T14:05:00Z',
             consecutive: 3,
@@ -1552,7 +1552,7 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
               change_event_id: `chg-${repoSlug}-a1b2c3d`,
               kind: 'deploy',
               occurred_at: '2026-10-16T14:04:12Z',
-              business_summary: `Obligation ratio threshold changed 60 -> 40 in services/${svcEvaluator}/app/rules_engine.py (PR #42)`,
+              business_summary: `Allocation ratio threshold changed 60 -> 40 in services/${svcEvaluator}/app/rules_engine.py (PR #42)`,
             },
           ],
           golden_signals: {
@@ -1627,12 +1627,12 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
             round: 1,
             sent_at: '2026-10-16T14:05:24Z',
             type: 'brief',
-            summary: `Confirmed PR #42 (sha a1b2c3d) modified MAX_OBLIGATION_RATIO_PCT 60 -> 40 at 14:04:12Z`,
+            summary: `Confirmed PR #42 (sha a1b2c3d) modified MAX_ALLOCATION_RATIO_PCT 60 -> 40 at 14:04:12Z`,
             payload: {
               living_model_delta: {
                 sha: 'a1b2c3d',
                 pr_number: 42,
-                diff: '- MAX_OBLIGATION_RATIO_PCT = 60.0\n+ MAX_OBLIGATION_RATIO_PCT = 40.0',
+                diff: '- MAX_ALLOCATION_RATIO_PCT = 60.0\n+ MAX_ALLOCATION_RATIO_PCT = 40.0',
               },
             },
           },
@@ -1659,9 +1659,9 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
             round: 2,
             sent_at: '2026-10-16T14:05:51Z',
             type: 'report',
-            summary: 'Consensus 0.92 reached: execute L3 git.create_rollback_pr and queue L4 biz.reevaluate_application for 212 rows',
+            summary: 'Consensus 0.92 reached: execute L3 git.create_rollback_pr and queue L4 biz.reevaluate_transaction for 212 rows',
             payload: {
-              root_cause: `PR #42 (sha a1b2c3d) regressed obligation ratio threshold in ${svcEvaluator}`,
+              root_cause: `PR #42 (sha a1b2c3d) regressed allocation ratio threshold in ${svcEvaluator}`,
               confidence: 0.92,
               plan: [
                 {
@@ -1871,11 +1871,11 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
         approval_id: 'apr-inc-20261016-0003-2',
         incident_id: 'inc-20261016-0003',
         agent_id: bizAgentId,
-        action_type: 'biz.reevaluate_application',
-        capability: 'biz.reevaluate_application',
-        target_resource: "applications WHERE rules_version='a1b2c3d' AND decision='APPROVED' (212 rows)",
+        action_type: 'biz.reevaluate_transaction',
+        capability: 'biz.reevaluate_transaction',
+        target_resource: "transactions WHERE rules_version='a1b2c3d' AND decision='CONFIRMED' (212 rows)",
         trust_level_required: 4,
-        narrative: `Re-evaluate 212 applications decided under the regressed 40% obligation ratio threshold in ${svcEvaluator} after rollback PR #43 restores the 60% policy rule.`,
+        narrative: `Re-evaluate 212 transactions decided under the regressed 40% allocation ratio threshold in ${svcEvaluator} after rollback PR #43 restores the 60% policy rule.`,
         evidence_pack_id: 'evp-20261016-0007',
         value_impact: 18400000,
         reversal_recipe: {
@@ -1922,7 +1922,7 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
         sha: 'a1b2c3d',
         pr_number: 42,
         author: 'dev-release-bot',
-        business_summary: `PR #42 lowered MAX_OBLIGATION_RATIO_PCT threshold from 60% to 40% in ${svcEvaluator}/app/rules_engine.py, contracting approval eligibility across retail cohorts.`,
+        business_summary: `PR #42 lowered MAX_ALLOCATION_RATIO_PCT threshold from 60% to 40% in ${svcEvaluator}/app/rules_engine.py, contracting workload throughput across cluster cohorts.`,
         risk_score: 0.89,
         affected_services: [svcEvaluator, svcOrchestrator],
         affected_journeys: [journeyKey],
@@ -1930,7 +1930,7 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
           window_start: '2026-10-16T14:04:12Z',
           window_end: '2026-10-16T14:14:12Z',
           verdict: 'failed',
-          details: 'Business canary failed at +58s: inv-approved-implies-ratio-and-score breached 14x and approval_rate dropped from 71.2% to 38.4%',
+          details: 'Business canary failed at +58s: inv-confirmed-implies-ratio-and-score breached 14x and confirmation_rate dropped from 71.2% to 38.4%',
         },
         linked_incident_ids: ['inc-20261016-0003'],
         occurred_at: '2026-10-16T14:04:12Z',
@@ -1943,7 +1943,7 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
         sha: 'e8d91c0',
         pr_number: 43,
         author: `${appAgentEvalId} (godview-act-sa)`,
-        business_summary: `Autonomous L3 rollback of PR #42 restoring MAX_OBLIGATION_RATIO_PCT = 60.0 in ${svcEvaluator}/app/rules_engine.py.`,
+        business_summary: `Autonomous L3 rollback of PR #42 restoring MAX_ALLOCATION_RATIO_PCT = 60.0 in ${svcEvaluator}/app/rules_engine.py.`,
         risk_score: 0.12,
         affected_services: [svcEvaluator],
         affected_journeys: [journeyKey],
@@ -1964,7 +1964,7 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
         sha: '9f1c2ab',
         pr_number: 41,
         author: 'principal-architect',
-        business_summary: `Added OpenTelemetry business span attributes (decision, obligation_ratio_pct, bureau_score, rules_version) to ${svcEvaluator} and ${svcOrchestrator}.`,
+        business_summary: `Added OpenTelemetry business span attributes (decision, allocation_ratio_pct, node_health_score, rules_version) to ${svcEvaluator} and ${svcOrchestrator}.`,
         risk_score: 0.18,
         affected_services: [svcEvaluator, svcOrchestrator],
         affected_journeys: [journeyKey],
@@ -1972,7 +1972,7 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
           window_start: '2026-10-15T18:20:00Z',
           window_end: '2026-10-15T18:35:00Z',
           verdict: 'passed',
-          details: '0 invariant breaches; approval_rate stable at 71.1% (z-score +0.12)',
+          details: '0 invariant breaches; confirmation_rate stable at 71.1% (z-score +0.12)',
         },
         linked_incident_ids: [],
         occurred_at: '2026-10-15T18:20:00Z',
@@ -2054,10 +2054,10 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
         drill_id: 'ratio_threshold_regression',
         fault_class: 'BUSINESS',
         fault_type: 'ratio_threshold_regression',
-        title: 'Obligation Ratio Threshold Regression (60% → 40%)',
+        title: 'Allocation Ratio Threshold Regression (60% → 40%)',
         target_service: svcEvaluator,
         infra_golden_signals: 'green',
-        expected_detection: 'Invariant inv-approved-implies-ratio-and-score breach + PR #42 causal link + boundary probe drift',
+        expected_detection: 'Invariant inv-confirmed-implies-ratio-and-score breach + PR #42 causal link + boundary probe drift',
         mttd_target: '≤ 15 s',
         is_active: true,
         triggered_by: `sre-lead-${seed}@enterprise-ops.internal`,
@@ -2071,7 +2071,7 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
         title: 'HTTP 200 Silent Drop (No Policy Row Persisted)',
         target_service: svcProtection,
         infra_golden_signals: 'green',
-        expected_detection: 'Journey conformance SKIPPED (missing protection.issued) + Data Agent SQL integrity check',
+        expected_detection: 'Journey conformance SKIPPED (missing validation event) + Data Agent SQL integrity check',
         mttd_target: '≤ 15 s',
         is_active: false,
         triggered_by: null,
@@ -2093,13 +2093,13 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
         expires_at: null,
       },
       {
-        drill_id: 'bureau_stub_constant_900',
+        drill_id: 'health_stub_constant_900',
         fault_class: 'BUSINESS',
-        fault_type: 'bureau_stub_constant_900',
-        title: 'Bureau Score Stub Returns Constant 900',
+        fault_type: 'health_stub_constant_900',
+        title: 'Node Health Score Stub Returns Constant 900',
         target_service: svcSettlement,
         infra_golden_signals: 'green',
-        expected_detection: 'Approval-rate CUSUM breach + synthetic bisection probe boundary disappearance',
+        expected_detection: 'Confirmation-rate CUSUM breach + synthetic bisection probe boundary disappearance',
         mttd_target: '≤ 15 s',
         is_active: false,
         triggered_by: null,
@@ -2152,10 +2152,10 @@ Retired automatically after 30 days with 0 breaches and source module removal ve
         drill_id: 'gce_vm_latency_504',
         fault_class: 'INFRA',
         fault_type: 'gce_vm_latency_504',
-        title: 'Settlement VM 6s Latency & 504 Timeout (Saga Replay Queue)',
+        title: 'Pipeline VM 6s Latency & 504 Timeout (Saga Replay Queue)',
         target_service: svcSettlement,
         infra_golden_signals: 'red',
-        expected_detection: 'Journeys marked STALLED; Business-Line Agent queues L4 biz.replay_settlement on recovery',
+        expected_detection: 'Journeys marked STALLED; Business-Line Agent queues L4 biz.replay_transaction on recovery',
         mttd_target: 'MTTD ≤ 4 min',
         is_active: false,
         triggered_by: null,

@@ -1,4 +1,4 @@
-import { PauseCircle, PlayCircle } from 'lucide-react';
+import { AlertTriangle, PauseCircle, PlayCircle } from 'lucide-react';
 import React, { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import type {
@@ -49,6 +49,21 @@ export const InvariantsTab: React.FC<InvariantsTabProps> = ({
   onCompileSentinel,
   busyKey,
 }) => {
+  if (!invariants) {
+    return (
+      <Card className="p-8 text-center">
+        <AlertTriangle className="mx-auto h-8 w-8 text-amber-500" />
+        <h3 className="mt-3 text-base font-semibold text-slate-900">
+          Invariant Telemetry Not Measured Yet
+        </h3>
+        <p className="mt-1 text-xs text-slate-500 max-w-md mx-auto">
+          The Sovereign control plane <code>/api/v1/invariants</code> endpoint returned no data or is currently unreachable.
+        </p>
+      </Card>
+    );
+  }
+
+  const safeSentinels = sentinels || [];
   const [statusFilter, setStatusFilter] = useState<'all' | InvariantStatus>(
     'all'
   );
@@ -65,7 +80,7 @@ export const InvariantsTab: React.FC<InvariantsTabProps> = ({
     invariants.find((i) => i.id === selectedId) ?? filtered[0] ?? invariants[0];
 
   const linkedSentinel = activeInvariant
-    ? sentinels.find(
+    ? safeSentinels.find(
         (s) =>
           s.sentinel_id === activeInvariant.sentinel_id ||
           s.source_ref === activeInvariant.id

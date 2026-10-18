@@ -75,7 +75,7 @@ describe('God-View Cockpit (URL 3)', () => {
     expect(screen.getAllByText(/8,640/).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/0\.4%/).length).toBeGreaterThan(0);
     expect(
-      screen.getByText(/eligibility decision requires a fixed-obligation-to-income ratio/i)
+      screen.getByText(/allocation decision requires a resource allocation ratio/i)
     ).toBeInTheDocument();
   });
 

@@ -143,10 +143,10 @@ export const OrganismTab: React.FC<OrganismTabProps> = ({
               <span className="text-xs text-slate-500">
                 Spawned Court &amp; Warmth
               </span>
-              <Badge variant="secondary">{court.length} agents</Badge>
+              <Badge variant="secondary">{safeCourt.length} agents</Badge>
             </div>
             <p className="mt-2 text-xl font-semibold text-slate-900 num-tabular">
-              {warmCount} Warm / {court.length - warmCount} Cold
+              {warmCount} Warm / {safeCourt.length - warmCount} Cold
             </p>
           </div>
           <p className="mt-2 text-xs text-slate-600">
@@ -380,7 +380,7 @@ export const OrganismTab: React.FC<OrganismTabProps> = ({
 
               {AGENT_TYPES_ORDER.map((typeKey) => {
                 const meta = AGENT_TYPE_META[typeKey];
-                const agentsOfType = court.filter((a) => a.agent_type === typeKey);
+                const agentsOfType = safeCourt.filter((a) => a.agent_type === typeKey);
                 const primaryAgent = agentsOfType[0];
                 const isWarm = agentsOfType.some(
                   (a) => a.warmth_min_instances === 1

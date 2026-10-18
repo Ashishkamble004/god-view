@@ -1,4 +1,4 @@
-import { Check, Clock, X } from 'lucide-react';
+import { AlertTriangle, Check, Clock, X } from 'lucide-react';
 import React, { useState } from 'react';
 import type { ApprovalCard, ApprovalDecisionStatus } from '../api/types';
 import {
@@ -37,6 +37,20 @@ export const ApprovalsTab: React.FC<ApprovalsTabProps> = ({
   onSelectAgent,
   busyKey,
 }) => {
+  if (!approvals) {
+    return (
+      <Card className="p-8 text-center">
+        <AlertTriangle className="mx-auto h-8 w-8 text-amber-500" />
+        <h3 className="mt-3 text-base font-semibold text-slate-900">
+          Approvals Telemetry Not Measured Yet
+        </h3>
+        <p className="mt-1 text-xs text-slate-500 max-w-md mx-auto">
+          The Sovereign control plane <code>/api/v1/approvals</code> endpoint returned no data or is currently unreachable.
+        </p>
+      </Card>
+    );
+  }
+
   const [filter, setFilter] = useState<'all' | ApprovalDecisionStatus>('all');
 
   const filtered =

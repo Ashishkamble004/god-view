@@ -1,4 +1,4 @@
-import { ArrowLeft, ArrowUpRight } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, ArrowUpRight } from 'lucide-react';
 import React from 'react';
 import ReactMarkdown from 'react-markdown';
 import type { EpisodicIncident } from '../api/types';
@@ -29,6 +29,20 @@ export const IncidentsTab: React.FC<IncidentsTabProps> = ({
   onSelectIncident,
   onSelectAgent,
 }) => {
+  if (!incidents) {
+    return (
+      <Card className="p-8 text-center">
+        <AlertTriangle className="mx-auto h-8 w-8 text-amber-500" />
+        <h3 className="mt-3 text-base font-semibold text-slate-900">
+          Incident Telemetry Not Measured Yet
+        </h3>
+        <p className="mt-1 text-xs text-slate-500 max-w-md mx-auto">
+          The Sovereign control plane <code>/api/v1/incidents</code> endpoint returned no data or is currently unreachable.
+        </p>
+      </Card>
+    );
+  }
+
   const activeIncident =
     incidents.find((i) => i.incident_id === selectedIncidentId) ??
     incidents[0] ??

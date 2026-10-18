@@ -64,7 +64,7 @@ const TIER_LATITUDES: Record<TopologyTier, number> = {
   edge: TIER_LATITUDE.edge ?? 46,
   messaging: TIER_LATITUDE.messaging ?? -10,
   compute: TIER_LATITUDE.compute ?? 16,
-  data: TIER_LATITUDE.data ?? -38,
+  data: TIER_LATITUDE.data ?? -32,
   platform: TIER_LATITUDE.platform ?? -62,
   external: TIER_LATITUDE.external ?? 22, // Orbiting satellite at higher radius
 };
@@ -97,7 +97,7 @@ function slerpVector3(v1: THREE.Vector3, v2: THREE.Vector3, t: number): THREE.Ve
   ).normalize();
 }
 
-const GLOBE_RADIUS = 7.8;
+const GLOBE_RADIUS = 7.4;
 
 export const GlobeView: React.FC<GlobeViewProps> = ({
   initialForce2D = false,
@@ -313,8 +313,8 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
     scene.background = new THREE.Color(GLOBE_COLORS.spaceEdge);
 
     const camera = new THREE.PerspectiveCamera(GLOBE_STYLE.cameraFovDeg, width / height, 0.1, 1000);
-    camera.position.set(0, 9, 29);
-    camera.lookAt(0, 0, 0);
+    camera.position.set(0, 3, 29);
+    camera.lookAt(0, -0.8, 0);
     cameraRef.current = camera;
 
     let renderer: THREE.WebGLRenderer;
@@ -1144,9 +1144,9 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
               })}
             </div>
 
-            {/* Stage Overlay: Active Journey Filter Pill (Top-Center) */}
+            {/* Stage Overlay: Active Journey Filter Pill (Top-Center, stacked below tier chips) */}
             {activeJourney && (
-              <div className="absolute top-4 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 rounded-full border border-amber-500/60 bg-[#1f1600]/90 px-4 py-1.5 text-xs text-amber-200 shadow-xl backdrop-blur-md">
+              <div className="absolute top-14 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 rounded-full border border-amber-500/60 bg-[#1f1600]/90 px-4 py-1.5 text-xs text-amber-200 shadow-xl backdrop-blur-md">
                 <Compass className="h-3.5 w-3.5 text-amber-400 animate-spin" />
                 <span>
                   Journey path:{' '}
@@ -1162,9 +1162,9 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
               </div>
             )}
 
-            {/* Stage Overlay: Floating IncidentBanner (Bottom-Right, Above MapControls) */}
+            {/* Stage Overlay: Floating IncidentBanner (Bottom-Right, Clear Above MapControls) */}
             {activeIncidentsCount != null && activeIncidentsCount > 0 && !incidentBannerDismissed && (
-              <div className="absolute bottom-20 right-8 z-20 max-w-xs md:max-w-sm rounded-xl border border-red-500/40 bg-[#1c0808]/90 p-3.5 text-xs text-slate-200 shadow-2xl backdrop-blur-md break-words">
+              <div className="absolute bottom-48 right-6 z-20 max-w-xs md:max-w-sm rounded-xl border border-red-500/40 bg-[#1c0808]/90 p-3.5 text-xs text-slate-200 shadow-2xl backdrop-blur-md break-words">
                 <div className="flex items-start justify-between gap-3">
                   <div className="flex items-start gap-2.5">
                     <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-node-incident" style={{ color: 'var(--gv-node-incident)' }} />
@@ -1202,7 +1202,7 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
             )}
 
             {/* Stage Overlay: PulseBar (Bottom-Center) */}
-            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20 flex items-center gap-6 rounded-full border border-slate-700/60 bg-[#081a33]/90 px-6 py-2 shadow-2xl backdrop-blur-md num-tabular">
+            <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-20 flex items-center gap-6 rounded-full border border-slate-700/60 bg-[#081a33]/90 px-6 py-2 shadow-2xl backdrop-blur-md num-tabular">
               <div className="flex flex-col items-center text-center">
                 <span className="text-[11px] text-on-space-variant" style={{ color: 'var(--gv-on-space-variant)' }}>
                   Services

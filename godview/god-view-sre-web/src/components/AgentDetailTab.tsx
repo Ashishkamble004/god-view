@@ -1,4 +1,4 @@
-import { ArrowLeft, Brain, Shield } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, Brain, Shield } from 'lucide-react';
 import React, { useEffect, useState } from 'react';
 import { cockpitApi } from '../api/client';
 import type { CourtAgent, HarnessTreeResponse } from '../api/types';
@@ -37,6 +37,20 @@ export const AgentDetailTab: React.FC<AgentDetailTabProps> = ({
   onControlAgent,
   busyKey,
 }) => {
+  if (!agents || agents.length === 0) {
+    return (
+      <Card className="p-8 text-center">
+        <AlertTriangle className="mx-auto h-8 w-8 text-amber-500" />
+        <h3 className="mt-3 text-base font-semibold text-slate-900">
+          Agent Telemetry Not Measured Yet
+        </h3>
+        <p className="mt-1 text-xs text-slate-500 max-w-md mx-auto">
+          The Sovereign control plane <code>/api/v1/court</code> endpoint returned no data or is currently unreachable.
+        </p>
+      </Card>
+    );
+  }
+
   const activeAgent =
     agents.find((a) => a.id === selectedAgentId) ?? agents[0] ?? null;
 

@@ -1,4 +1,4 @@
-import { Globe } from 'lucide-react';
+import { AlertTriangle, Globe } from 'lucide-react';
 import React from 'react';
 import type { JourneyConformanceStatus, JourneyModel } from '../api/types';
 import {
@@ -39,6 +39,20 @@ export const JourneysTab: React.FC<JourneysTabProps> = ({
   journeys,
   onSelectAgent,
 }) => {
+  if (!journeys) {
+    return (
+      <Card className="p-8 text-center">
+        <AlertTriangle className="mx-auto h-8 w-8 text-amber-500" />
+        <h3 className="mt-3 text-base font-semibold text-slate-900">
+          Journey Telemetry Not Measured Yet
+        </h3>
+        <p className="mt-1 text-xs text-slate-500 max-w-md mx-auto">
+          The Sovereign control plane <code>/api/v1/journeys</code> endpoint returned no data or is currently unreachable.
+        </p>
+      </Card>
+    );
+  }
+
   const journey = journeys[0];
 
   if (!journey) {

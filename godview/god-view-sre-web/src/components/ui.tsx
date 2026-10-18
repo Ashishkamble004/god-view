@@ -192,6 +192,9 @@ export function formatEnumLabel(raw: string | null | undefined): string {
 }
 
 export function formatCurrency(amount: number): string {
+  if (amount > 0 && amount < 10) {
+    return `$${amount.toFixed(2)}`;
+  }
   const formatted = new Intl.NumberFormat('en-US', {
     maximumFractionDigits: 0,
   }).format(Math.round(amount));
