@@ -1,23 +1,11 @@
 import {
-  Activity,
-  BookOpen,
-  Box,
   Brain,
-  CheckCircle2,
-  Code2,
-  Copy,
-  Cpu,
   FileCode,
-  FileText,
-  GitBranch,
   Layers,
-  Lock,
-  Play,
   RefreshCw,
   ShieldCheck,
   Sparkles,
   Terminal,
-  Wrench,
 } from 'lucide-react';
 import React, { useEffect, useState } from 'react';
 import { cockpitApi } from '../api/client';
@@ -105,7 +93,10 @@ const CATEGORY_META: Array<{
   },
 ];
 
-export const HarnessTab: React.FC<HarnessTabProps> = ({ court, perceive }) => {
+export const HarnessTab: React.FC<HarnessTabProps> = ({
+  court: _court,
+  perceive: _perceive,
+}) => {
   const [subTab, setSubTab] = useState<SubTab>('inspector');
   const [overview, setOverview] = useState<any | null>(null);
   const [selectedAgentId, setSelectedAgentId] = useState<string>(
@@ -114,7 +105,7 @@ export const HarnessTab: React.FC<HarnessTabProps> = ({ court, perceive }) => {
   const [activeTree, setActiveTree] = useState<any | null>(null);
   const [selectedCategory, setSelectedCategory] =
     useState<CategoryKey>('c1_identity');
-  const [loading, setLoading] = useState<boolean>(true);
+  const [, setLoading] = useState<boolean>(true);
   const [evolving, setEvolving] = useState<boolean>(false);
   const [evolveResult, setEvolveResult] = useState<any | null>(null);
   const [copiedCmd, setCopiedCmd] = useState<string | null>(null);

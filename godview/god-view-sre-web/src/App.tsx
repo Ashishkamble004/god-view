@@ -16,6 +16,7 @@ import { ChangesTab } from './components/ChangesTab';
 import { ControlsTab } from './components/ControlsTab';
 import { CostTab } from './components/CostTab';
 import { GlobeView } from './components/GlobeView';
+import { HarnessTab } from './components/HarnessTab';
 import { IncidentsTab } from './components/IncidentsTab';
 import { InvariantsTab } from './components/InvariantsTab';
 import { JourneysTab } from './components/JourneysTab';
@@ -25,6 +26,7 @@ import { Badge, Button, EmptyState, TableSkeleton, formatEnumLabel } from './com
 export type CockpitRouteTab =
   | 'globe'
   | 'globe-2d'
+  | 'harness'
   | 'organism'
   | 'agent'
   | 'invariants'
@@ -95,6 +97,9 @@ function parseWindowHash(rawHash: string): ParsedHashRoute {
   }
   if (cleaned === 'incidents') {
     return { tab: 'incidents', param: null };
+  }
+  if (cleaned === 'harness' || cleaned === 'blueprint') {
+    return { tab: 'harness', param: null };
   }
   if (cleaned === 'invariants') return { tab: 'invariants', param: null };
   if (cleaned === 'journeys') return { tab: 'journeys', param: null };
@@ -454,8 +459,14 @@ export function App() {
     {
       tab: 'globe',
       hash: '#globe',
-      label: '3D Globe',
+      label: 'Estate Topology',
       badge: dataset?.topology?.nodes.length ?? dataset?.perceive?.discovered_services?.length,
+    },
+    {
+      tab: 'harness',
+      hash: '#harness',
+      label: 'Harness² & Blueprint',
+      badge: 'C1–C8',
     },
     {
       tab: 'journeys',
@@ -585,11 +596,7 @@ export function App() {
   };
 
   return (
-    <div
-      className={`min-h-screen bg-white text-slate-700 ${
-        route.tab === 'globe' ? 'h-screen flex flex-col overflow-hidden' : ''
-      }`}
-    >
+    <div className="min-h-screen bg-white text-slate-700">
       {/* Hairline Google four-colour top rule */}
       <div className="google-top-hairline w-full shrink-0" />
 
@@ -608,7 +615,7 @@ export function App() {
                     God-View Cockpit
                   </span>
                   <span className="text-xs text-slate-500">
-                    3D Globe Cockpit v5.0
+                    Sovereign SRE Organism v4.0
                   </span>
                 </div>
               </div>
@@ -722,13 +729,7 @@ export function App() {
       </header>
 
       {/* Main Content Container */}
-      <main
-        className={
-          route.tab === 'globe'
-            ? 'relative flex-1 w-full min-h-0 overflow-hidden flex flex-col'
-            : 'flex-1 overflow-auto mx-auto w-full max-w-[1440px] px-6 py-6'
-        }
-      >
+      <main className="flex-1 overflow-auto mx-auto w-full max-w-[1440px] px-6 py-6">
         {/* IAP Session Expiry Banner */}
         {iapExpired && (
           <div
@@ -858,6 +859,13 @@ export function App() {
                 onSelectAgent={(agentId) =>
                   navigateToHash(`#agent/${encodeURIComponent(agentId)}`)
                 }
+              />
+            )}
+
+            {route.tab === 'harness' && (
+              <HarnessTab
+                court={dataset.court}
+                perceive={dataset.perceive}
               />
             )}
 

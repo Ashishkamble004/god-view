@@ -1,0 +1,17 @@
+.git
+.venv/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.grimp_cache/
+.import_linter_cache/
+godview/god-view-sre-web/
+cymbal/
+local-env/
+infra/
+proving-ground/
+plans/
+docs/
+*.log
+.DS_Store

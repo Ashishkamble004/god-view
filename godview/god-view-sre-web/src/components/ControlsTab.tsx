@@ -64,7 +64,20 @@ export const ControlsTab: React.FC<ControlsTabProps> = ({
     );
   }
 
-  const op = perceive.operator_state;
+  const op = perceive.operator_state ?? ({
+    kill_switch_enabled: false,
+    kill_switch_reason: null,
+    kill_switch_actor: null,
+    kill_switch_updated_at: null,
+    tenant_paused: false,
+    pause_schedule_ist: 'Operator-configured duty schedule',
+    hibernated: false,
+    simulator_enabled: false,
+    simulator_journeys_today: 0,
+    simulator_target_per_day: 200,
+    simulator_specimen_ratio: 'Configurable diagnostic probe cadence',
+    simulator_window_ist: 'Active traffic window',
+  } as any);
   const safeDrills = drills || [];
   const businessDrills = safeDrills.filter((d) => d.fault_class === 'BUSINESS');
   const infraDrills = safeDrills.filter((d) => d.fault_class === 'INFRA');

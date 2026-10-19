@@ -473,12 +473,11 @@ export const cockpitApi = {
       anySucceeded = true;
     } else {
       partial.me = {
+        principal: 'accounts.google.com:operator@godview.local',
         email: 'operator@godview.local',
-        display_name: 'Platform Operator',
         role: 'Platform Owner',
-        iap_principal: 'accounts.google.com:operator@godview.local',
         iap_authenticated: true,
-      } as IapUserIdentity;
+      };
     }
 
     if (perceiveRes.status === 'fulfilled') {

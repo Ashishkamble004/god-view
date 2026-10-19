@@ -93,13 +93,13 @@ export const InvariantsTab: React.FC<InvariantsTabProps> = ({
   ).length;
   const shadowCount = invariants.filter((i) => i.status === 'shadow').length;
   const totalBreaches = invariants.reduce(
-    (sum, i) => sum + i.shadow_stats.breaches,
+    (sum, i) => sum + (i.shadow_stats?.breaches ?? 0),
     0
   );
   const avgFpRate =
     invariants.length > 0
       ? (invariants.reduce(
-          (sum, i) => sum + i.shadow_stats.false_positive_rate,
+          (sum, i) => sum + (i.shadow_stats?.false_positive_rate ?? 0),
           0
         ) /
           invariants.length) *
@@ -225,7 +225,7 @@ export const InvariantsTab: React.FC<InvariantsTabProps> = ({
                   {filtered.map((inv) => {
                     const selected = activeInvariant?.id === inv.id;
                     const fpPct = (
-                      inv.shadow_stats.false_positive_rate * 100
+                      (inv.shadow_stats?.false_positive_rate ?? 0) * 100
                     ).toFixed(1);
                     return (
                       <tr
@@ -240,7 +240,7 @@ export const InvariantsTab: React.FC<InvariantsTabProps> = ({
                             {inv.name}
                           </div>
                           <div className="mt-0.5 font-mono text-slate-500">
-                            {inv.scope.service} · v{inv.version}
+                            {inv.scope?.service ?? 'platform'} · v{inv.version ?? 1}
                           </div>
                         </td>
                         <td className="px-3 py-2.5">
@@ -272,15 +272,15 @@ export const InvariantsTab: React.FC<InvariantsTabProps> = ({
                         </td>
                         <td className="whitespace-nowrap px-3 py-2.5 text-right text-slate-900 num-tabular">
                           <div>
-                            {formatNumber(inv.shadow_stats.runs)} runs ·{' '}
+                            {formatNumber(inv.shadow_stats?.runs ?? 0)} runs ·{' '}
                             <span
                               className={
-                                inv.shadow_stats.breaches > 0
+                                (inv.shadow_stats?.breaches ?? 0) > 0
                                   ? 'font-semibold text-amber-800'
                                   : 'text-slate-700'
                               }
                             >
-                              {inv.shadow_stats.breaches} breaches
+                              {inv.shadow_stats?.breaches ?? 0} breaches
                             </span>
                           </div>
                           <div className="text-slate-500">FP {fpPct}%</div>
@@ -300,7 +300,7 @@ export const InvariantsTab: React.FC<InvariantsTabProps> = ({
             <Card className="p-5">
               <SectionHeader
                 title={activeInvariant.name}
-                subtitle={`ID: ${activeInvariant.id} · Dialect: ${activeInvariant.check.dialect.toUpperCase()} · Window: ${activeInvariant.check.window_s}s`}
+                subtitle={`ID: ${activeInvariant.id} · Dialect: ${(activeInvariant.check?.dialect ?? 'promql').toUpperCase()} · Window: ${activeInvariant.check?.window_s ?? 60}s`}
                 right={
                   <SeverityBadge severity={activeInvariant.severity} />
                 }
@@ -332,12 +332,12 @@ export const InvariantsTab: React.FC<InvariantsTabProps> = ({
                       type="button"
                       onClick={() =>
                         onSelectAgent(
-                          activeInvariant.wake_condition.target_agent_id
+                          activeInvariant.wake_condition?.target_agent_id ?? 'platform__default'
                         )
                       }
                       className="rounded font-mono font-semibold text-blue-700 hover:underline focus:outline-none focus:ring-2 focus:ring-blue-600"
                     >
-                      {activeInvariant.wake_condition.target_agent_id}
+                      {activeInvariant.wake_condition?.target_agent_id ?? 'platform__default'}
                     </button>
                   </p>
                 </div>
@@ -347,17 +347,17 @@ export const InvariantsTab: React.FC<InvariantsTabProps> = ({
               <div className="mt-4">
                 <div className="flex items-center justify-between text-xs font-semibold text-slate-700">
                   <span>
-                    Compiled {activeInvariant.check.dialect.toUpperCase()} Check
+                    Compiled {(activeInvariant.check?.dialect ?? 'promql').toUpperCase()} Check
                     Statement
                   </span>
                   <span className="font-mono font-normal text-slate-500 num-tabular">
-                    Wake: {activeInvariant.wake_condition.operator}{' '}
-                    {activeInvariant.wake_condition.threshold} (
-                    {activeInvariant.wake_condition.consecutive}x consecutive)
+                    Wake: {activeInvariant.wake_condition?.operator ?? '>'}{' '}
+                    {activeInvariant.wake_condition?.threshold ?? 0} (
+                    {activeInvariant.wake_condition?.consecutive ?? 1}x consecutive)
                   </span>
                 </div>
                 <pre className="mt-1.5 overflow-x-auto rounded border border-slate-200 bg-slate-900 p-3 font-mono text-xs text-slate-100">
-                  {activeInvariant.check.statement}
+                  {activeInvariant.check?.statement ?? ''}
                 </pre>
               </div>
 
@@ -370,7 +370,7 @@ export const InvariantsTab: React.FC<InvariantsTabProps> = ({
                     </span>
                     <p className="mt-0.5 text-slate-600 num-tabular">
                       {linkedSentinel
-                        ? `State: ${formatEnumLabel(linkedSentinel.state)} · Cadence: ${linkedSentinel.cadence_s}s · Last count: ${linkedSentinel.last_result.count}`
+                        ? `State: ${formatEnumLabel(linkedSentinel.state)} · Cadence: ${linkedSentinel.cadence_s}s · Last count: ${linkedSentinel.last_result?.count ?? 0}`
                         : 'Ready to compile into 0-token Sentinel Engine'}
                     </p>
                   </div>
@@ -440,13 +440,13 @@ export const InvariantsTab: React.FC<InvariantsTabProps> = ({
                 <p className="text-xs font-semibold text-slate-500">
                   Promotion &amp; Audit History
                 </p>
-                {activeInvariant.history.length === 0 ? (
+                {(activeInvariant.history ?? []).length === 0 ? (
                   <p className="mt-1.5 text-xs text-slate-500">
                     No status transitions recorded yet.
                   </p>
                 ) : (
                   <div className="mt-2 space-y-2">
-                    {activeInvariant.history.map((h, i) => (
+                    {(activeInvariant.history ?? []).map((h, i) => (
                       <div
                         key={i}
                         className="rounded border border-slate-200 bg-white p-2.5 text-xs"

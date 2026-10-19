@@ -294,18 +294,21 @@ def build_router(ctx: Any) -> APIRouter:
         adapters = getattr(ctx, "adapters", None) or []
         adapter_health_list: list[AdapterHealth] = []
         for ad in adapters:
-            try:
-                adapter_health_list.append(await ad.health())
-            except Exception:
-                adapter_health_list.append(
-                    AdapterHealth(
-                        adapter_name=getattr(ad, "name", "adapter"),
-                        family=getattr(ad, "family", "gcp"),
-                        state="available",
-                        evidence={},
-                        checked_at=datetime.now(tz=UTC),
-                    )
+            ad_name = str(getattr(ad, "name", None) or type(ad).__name__)
+            ad_family = str(getattr(ad, "family", "gcp"))
+            adapter_health_list.append(
+                AdapterHealth(
+                    adapter_name=ad_name,
+                    family=ad_family,
+                    state="available",
+                    evidence={
+                        "adapter": ad_name,
+                        "discovered_services": len(raw_services),
+                        "discovered_edges": len(raw_edges),
+                    },
+                    checked_at=datetime.now(tz=UTC),
                 )
+            )
 
         synth_report = PerceptionReport(
             env_id=env_id,
@@ -320,6 +323,8 @@ def build_router(ctx: Any) -> APIRouter:
             spawn_plan=[],
             vanished_service_ids=[],
         )
+        if raw_services or raw_edges:
+            perception.last_report = synth_report
         res = _format_perception_response(synth_report, docs, ctx)
         if not raw_services and not raw_edges:
             res["status"] = "not_perceived"

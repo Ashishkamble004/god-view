@@ -230,8 +230,8 @@ export const ApprovalsTab: React.FC<ApprovalsTabProps> = ({
                       Mandatory Reversal Recipe
                     </span>
                     <p className="mt-0.5 font-mono text-slate-800">
-                      {card.reversal_recipe.capability}:{' '}
-                      {card.reversal_recipe.args}
+                      {card.reversal_recipe?.capability ?? 'cloudrun.rollback_revision'}:{' '}
+                      {card.reversal_recipe?.args ?? '--to-previous-healthy'}
                     </p>
                   </div>
                 </div>

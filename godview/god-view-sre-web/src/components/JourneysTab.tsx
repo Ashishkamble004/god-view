@@ -30,9 +30,17 @@ function conformanceVariant(status: JourneyConformanceStatus) {
   }
 }
 
-function truncateRoute(op: string, maxLen = 35): string {
+function truncateRoute(op: string, maxLen = 32): string {
+  if (!op) return '';
   if (op.length <= maxLen) return op;
   return `${op.slice(0, maxLen - 1)}…`;
+}
+
+function formatServiceShort(svcId: string): string {
+  if (!svcId) return '';
+  const dotIdx = svcId.indexOf('.');
+  const clean = dotIdx >= 0 ? svcId.slice(dotIdx + 1) : svcId;
+  return truncateRoute(clean, 30);
 }
 
 export const JourneysTab: React.FC<JourneysTabProps> = ({
@@ -72,11 +80,14 @@ export const JourneysTab: React.FC<JourneysTabProps> = ({
   const funnelKpis = journey.funnel_kpis ?? [];
   const recentInstances = journey.recent_instances ?? [];
   const directlyFollows = journey.directly_follows ?? {};
-  const impactModel = journey.impact_model ?? {
-    total_value_at_risk: 0,
-    avg_ticket_value: 0,
-    violated_journeys_count: 0,
-    stuck_journeys_count: 0,
+  const rawImpact = (journey.impact_model ?? {}) as Record<string, any>;
+  const avgTicket = Number(rawImpact.avg_ticket_value ?? rawImpact.value_per_journey_usd ?? 2500);
+  const hourlyVol = Number(rawImpact.hourly_volume_baseline ?? 120);
+  const impactModel = {
+    total_value_at_risk: Number(rawImpact.total_value_at_risk ?? avgTicket * hourlyVol),
+    avg_ticket_value: avgTicket,
+    violated_journeys_count: Number(rawImpact.violated_journeys_count ?? 0),
+    stuck_journeys_count: Number(rawImpact.stuck_journeys_count ?? 0),
   };
 
   stepsList.forEach((step, idx) => {
@@ -178,7 +189,7 @@ export const JourneysTab: React.FC<JourneysTabProps> = ({
               className="flex items-center gap-1.5"
             >
               <Globe className="h-3.5 w-3.5" />
-              <span>View Path on 3D Globe</span>
+              <span>Highlight Path on Estate Topology</span>
             </Button>
           }
         />
@@ -339,7 +350,7 @@ export const JourneysTab: React.FC<JourneysTabProps> = ({
                       fontSize="11"
                       fontWeight="600"
                     >
-                      {stepLabel}
+                      {truncateRoute(stepLabel, 28)}
                     </text>
                     <text
                       x={pos.x + 10}
@@ -348,7 +359,7 @@ export const JourneysTab: React.FC<JourneysTabProps> = ({
                       fontSize="10"
                       fontFamily="monospace"
                     >
-                      {stepSvc}
+                      {formatServiceShort(stepSvc)}
                     </text>
                     <text
                       x={pos.x + 10}
@@ -357,7 +368,7 @@ export const JourneysTab: React.FC<JourneysTabProps> = ({
                       fontSize="9"
                       fontFamily="monospace"
                     >
-                      {truncateRoute(stepOp, 34)}
+                      {truncateRoute(stepOp, 30)}
                     </text>
                     <text
                       x={pos.x + 10}

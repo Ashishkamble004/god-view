@@ -32,6 +32,7 @@ WORKDIR /app
 COPY shared /app/shared
 COPY infra /app/infra
 COPY godview/__init__.py /app/godview/__init__.py
+COPY godview/cli.py /app/godview/cli.py
 COPY godview/ledger /app/godview/ledger
 COPY godview/invariants /app/godview/invariants
 COPY godview/adapters /app/godview/adapters

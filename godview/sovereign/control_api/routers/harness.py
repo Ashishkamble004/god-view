@@ -25,7 +25,11 @@ from pydantic import BaseModel, Field
 from godview.agents.archetypes import resolve_domain
 from godview.harness.core import HarnessTree, validate
 from godview.harness.rsi import EvolutionResult, evolve_specialist
-from godview.harness.substrate import GODVIEW_SURFACE, GodViewSubstrate
+from godview.harness.substrate import (
+    _BANNED_IMPORT_ROOTS,
+    GODVIEW_SURFACE,
+    GodViewSubstrate,
+)
 
 logger = logging.getLogger("godview.control_api.routers.harness")
 
@@ -199,9 +203,9 @@ def _build_harness_overview(ctx: Any | None = None) -> dict[str, Any]:
         "surface": {
             "name": GODVIEW_SURFACE.name,
             "always_on_max": GODVIEW_SURFACE.always_on_max,
-            "categories": list(GODVIEW_SURFACE.categories),
-            "forbidden_imports": sorted(GODVIEW_SURFACE.forbidden_script_imports),
-            "allowed_hook_events": sorted(GODVIEW_SURFACE.allowed_hook_events),
+            "categories": ["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8"],
+            "forbidden_imports": sorted(_BANNED_IMPORT_ROOTS),
+            "allowed_hook_events": sorted(GODVIEW_SURFACE.hook_events),
         },
         "recursion_architecture": {
             "title": "Harness² Two-Level Recursive Self-Improvement (RSI)",

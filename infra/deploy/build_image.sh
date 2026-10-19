@@ -155,6 +155,9 @@ if [[ "${SVC}" == "god-view-sovereign" || "${SVC}" == "god-view-hibernate-job" ]
   if [[ -f "${REPO_ROOT}/godview/__init__.py" ]]; then
     cp -a "${REPO_ROOT}/godview/__init__.py" "${STAGE_DIR}/godview/__init__.py"
   fi
+  if [[ -f "${REPO_ROOT}/godview/cli.py" ]]; then
+    cp -a "${REPO_ROOT}/godview/cli.py" "${STAGE_DIR}/godview/cli.py"
+  fi
   for sub in "${REPO_ROOT}/godview"/*; do
     sub_name="$(basename "${sub}")"
     if [[ "${sub_name}" != "god-view-sre-web" && -d "${sub}" ]]; then

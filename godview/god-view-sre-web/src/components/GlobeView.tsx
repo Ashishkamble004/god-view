@@ -1,25 +1,10 @@
 import {
-  Activity,
-  AlertTriangle,
-  ArrowRight,
-  Brain,
-  CheckCircle2,
   ChevronDown,
   ChevronUp,
-  Cpu,
-  Database,
-  ExternalLink,
-  Filter,
-  GitBranch,
-  Globe,
   Grid,
   Layers,
   Network,
-  Radio,
   Search,
-  Server,
-  Shield,
-  Sparkles,
   Workflow,
   X,
 } from 'lucide-react';
@@ -156,14 +141,14 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
   topology,
   selectedNodeId,
   selectedJourneyName,
-  court,
-  incidents,
-  approvals,
+  court: _court,
+  incidents: _incidents,
+  approvals: _approvals,
   perceive,
   cost,
   streamStatus = 'connected',
   onSelectNode,
-  onSelectIncident,
+  onSelectIncident: _onSelectIncident,
   onSelectJourney,
   onSelectAgent,
 }) => {
@@ -454,12 +439,6 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
     (n) => n.status === 'red' || n.incidents_open > 0
   ).length;
   const healthyNodesCount = totalNodes - redNodesCount;
-  const openIncidentsCount = (incidents ?? []).filter(
-    (i) => (i.outcome as string) === 'open' || i.outcome === 'investigating'
-  ).length;
-  const pendingApprovalsCount = (approvals ?? []).filter(
-    (a) => a.decision === 'pending'
-  ).length;
 
   // Connected edges for selected node
   const selectedNodeEdges = useMemo(() => {
