@@ -76,7 +76,7 @@ class CloudSyncedLibrary(Library):
             resolved_bucket = (
                 f"{project_id}-god-view-agent-skills" if project_id else "god-view-agent-skills"
             )
-        self.bucket_name = resolved_bucket
+        self.bucket_name = resolved_bucket.removeprefix("gs://").strip("/")
 
         resolved_token_provider = token_provider
         if resolved_token_provider is None and auth is not None:
@@ -187,9 +187,12 @@ class CloudSyncedLibrary(Library):
             "gcs_uri": f"gs://{self.bucket_name}/{self.gcs_prefix}/{dom_slug}/harnesses/{task_slug}/",
             "updated_at_epoch": time.time(),
         }
+        run_id = f"hrun-{dom_slug}-{int(time.time())}"
         if hasattr(self.firestore_client, "set"):
             self.firestore_client.set("skills", f"{dom_slug}__{task_slug}", record)
             self.firestore_client.set("harness_trees", f"{dom_slug}__{task_slug}", record)
+            self.firestore_client.set("harness_runs", run_id, record)
+            self.firestore_client.set("skill_versions", f"{dom_slug}__{task_slug}", record)
             if hasattr(self.firestore_client, "set_subdoc"):
                 self.firestore_client.set_subdoc(
                     "court_agents",
@@ -203,6 +206,12 @@ class CloudSyncedLibrary(Library):
                 f"{dom_slug}__{task_slug}"
             ).set(record)
             self.firestore_client.collection("harness_trees").document(
+                f"{dom_slug}__{task_slug}"
+            ).set(record)
+            self.firestore_client.collection("harness_runs").document(
+                run_id
+            ).set(record)
+            self.firestore_client.collection("skill_versions").document(
                 f"{dom_slug}__{task_slug}"
             ).set(record)
             self.firestore_client.collection("court_agents").document(dom_slug).collection(

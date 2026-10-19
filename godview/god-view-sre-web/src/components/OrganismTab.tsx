@@ -247,7 +247,7 @@ export const OrganismTab: React.FC<OrganismTabProps> = ({
             <svg
               data-testid="organism-org-chart-svg"
               viewBox="0 0 1340 310"
-              className="w-full rounded border border-slate-200 bg-slate-50"
+              className="w-full rounded-md border border-outline-variant bg-surface-container-low"
               role="img"
               aria-label="Sovereign and Specialist Court Org-Chart Diagram"
             >
@@ -261,7 +261,7 @@ export const OrganismTab: React.FC<OrganismTabProps> = ({
                   markerHeight="6"
                   orient="auto-start-reverse"
                 >
-                  <path d="M 0 1 L 8 5 L 0 9 z" fill="#1A73E8" />
+                  <path d="M 0 1 L 8 5 L 0 9 z" fill="var(--md-sys-color-primary)" />
                 </marker>
                 <marker
                   id="arrow-slate"
@@ -272,7 +272,7 @@ export const OrganismTab: React.FC<OrganismTabProps> = ({
                   markerHeight="6"
                   orient="auto-start-reverse"
                 >
-                  <path d="M 0 1 L 8 5 L 0 9 z" fill="#64748B" />
+                  <path d="M 0 1 L 8 5 L 0 9 z" fill="var(--md-sys-color-on-surface-variant)" />
                 </marker>
               </defs>
 
@@ -281,26 +281,26 @@ export const OrganismTab: React.FC<OrganismTabProps> = ({
                 y1="122"
                 x2="1340"
                 y2="122"
-                stroke="#E2E8F0"
+                stroke="var(--md-sys-color-outline-variant)"
                 strokeDasharray="4 4"
               />
               <text
                 x="18"
                 y="114"
-                fill="#64748B"
+                fill="var(--md-sys-color-on-surface-variant)"
                 fontSize="10"
-                fontWeight="600"
+                fontWeight="500"
               >
                 PLANE B · SOVEREIGN CONTROL &amp; 0-TOKEN SENTINEL ENGINE (Cloud Run min_instances=1)
               </text>
               <text
                 x="18"
                 y="142"
-                fill="#64748B"
+                fill="var(--md-sys-color-on-surface-variant)"
                 fontSize="10"
-                fontWeight="600"
+                fontWeight="500"
               >
-                A2A SWARM MESH &amp; SINGLE TRUSTGATE CAPABILITY ENDPOINT (POST /v1/capabilities/&#123;id&#125;:invoke)
+                A2A SWARM MESH &amp; SINGLE TRUSTGATE CAPABILITY ENDPOINT (POST /v1/capabilities/{'{id}'}:invoke)
               </text>
 
               {/* Sovereign Root Box */}
@@ -309,9 +309,9 @@ export const OrganismTab: React.FC<OrganismTabProps> = ({
                 y="16"
                 width="640"
                 height="86"
-                rx="6"
-                fill="#FFFFFF"
-                stroke="#0F172A"
+                rx="8"
+                fill="var(--md-sys-color-surface)"
+                stroke="var(--md-sys-color-on-surface)"
                 strokeWidth="1.5"
               />
               <rect
@@ -320,15 +320,15 @@ export const OrganismTab: React.FC<OrganismTabProps> = ({
                 width="640"
                 height="4"
                 rx="2"
-                fill="#1A73E8"
+                fill="var(--md-sys-color-primary)"
               />
-              <circle cx="372" cy="40" r="5" fill="#188038" />
+              <circle cx="372" cy="40" r="5" fill="var(--gv-color-healthy)" />
               <text
                 x="386"
                 y="44"
-                fill="#0F172A"
+                fill="var(--md-sys-color-on-surface)"
                 fontSize="13"
-                fontWeight="600"
+                fontWeight="500"
               >
                 {perceive.sovereign_id} (Sovereign Operator)
               </text>
@@ -336,9 +336,9 @@ export const OrganismTab: React.FC<OrganismTabProps> = ({
                 x="972"
                 y="44"
                 textAnchor="end"
-                fill="#334155"
+                fill="var(--md-sys-color-on-surface-variant)"
                 fontSize="11"
-                fontWeight="600"
+                fontWeight="500"
               >
                 {perceive.sentinel_cadence_s}s Cadence · {perceive.tokens_at_rest} Tokens at Rest
               </text>
@@ -356,17 +356,17 @@ export const OrganismTab: React.FC<OrganismTabProps> = ({
                     y="58"
                     width="144"
                     height="30"
-                    rx="4"
-                    fill="#F8FAFC"
-                    stroke="#CBD5E1"
+                    rx="6"
+                    fill="var(--md-sys-color-surface-container-low)"
+                    stroke="var(--md-sys-color-outline-variant)"
                   />
                   <text
                     x={organ.x + 72}
                     y="77"
                     textAnchor="middle"
-                    fill="#334155"
+                    fill="var(--md-sys-color-on-surface)"
                     fontSize="10"
-                    fontWeight="600"
+                    fontWeight="500"
                   >
                     {organ.label}
                   </text>
@@ -379,7 +379,7 @@ export const OrganismTab: React.FC<OrganismTabProps> = ({
                 y1="102"
                 x2="670"
                 y2="152"
-                stroke="#1A73E8"
+                stroke="var(--md-sys-color-primary)"
                 strokeWidth="1.75"
               />
               <line
@@ -387,7 +387,7 @@ export const OrganismTab: React.FC<OrganismTabProps> = ({
                 y1="152"
                 x2="1190"
                 y2="152"
-                stroke="#64748B"
+                stroke="var(--md-sys-color-on-surface-variant)"
                 strokeWidth="1.5"
               />
 
@@ -420,7 +420,7 @@ export const OrganismTab: React.FC<OrganismTabProps> = ({
                       y1="152"
                       x2={meta.xCenter}
                       y2="184"
-                      stroke={isAwake || isWarm ? '#1A73E8' : '#64748B'}
+                      stroke={isAwake || isWarm ? 'var(--md-sys-color-primary)' : 'var(--md-sys-color-on-surface-variant)'}
                       strokeWidth={isAwake || isWarm ? '1.75' : '1.25'}
                       markerEnd={
                         isAwake || isWarm ? 'url(#arrow-blue)' : 'url(#arrow-slate)'
@@ -431,9 +431,9 @@ export const OrganismTab: React.FC<OrganismTabProps> = ({
                       y="186"
                       width="230"
                       height="106"
-                      rx="6"
-                      fill="#FFFFFF"
-                      stroke={isAwake ? '#1A73E8' : '#CBD5E1'}
+                      rx="8"
+                      fill="var(--md-sys-color-surface)"
+                      stroke={isAwake ? 'var(--md-sys-color-primary)' : 'var(--md-sys-color-outline-variant)'}
                       strokeWidth={isAwake ? '1.75' : '1.25'}
                     />
                     <rect
@@ -444,18 +444,18 @@ export const OrganismTab: React.FC<OrganismTabProps> = ({
                       rx="2"
                       fill={
                         isAwake
-                          ? '#1A73E8'
+                          ? 'var(--md-sys-color-primary)'
                           : isWarm
-                          ? '#34A853'
-                          : '#94A3B8'
+                          ? 'var(--gv-color-healthy)'
+                          : 'var(--md-sys-color-outline)'
                       }
                     />
                     <text
                       x={meta.xCenter - 102}
                       y="209"
-                      fill="#0F172A"
+                      fill="var(--md-sys-color-on-surface)"
                       fontSize="12"
-                      fontWeight="600"
+                      fontWeight="500"
                     >
                       {meta.label}
                     </text>
@@ -463,16 +463,16 @@ export const OrganismTab: React.FC<OrganismTabProps> = ({
                       x={meta.xCenter + 102}
                       y="209"
                       textAnchor="end"
-                      fill={isWarm ? '#188038' : '#64748B'}
+                      fill={isWarm ? 'var(--gv-color-healthy)' : 'var(--md-sys-color-on-surface-variant)'}
                       fontSize="10"
-                      fontWeight="600"
+                      fontWeight="500"
                     >
                       {isWarm ? 'Warm (min=1)' : 'Cold (min=0)'}
                     </text>
                     <text
                       x={meta.xCenter - 102}
                       y="228"
-                      fill="#334155"
+                      fill="var(--md-sys-color-on-surface)"
                       fontSize="11"
                       fontFamily="monospace"
                     >
@@ -481,7 +481,7 @@ export const OrganismTab: React.FC<OrganismTabProps> = ({
                     <text
                       x={meta.xCenter - 102}
                       y="247"
-                      fill="#64748B"
+                      fill="var(--md-sys-color-on-surface-variant)"
                       fontSize="10"
                     >
                       State: {primaryAgent ? formatEnumLabel(primaryAgent.state) : '—'} · Max Trust L
@@ -490,7 +490,7 @@ export const OrganismTab: React.FC<OrganismTabProps> = ({
                     <text
                       x={meta.xCenter - 102}
                       y="265"
-                      fill="#334155"
+                      fill="var(--md-sys-color-on-surface-variant)"
                       fontSize="10"
                     >
                       Tokens today:{' '}
@@ -503,9 +503,9 @@ export const OrganismTab: React.FC<OrganismTabProps> = ({
                     <text
                       x={meta.xCenter - 102}
                       y="282"
-                      fill="#1A73E8"
+                      fill="var(--md-sys-color-primary)"
                       fontSize="10"
-                      fontWeight="600"
+                      fontWeight="500"
                     >
                       Inspect Living Semantic Model →
                     </text>

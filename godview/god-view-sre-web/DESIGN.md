@@ -151,6 +151,24 @@ Owner: design-lead. Implementer: cockpit. Tokens live in
 
 The YAML front matter above is Stitch compatible (it is uploaded as the Stitch design system).
 
+## 0. Design Read and Dials
+
+*   **Signals:** Enterprise SRE & autonomous organism cockpit (`dashboard` + `AI experience` + `data-heavy tool`), audience: Bank CTOs, Principal SREs, and Platform Operators; vibe words: calm, authoritative, high-trust, glanceable, zero-slop; quiet constraints: regulated financial-grade observability, strict accessibility (WCAG AA contrast, keyboard navigation, `prefers-reduced-motion` compliance), honest telemetry ("Not measured yet" for nulls, never fabricated numbers).
+*   **Reading:** Reading this as: an enterprise SRE & autonomous organism console for Bank CTOs and platform engineers, with a calm Material 3 Expressive tonal language, on GM3 at dials `3 / 4 / 6`. Creative idea: a unified Estate Topology & Service Mesh canvas paired with a slide-over Business Context & Call-Graph Inspector sheet and an interactive Sovereign & Specialist Court Org-Chart where every node, invariant, and trust-gated capability is one click away.
+*   **Dials:** `VARIANCE 3 / MOTION 4 / DENSITY 6`, preset `Data-heavy tool` (`3 / 3 / 6`), adjusted to `MOTION 4` because state transitions, incident pulse rings, and slide-over inspector sheets benefit from M3 Expressive spatial easing (`--md-sys-motion-easing-emphasized-decelerate`) while disabling all decorative motion under `prefers-reduced-motion: reduce`.
+*   **Layout:** Overview + KPI strip + multi-mode Estate Topology canvas (`Service Mesh DAG`, `Domain Clusters`, `Full Estate Matrix`) with a slide-over right-hand Inspector Sheet (`DetailSheet`) and an opt-in Chaos Drills Drawer.
+*   **Structural Shell & GM3 Surface Ladder:**
+    *   **App Frame (`.gm3-app`):** `--md-sys-color-surface-container-low` (`#F8FAFD` light / `#141A22` dark) with `--md-sys-color-on-surface` primary text.
+    *   **Top App Bar & Navigation Bar (`.gm3-app-bar`):** `--md-sys-color-surface` (`#FFFFFF` light / `#0F141B` dark) with `1px solid var(--md-sys-color-outline-variant)` bottom border, pill status badges (`var(--md-sys-shape-corner-full)`), and `2px` `--md-sys-color-primary` active tab indicator.
+    *   **Primary Pane / Card (`.gm3-pane`):** `--md-sys-color-surface` (`#FFFFFF` light / `#0F141B` dark) with `1px solid var(--md-sys-color-outline-variant)` border (per the Outlined Rule on the base canvas), `var(--md-sys-shape-corner-large)` (`20px`) or `var(--md-sys-shape-corner-extra-large)` (`28px`) corners, no drop shadow on static panes.
+    *   **Nested Group / Tile (`.gm3-pane-group`):** Steps one tone up to `--md-sys-color-surface-container-low` (`#F8FAFD`) or `--md-sys-color-surface-container` (`#F0F4F9`) with `var(--md-sys-shape-corner-small)` (`12px`) or `var(--md-sys-shape-corner-medium)` (`16px`) corners; never card-in-card-in-card.
+*   **Anti-Slop Self-Check:**
+    *   [x] UI spec starts with Design Read and V/M/D dials (`3 / 4 / 6`).
+    *   [x] Shell follows the GM3 surface ladder (`surface-container-low` frame -> `surface` pane with `1px solid outline-variant` -> `surface-container-low` nested group).
+    *   [x] Typography uses Google Sans (`--gv-font-title`), Google Sans Text (`--gv-font-label`), Roboto (`--gv-font-body`), and Google Sans Mono (`--gv-font-mono`) with weights `400` and `500` (`font-medium`) only; tabular numerals (`tabular-nums`) on all metrics.
+    *   [x] Button emphasis hierarchy enforced: at most one Filled (`primary`) CTA per view/card, paired with Tonal/Outlined (`secondary`) and Text (`ghost`) actions; pill geometry (`rounded-full`).
+    *   [x] Zero hardcoded hex literals in application CSS/TSX outside `src/theme/tokens.css`; verified by `audit_gm3.py`.
+
 ## 1. Brand and intent
 
 God-View is the flagship screen a bank CTO sees. It must feel calm, expensive and certain.

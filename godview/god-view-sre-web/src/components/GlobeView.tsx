@@ -61,59 +61,59 @@ const TIER_META: Record<
   edge: {
     label: 'Edge & Ingress Security',
     subtitle: 'Load Balancers, Backend Services, Cloud Armor WAF, API Gateways',
-    accent: '#1A73E8',
-    bg: '#EFF6FF',
-    border: '#BFDBFE',
+    accent: 'var(--md-sys-color-primary)',
+    bg: 'var(--md-sys-color-surface-container-low)',
+    border: 'var(--md-sys-color-outline-variant)',
   },
   compute: {
     label: 'Compute & Microservices',
     subtitle: 'Cloud Run Services, GKE Workloads, Compute Engine VMs',
-    accent: '#2563EB',
-    bg: '#F8FAFC',
-    border: '#CBD5E1',
+    accent: 'var(--md-sys-color-secondary)',
+    bg: 'var(--md-sys-color-surface-container-low)',
+    border: 'var(--md-sys-color-outline-variant)',
   },
   messaging: {
     label: 'Event Bus & Messaging Mesh',
     subtitle: 'Pub/Sub Topics, Push/Pull Subscriptions, Event Routers',
-    accent: '#D97706',
-    bg: '#FFFBEB',
-    border: '#FDE68A',
+    accent: 'var(--gv-color-warning)',
+    bg: 'var(--md-sys-color-surface-container-low)',
+    border: 'var(--md-sys-color-outline-variant)',
   },
   data: {
     label: 'Stateful Data & Ledger Stores',
     subtitle: 'Cloud SQL, Firestore Databases, BigQuery Datasets, Cloud Storage',
-    accent: '#16A34A',
-    bg: '#F0FDF4',
-    border: '#BBF7D0',
+    accent: 'var(--gv-color-healthy)',
+    bg: 'var(--md-sys-color-surface-container-low)',
+    border: 'var(--md-sys-color-outline-variant)',
   },
   platform: {
     label: 'AI & Platform Runtime',
     subtitle: 'Vertex AI Reasoning Engines, Specialist Agents, Secret Manager',
-    accent: '#0284C7',
-    bg: '#F0F9FF',
-    border: '#BAE6FD',
+    accent: 'var(--md-sys-color-tertiary)',
+    bg: 'var(--md-sys-color-surface-container-low)',
+    border: 'var(--md-sys-color-outline-variant)',
   },
   observer: {
     label: 'Sovereign Observer Control Plane',
     subtitle: 'Self-excluded God-View Sovereign & Cockpit infrastructure (I-05)',
-    accent: '#475569',
-    bg: '#F8FAFC',
-    border: '#E2E8F0',
+    accent: 'var(--md-sys-color-on-surface-variant)',
+    bg: 'var(--md-sys-color-surface-container-low)',
+    border: 'var(--md-sys-color-outline-variant)',
   },
   external: {
     label: 'External Partner Endpoints',
     subtitle: 'Outbound third-party APIs & external dependencies',
-    accent: '#EA580C',
-    bg: '#FFF7ED',
-    border: '#FED7AA',
+    accent: 'var(--gv-color-warning-text)',
+    bg: 'var(--md-sys-color-surface-container-low)',
+    border: 'var(--md-sys-color-outline-variant)',
   },
 };
 
 function statusDotColor(status: TopologyNode['status']): string {
-  if (status === 'red') return '#DC2626';
-  if (status === 'amber') return '#D97706';
-  if (status === 'green') return '#16A34A';
-  return '#16A34A';
+  if (status === 'red') return 'var(--gv-color-incident)';
+  if (status === 'amber') return 'var(--gv-color-warning)';
+  if (status === 'green') return 'var(--gv-color-healthy)';
+  return 'var(--gv-color-healthy)';
 }
 
 function statusBadgeVariant(
@@ -456,15 +456,15 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
   return (
     <div className="space-y-4">
       {/* Top Executive Telemetry & Mode Switcher Bar */}
-      <Card className="border-slate-200 bg-white p-4 shadow-sm">
+      <Card className="border-outline-variant bg-surface p-4 shadow-none">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-blue-200 bg-blue-50 text-blue-700">
+            <div className="flex h-10 w-10 items-center justify-center rounded-md bg-primary-container text-on-primary-container">
               <Network className="h-5 w-5" />
             </div>
             <div>
               <div className="flex flex-wrap items-center gap-2">
-                <h2 className="text-base font-bold tracking-tight text-slate-900">
+                <h2 className="font-title text-base font-medium tracking-tight text-on-surface">
                   Autonomous Estate Topology &amp; Service Mesh
                 </h2>
                 <Badge variant="info">
@@ -479,7 +479,7 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
                     : 'Polling Sync'}
                 </Badge>
               </div>
-              <p className="text-xs text-slate-600">
+              <p className="text-xs text-on-surface-variant">
                 100% self-discovered cloud resources, call-graph dependencies,
                 inferred business roles, and specialist agent assignments
               </p>
@@ -488,34 +488,34 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
 
           {/* KPI Strip */}
           <div className="flex flex-wrap items-center gap-3">
-            <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs">
-              <span className="text-slate-500">Discovered Resources:</span>{' '}
-              <strong className="font-mono font-bold text-slate-900">
+            <div className="rounded-sm border border-outline-variant bg-surface-container-low px-3 py-1.5 text-xs">
+              <span className="text-on-surface-variant">Discovered Resources:</span>{' '}
+              <strong className="font-mono font-medium text-on-surface num-tabular">
                 {totalNodes}
               </strong>
             </div>
-            <div className="rounded-md border border-emerald-200 bg-emerald-50/70 px-3 py-1.5 text-xs">
-              <span className="text-emerald-800">Healthy:</span>{' '}
-              <strong className="font-mono font-bold text-emerald-700">
+            <div className="rounded-sm border border-outline-variant bg-healthy-container px-3 py-1.5 text-xs">
+              <span className="text-on-healthy-container">Healthy:</span>{' '}
+              <strong className="font-mono font-medium text-on-healthy-container num-tabular">
                 {healthyNodesCount}
               </strong>
             </div>
-            <div className="rounded-md border border-red-200 bg-red-50/70 px-3 py-1.5 text-xs">
-              <span className="text-red-800">Incident Nodes:</span>{' '}
-              <strong className="font-mono font-bold text-red-700">
+            <div className="rounded-sm border border-outline-variant bg-incident-container px-3 py-1.5 text-xs">
+              <span className="text-on-incident-container">Incident Nodes:</span>{' '}
+              <strong className="font-mono font-medium text-on-incident-container num-tabular">
                 {redNodesCount}
               </strong>
             </div>
-            <div className="rounded-md border border-blue-200 bg-blue-50/70 px-3 py-1.5 text-xs">
-              <span className="text-blue-800">Verified Edges:</span>{' '}
-              <strong className="font-mono font-bold text-blue-700">
+            <div className="rounded-sm border border-outline-variant bg-primary-container px-3 py-1.5 text-xs">
+              <span className="text-on-primary-container">Verified Edges:</span>{' '}
+              <strong className="font-mono font-medium text-on-primary-container num-tabular">
                 {edges.length}
               </strong>
             </div>
             {cost && (
-              <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs">
-                <span className="text-slate-500">Court Spend:</span>{' '}
-                <strong className="font-mono font-semibold text-slate-900">
+              <div className="rounded-sm border border-outline-variant bg-surface-container-low px-3 py-1.5 text-xs">
+                <span className="text-on-surface-variant">Court Spend:</span>{' '}
+                <strong className="font-mono font-medium text-on-surface num-tabular">
                   {formatCurrency(cost.daily_court_spent_usd ?? 0)} /{' '}
                   {formatCurrency(cost.daily_court_ceiling_usd ?? 5)}
                 </strong>
@@ -525,30 +525,31 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
         </div>
 
         {/* Filter, Journey Highlighter, and View Mode Toolbar */}
-        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-3">
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-outline-variant pt-3">
           {/* Search + Status + Kind Filters */}
           <div className="flex flex-wrap items-center gap-2">
             <div className="relative min-w-[230px]">
-              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-on-surface-variant" />
               <input
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="Search 115+ services, kinds, domains..."
-                className="w-full rounded-md border border-slate-300 bg-white py-1.5 pl-8 pr-7 text-xs text-slate-900 placeholder:text-slate-400 focus:border-blue-600 focus:outline-none focus:ring-1 focus:ring-blue-600"
+                className="w-full rounded-full border border-outline-variant bg-surface-container-low py-1.5 pl-8 pr-7 text-xs text-on-surface placeholder:text-on-surface-variant focus:border-primary focus:bg-surface focus:outline-none focus:ring-1 focus:ring-primary"
               />
               {searchQuery && (
                 <button
                   type="button"
+                  aria-label="Clear search query"
                   onClick={() => setSearchQuery('')}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700"
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-on-surface-variant hover:text-on-surface"
                 >
                   <X className="h-3.5 w-3.5" />
                 </button>
               )}
             </div>
 
-            <div className="inline-flex rounded-md border border-slate-200 bg-slate-100 p-0.5 text-xs">
+            <div className="inline-flex rounded-full border border-outline-variant bg-surface-container-low p-0.5 text-xs">
               {(
                 [
                   { id: 'all', label: `All (${totalNodes})` },
@@ -564,10 +565,10 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
                   key={tab.id}
                   type="button"
                   onClick={() => setStatusFilter(tab.id)}
-                  className={`rounded px-2.5 py-1 font-medium transition ${
+                  className={`rounded-full px-3 py-1 font-label font-medium transition ${
                     statusFilter === tab.id
-                      ? 'bg-white text-blue-700 shadow-xs'
-                      : 'text-slate-600 hover:text-slate-900'
+                      ? 'bg-secondary-container text-on-secondary-container'
+                      : 'text-on-surface-variant hover:text-on-surface'
                   }`}
                 >
                   {tab.label}
@@ -579,7 +580,7 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
               aria-label="Filter by resource kind"
               value={kindFilter}
               onChange={(e) => setKindFilter(e.target.value)}
-              className="rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 focus:border-blue-600 focus:outline-none"
+              className="rounded-full border border-outline-variant bg-surface px-3 py-1.5 font-label text-xs font-medium text-on-surface focus:border-primary focus:outline-none"
             >
               <option value="all">All Resource Kinds ({kindCounts.length})</option>
               {kindCounts.map(([k, count]) => (
@@ -598,7 +599,7 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
                   setActiveJourney(val);
                   if (val && onSelectJourney) onSelectJourney(val);
                 }}
-                className="rounded-md border border-blue-200 bg-blue-50/60 px-2.5 py-1.5 text-xs font-semibold text-blue-800 focus:border-blue-600 focus:outline-none"
+                className="rounded-full border border-outline-variant bg-primary-container px-3 py-1.5 font-label text-xs font-medium text-on-primary-container focus:border-primary focus:outline-none"
               >
                 <option value="">Highlight Journey Flow ({journeys.length})...</option>
                 {journeys.map((j) => (
@@ -611,14 +612,14 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
           </div>
 
           {/* 3 View Modes */}
-          <div className="inline-flex items-center rounded-md border border-slate-200 bg-slate-100 p-0.5 text-xs">
+          <div className="inline-flex items-center rounded-full border border-outline-variant bg-surface-container-low p-0.5 text-xs">
             <button
               type="button"
               onClick={() => setViewMode('mesh')}
-              className={`inline-flex items-center gap-1.5 rounded px-3 py-1 font-semibold transition ${
+              className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 font-label font-medium transition ${
                 viewMode === 'mesh'
-                  ? 'bg-white text-blue-700 shadow-xs'
-                  : 'text-slate-600 hover:text-slate-900'
+                  ? 'bg-secondary-container text-on-secondary-container'
+                  : 'text-on-surface-variant hover:text-on-surface'
               }`}
             >
               <Workflow className="h-3.5 w-3.5" />
@@ -627,10 +628,10 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
             <button
               type="button"
               onClick={() => setViewMode('domains')}
-              className={`inline-flex items-center gap-1.5 rounded px-3 py-1 font-semibold transition ${
+              className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 font-label font-medium transition ${
                 viewMode === 'domains'
-                  ? 'bg-white text-blue-700 shadow-xs'
-                  : 'text-slate-600 hover:text-slate-900'
+                  ? 'bg-secondary-container text-on-secondary-container'
+                  : 'text-on-surface-variant hover:text-on-surface'
               }`}
             >
               <Layers className="h-3.5 w-3.5" />
@@ -639,10 +640,10 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
             <button
               type="button"
               onClick={() => setViewMode('matrix')}
-              className={`inline-flex items-center gap-1.5 rounded px-3 py-1 font-semibold transition ${
+              className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 font-label font-medium transition ${
                 viewMode === 'matrix'
-                  ? 'bg-white text-blue-700 shadow-xs'
-                  : 'text-slate-600 hover:text-slate-900'
+                  ? 'bg-secondary-container text-on-secondary-container'
+                  : 'text-on-surface-variant hover:text-on-surface'
               }`}
             >
               <Grid className="h-3.5 w-3.5" />
@@ -659,7 +660,7 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
           {viewMode === 'mesh' && (
             <div
               ref={meshContainerRef}
-              className="relative space-y-4 rounded-xl border border-slate-200 bg-white p-5 shadow-xs"
+              className="relative space-y-4 rounded-xl border border-outline-variant bg-surface p-5 shadow-none"
             >
               {/* SVG Dependency Overlay */}
               <svg
@@ -676,7 +677,7 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
                     markerHeight="5"
                     orient="auto-start-reverse"
                   >
-                    <path d="M 0 1 L 10 5 L 0 9 z" fill="#94A3B8" />
+                    <path d="M 0 1 L 10 5 L 0 9 z" fill="var(--md-sys-color-outline)" />
                   </marker>
                   <marker
                     id="edge-arrow-active"
@@ -687,7 +688,7 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
                     markerHeight="6"
                     orient="auto-start-reverse"
                   >
-                    <path d="M 0 1 L 10 5 L 0 9 z" fill="#1A73E8" />
+                    <path d="M 0 1 L 10 5 L 0 9 z" fill="var(--md-sys-color-primary)" />
                   </marker>
                 </defs>
                 {svgLines.map((ln) => {
@@ -702,10 +703,10 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
                       fill="none"
                       stroke={
                         ln.hasError
-                          ? '#DC2626'
+                          ? 'var(--gv-color-incident)'
                           : ln.highlighted
-                          ? '#1A73E8'
-                          : '#CBD5E1'
+                          ? 'var(--md-sys-color-primary)'
+                          : 'var(--md-sys-color-outline-variant)'
                       }
                       strokeWidth={ln.highlighted ? 2.2 : 1.25}
                       strokeDasharray={ln.highlighted ? undefined : '4 3'}
@@ -748,14 +749,14 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
                             className="h-2.5 w-2.5 rounded-full"
                             style={{ backgroundColor: meta.accent }}
                           />
-                          <h3 className="text-xs font-bold uppercase tracking-wider text-slate-900">
+                          <h3 className="font-title text-xs font-medium tracking-wide text-on-surface">
                             {meta.label}
                           </h3>
-                          <span className="rounded bg-white px-2 py-0.5 font-mono text-[11px] font-semibold text-slate-700 shadow-2xs">
+                          <span className="rounded-full border border-outline-variant bg-surface px-2 py-0.5 font-mono text-[11px] font-medium text-on-surface-variant num-tabular">
                             {tierNodes.length} resources
                           </span>
-                          <span className="hidden text-xs text-slate-500 md:inline">
-                            — {meta.subtitle}
+                          <span className="hidden text-xs text-on-surface-variant md:inline">
+                            · {meta.subtitle}
                           </span>
                         </div>
 
@@ -768,7 +769,7 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
                                 [tier]: !prev[tier],
                               }))
                             }
-                            className="inline-flex items-center gap-1 rounded border border-slate-300 bg-white px-2.5 py-1 text-xs font-semibold text-blue-700 hover:bg-blue-50"
+                            className="inline-flex items-center gap-1 rounded-full border border-outline-variant bg-surface px-3 py-1 font-label text-xs font-medium text-primary hover:bg-primary-container hover:text-on-primary-container"
                           >
                             {isExpanded ? (
                               <>
@@ -800,14 +801,14 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
                               }}
                               type="button"
                               onClick={() => handleSelectNode(node)}
-                              className={`group relative flex flex-col justify-between rounded-lg border bg-white p-2.5 text-left transition hover:shadow-md ${
+                              className={`group relative flex flex-col justify-between rounded-md border bg-surface p-2.5 text-left transition ${
                                 isSelected
-                                  ? 'border-blue-600 ring-2 ring-blue-600/20'
+                                  ? 'border-primary ring-2 ring-primary'
                                   : jStep
-                                  ? 'border-blue-500 bg-blue-50/20 ring-1 ring-blue-400'
+                                  ? 'border-primary bg-primary-container/30 ring-1 ring-primary'
                                   : node.incidents_open > 0 || node.status === 'red'
-                                  ? 'border-red-300 bg-red-50/10'
-                                  : 'border-slate-200 hover:border-blue-400'
+                                  ? 'border-incident bg-incident-container/40'
+                                  : 'border-outline-variant hover:border-primary'
                               }`}
                             >
                               <div>
@@ -823,42 +824,42 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
                                     />
                                     <span
                                       title={node.name}
-                                      className="truncate font-mono text-xs font-bold text-slate-900 group-hover:text-blue-700"
+                                      className="truncate font-mono text-xs font-medium text-on-surface group-hover:text-primary"
                                     >
                                       {node.name}
                                     </span>
                                   </div>
                                   {jStep && (
-                                    <span className="shrink-0 rounded-full bg-blue-600 px-1.5 py-0.5 font-mono text-[10px] font-bold text-white">
+                                    <span className="shrink-0 rounded-full bg-primary px-2 py-0.5 font-mono text-[10px] font-medium text-on-primary">
                                       Step #{jStep.stepIndex}
                                     </span>
                                   )}
                                 </div>
 
                                 <div className="mt-1 flex flex-wrap items-center gap-1">
-                                  <span className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] font-medium text-slate-700">
+                                  <span className="rounded-full bg-surface-container px-2 py-0.5 font-mono text-[10px] font-medium text-on-surface-variant">
                                     {formatKindLabel(node.kind)}
                                   </span>
                                   {isConnected && (
-                                    <span className="rounded bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700">
+                                    <span className="rounded-full bg-primary-container px-2 py-0.5 text-[10px] font-medium text-on-primary-container">
                                       mesh-linked
                                     </span>
                                   )}
                                   {node.incidents_open > 0 && (
-                                    <span className="rounded bg-red-100 px-1.5 py-0.5 font-mono text-[10px] font-bold text-red-700">
+                                    <span className="rounded-full bg-incident-container px-2 py-0.5 font-mono text-[10px] font-medium text-on-incident-container">
                                       {node.incidents_open} inc
                                     </span>
                                   )}
                                 </div>
 
                                 {node.business?.role_summary && (
-                                  <p className="mt-1.5 line-clamp-2 text-[11px] leading-snug text-slate-600">
+                                  <p className="mt-1.5 line-clamp-2 text-[11px] leading-snug text-on-surface-variant">
                                     {node.business.role_summary}
                                   </p>
                                 )}
                               </div>
 
-                              <div className="mt-2 flex items-center justify-between border-t border-slate-100 pt-1.5 font-mono text-[10px] text-slate-500">
+                              <div className="mt-2 flex items-center justify-between border-t border-outline-variant pt-1.5 font-mono text-[10px] text-on-surface-variant num-tabular">
                                 <span>
                                   {node.golden?.rps != null
                                     ? `${node.golden.rps.toFixed(1)} rps`
@@ -887,15 +888,15 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
               {domainClusters.map((cluster) => (
                 <Card
                   key={cluster.domain}
-                  className="flex flex-col justify-between border-slate-200 bg-white p-4 shadow-xs"
+                  className="flex flex-col justify-between border-outline-variant bg-surface p-4 shadow-none"
                 >
                   <div>
-                    <div className="flex items-start justify-between gap-2 border-b border-slate-100 pb-3">
+                    <div className="flex items-start justify-between gap-2 border-b border-outline-variant pb-3">
                       <div>
-                        <h3 className="text-sm font-bold text-slate-900">
+                        <h3 className="font-title text-sm font-medium text-on-surface">
                           {cluster.domain}
                         </h3>
-                        <p className="mt-0.5 text-xs text-slate-500">
+                        <p className="mt-0.5 text-xs text-on-surface-variant">
                           Kinds:{' '}
                           {Array.from(cluster.kinds)
                             .map(formatKindLabel)
@@ -920,10 +921,10 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
                           key={node.id}
                           type="button"
                           onClick={() => handleSelectNode(node)}
-                          className={`flex items-center justify-between rounded border px-2.5 py-2 text-left text-xs transition ${
+                          className={`flex items-center justify-between rounded-sm border px-2.5 py-2 text-left text-xs transition ${
                             activeNodeId === node.id
-                              ? 'border-blue-600 bg-blue-50/40 font-semibold'
-                              : 'border-slate-200 bg-slate-50/60 hover:border-blue-300 hover:bg-white'
+                              ? 'border-primary bg-primary-container font-medium text-on-primary-container'
+                              : 'border-outline-variant bg-surface-container-low hover:border-primary hover:bg-surface'
                           }`}
                         >
                           <div className="flex items-center gap-2 min-w-0">
@@ -933,11 +934,11 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
                                 backgroundColor: statusDotColor(node.status),
                               }}
                             />
-                            <span className="truncate font-mono text-slate-900">
+                            <span className="truncate font-mono text-on-surface">
                               {node.name}
                             </span>
                           </div>
-                          <span className="ml-2 shrink-0 rounded bg-white px-1.5 py-0.5 font-mono text-[10px] text-slate-500">
+                          <span className="ml-2 shrink-0 rounded-full bg-surface px-2 py-0.5 font-mono text-[10px] text-on-surface-variant">
                             {formatKindLabel(node.kind)}
                           </span>
                         </button>
@@ -951,11 +952,11 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
 
           {/* VIEW 3: FULL ESTATE MATRIX (ALL 115+ NODES) */}
           {viewMode === 'matrix' && (
-            <Card className="overflow-hidden border-slate-200 bg-white shadow-xs">
+            <Card className="overflow-hidden border-outline-variant bg-surface shadow-none">
               <div className="overflow-x-auto">
                 <table className="w-full border-collapse text-left text-xs">
                   <thead>
-                    <tr className="border-b border-slate-200 bg-slate-50 text-[11px] font-semibold uppercase tracking-wider text-slate-600">
+                    <tr className="border-b border-outline-variant bg-surface-container-low font-label text-[11px] font-medium text-on-surface-variant">
                       <th className="px-3 py-2.5">Resource Name</th>
                       <th className="px-3 py-2.5">Tier &amp; Kind</th>
                       <th className="px-3 py-2.5">Status</th>
@@ -964,16 +965,16 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
                       <th className="px-3 py-2.5">Specialist Agent</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-100">
+                  <tbody className="divide-y divide-outline-variant">
                     {filteredNodes.map((node) => (
                       <tr
                         key={node.id}
                         onClick={() => handleSelectNode(node)}
-                        className={`cursor-pointer transition hover:bg-blue-50/40 ${
-                          activeNodeId === node.id ? 'bg-blue-50/70' : ''
+                        className={`cursor-pointer transition hover:bg-surface-container-low ${
+                          activeNodeId === node.id ? 'bg-secondary-container/40' : ''
                         }`}
                       >
-                        <td className="px-3 py-2.5 font-mono font-semibold text-slate-900">
+                        <td className="px-3 py-2.5 font-mono font-medium text-on-surface">
                           <div className="flex items-center gap-2">
                             <span
                               className="h-2 w-2 rounded-full"
@@ -985,7 +986,7 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
                           </div>
                         </td>
                         <td className="px-3 py-2.5">
-                          <span className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[11px] text-slate-700">
+                          <span className="rounded-full bg-surface-container px-2 py-0.5 font-mono text-[11px] text-on-surface-variant">
                             {node.tier} · {formatKindLabel(node.kind)}
                           </span>
                         </td>
@@ -998,22 +999,22 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
                               : 'healthy'}
                           </Badge>
                         </td>
-                        <td className="max-w-md px-3 py-2.5 text-slate-700">
-                          <div className="font-medium text-slate-900">
+                        <td className="max-w-md px-3 py-2.5 text-on-surface">
+                          <div className="font-medium text-on-surface">
                             {node.business?.domain || node.tier}
                           </div>
-                          <div className="truncate text-[11px] text-slate-500">
+                          <div className="truncate text-[11px] text-on-surface-variant">
                             {node.business?.role_summary}
                           </div>
                         </td>
-                        <td className="px-3 py-2.5 font-mono text-[11px] text-slate-600">
+                        <td className="px-3 py-2.5 font-mono text-[11px] text-on-surface-variant num-tabular">
                           {node.golden?.rps != null
                             ? `${node.golden.rps.toFixed(1)} rps · ${Math.round(
                                 node.golden.p95_ms ?? 0
                               )}ms`
                             : '0 tokens at rest'}
                         </td>
-                        <td className="px-3 py-2.5 font-mono text-[11px] text-blue-700">
+                        <td className="px-3 py-2.5 font-mono text-[11px] text-primary">
                           {node.agent_id || 'sovereign-observer'}
                         </td>
                       </tr>
@@ -1027,8 +1028,8 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
 
         {/* Slide-Over Node Inspector Drawer */}
         {selectedNode && (
-          <Card className="sticky top-4 border-slate-200 bg-white p-4 shadow-md xl:col-span-4">
-            <div className="flex items-start justify-between gap-2 border-b border-slate-100 pb-3">
+          <Card className="sticky top-4 rounded-xl border-outline-variant bg-surface p-5 shadow-elev-2 xl:col-span-4">
+            <div className="flex items-start justify-between gap-2 border-b border-outline-variant pb-3">
               <div>
                 <div className="flex items-center gap-2">
                   <span
@@ -1037,18 +1038,19 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
                       backgroundColor: statusDotColor(selectedNode.status),
                     }}
                   />
-                  <h3 className="font-mono text-sm font-bold text-slate-900">
+                  <h3 className="font-mono text-sm font-medium text-on-surface">
                     {selectedNode.name}
                   </h3>
                 </div>
-                <p className="mt-0.5 font-mono text-[11px] text-slate-500">
+                <p className="mt-0.5 font-mono text-[11px] text-on-surface-variant">
                   {selectedNode.id}
                 </p>
               </div>
               <button
                 type="button"
+                aria-label="Close Node Inspector"
                 onClick={() => setActiveNodeId(null)}
-                className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+                className="rounded-full p-1.5 text-on-surface-variant hover:bg-surface-container-low hover:text-on-surface"
               >
                 <X className="h-4 w-4" />
               </button>
@@ -1067,12 +1069,12 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
               </div>
 
               {/* Autonomous Inferred Business Context */}
-              <div className="rounded-lg border border-blue-100 bg-blue-50/40 p-3">
+              <div className="rounded-md border border-outline-variant bg-surface-container-low p-3">
                 <div className="flex items-center justify-between">
-                  <span className="font-semibold text-blue-900">
+                  <span className="font-title font-medium text-on-surface">
                     Autonomous Business Context
                   </span>
-                  <span className="font-mono text-[11px] text-blue-700">
+                  <span className="rounded-full bg-primary-container px-2 py-0.5 font-mono text-[11px] font-medium text-on-primary-container num-tabular">
                     conf{' '}
                     {Math.round(
                       (businessContext?.confidence ??
@@ -1082,13 +1084,13 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
                     %
                   </span>
                 </div>
-                <p className="mt-1 font-medium text-slate-900">
+                <p className="mt-1 font-medium text-on-surface">
                   Domain:{' '}
                   {businessContext?.domain ||
                     selectedNode.business?.domain ||
                     selectedNode.tier}
                 </p>
-                <p className="mt-1 text-slate-700">
+                <p className="mt-1 text-on-surface-variant">
                   {loadingContext
                     ? 'Loading inferred business context...'
                     : businessContext?.role_summary ||
@@ -1099,7 +1101,7 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
 
               {/* Upstream & Downstream Call Graph Edges */}
               <div>
-                <h4 className="font-semibold text-slate-900">
+                <h4 className="font-title font-medium text-on-surface">
                   Call-Graph &amp; Dependency Edges (
                   {selectedNodeEdges.inbound.length +
                     selectedNodeEdges.outbound.length}
@@ -1109,9 +1111,9 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
                   {selectedNodeEdges.inbound.map((e) => (
                     <div
                       key={e.id}
-                      className="flex items-center justify-between rounded border border-slate-200 bg-slate-50 px-2.5 py-1.5 font-mono text-[11px]"
+                      className="flex items-center justify-between rounded-sm border border-outline-variant bg-surface-container-low px-2.5 py-1.5 font-mono text-[11px]"
                     >
-                      <span className="truncate text-slate-700">
+                      <span className="truncate text-on-surface">
                         ← {shortNodeName(e.src)}
                       </span>
                       <Badge variant="outline">{e.kind}</Badge>
@@ -1120,9 +1122,9 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
                   {selectedNodeEdges.outbound.map((e) => (
                     <div
                       key={e.id}
-                      className="flex items-center justify-between rounded border border-slate-200 bg-slate-50 px-2.5 py-1.5 font-mono text-[11px]"
+                      className="flex items-center justify-between rounded-sm border border-outline-variant bg-surface-container-low px-2.5 py-1.5 font-mono text-[11px]"
                     >
-                      <span className="truncate text-slate-700">
+                      <span className="truncate text-on-surface">
                         → {shortNodeName(e.dst)}
                       </span>
                       <Badge variant="outline">{e.kind}</Badge>
@@ -1130,7 +1132,7 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
                   ))}
                   {selectedNodeEdges.inbound.length === 0 &&
                     selectedNodeEdges.outbound.length === 0 && (
-                      <p className="text-slate-500">
+                      <p className="text-on-surface-variant">
                         Standalone infrastructure resource (monitored via 0-token
                         SenseAdapter)
                       </p>
@@ -1140,12 +1142,12 @@ export const GlobeView: React.FC<GlobeViewProps> = ({
 
               {/* Specialist Agent Assignment */}
               {selectedNode.agent_id && (
-                <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+                <div className="flex items-center justify-between rounded-md border border-outline-variant bg-surface-container-low p-2.5">
                   <div>
-                    <div className="text-[11px] text-slate-500">
+                    <div className="text-[11px] text-on-surface-variant">
                       Owning Court Specialist
                     </div>
-                    <div className="font-mono font-semibold text-slate-900">
+                    <div className="font-mono font-medium text-on-surface">
                       {selectedNode.agent_id}
                     </div>
                   </div>

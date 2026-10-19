@@ -2,25 +2,25 @@ import React from 'react';
 import type { BadgeVariant, SeverityLevel } from '../api/types';
 
 const BADGE_STYLES: Record<BadgeVariant, string> = {
-  default: 'bg-slate-900 text-white border-slate-900',
-  secondary: 'bg-slate-100 text-slate-800 border-slate-200',
-  outline: 'bg-white text-slate-700 border-slate-300',
-  muted: 'bg-slate-50 text-slate-600 border-slate-200',
-  success: 'bg-green-50 text-green-800 border-green-200',
-  warning: 'bg-amber-50 text-amber-900 border-amber-200',
-  danger: 'bg-red-50 text-red-800 border-red-200',
-  info: 'bg-blue-50 text-blue-800 border-blue-200',
+  default: 'bg-inverse-surface text-inverse-on-surface border-inverse-surface',
+  secondary: 'bg-surface-container text-on-surface border-outline-variant',
+  outline: 'bg-surface text-on-surface-variant border-outline-variant',
+  muted: 'bg-surface-container-low text-on-surface-variant border-outline-variant',
+  success: 'bg-healthy-container text-on-healthy-container border-outline-variant',
+  warning: 'bg-warning-container text-on-warning-container border-outline-variant',
+  danger: 'bg-incident-container text-on-incident-container border-outline-variant',
+  info: 'bg-primary-container text-on-primary-container border-outline-variant',
 };
 
 const DOT_STYLES: Record<BadgeVariant, string> = {
-  default: 'bg-white',
-  secondary: 'bg-slate-500',
-  outline: 'bg-slate-500',
-  muted: 'bg-slate-500',
-  success: 'bg-green-600',
-  warning: 'bg-amber-600',
-  danger: 'bg-red-600',
-  info: 'bg-blue-600',
+  default: 'bg-inverse-on-surface',
+  secondary: 'bg-on-surface-variant',
+  outline: 'bg-on-surface-variant',
+  muted: 'bg-unknown',
+  success: 'bg-healthy',
+  warning: 'bg-warning',
+  danger: 'bg-incident',
+  info: 'bg-primary',
 };
 
 export interface BadgeProps {
@@ -38,7 +38,7 @@ export function Badge({
 }: BadgeProps) {
   return (
     <span
-      className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded border px-2 py-0.5 text-xs font-semibold leading-5 ${BADGE_STYLES[variant]} ${className}`}
+      className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-full border px-2.5 py-0.5 font-label text-xs font-medium leading-5 ${BADGE_STYLES[variant]} ${className}`}
     >
       {dot && <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${DOT_STYLES[variant]}`} />}
       {children}
@@ -51,18 +51,18 @@ export type ButtonSize = 'sm' | 'md';
 
 const BUTTON_VARIANTS: Record<ButtonVariant, string> = {
   primary:
-    'border-blue-600 bg-blue-600 text-white hover:bg-blue-700 hover:border-blue-700 disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-500',
+    'border-primary bg-primary text-on-primary hover:bg-primary-hover hover:border-primary-hover disabled:border-outline-variant disabled:bg-surface-container disabled:text-on-surface-variant',
   secondary:
-    'border-slate-300 bg-white text-slate-800 hover:bg-slate-50 disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-500',
+    'border-outline-variant bg-surface text-on-surface hover:bg-surface-container-low disabled:border-outline-variant disabled:bg-surface-container disabled:text-on-surface-variant',
   danger:
-    'border-red-600 bg-red-600 text-white hover:bg-red-700 hover:border-red-700 disabled:border-slate-200 disabled:bg-slate-100 disabled:text-slate-500',
+    'border-incident bg-incident-container text-on-incident-container hover:bg-incident hover:text-on-error disabled:border-outline-variant disabled:bg-surface-container disabled:text-on-surface-variant',
   ghost:
-    'border-transparent bg-transparent text-slate-700 hover:bg-slate-100 disabled:border-transparent disabled:bg-transparent disabled:text-slate-500',
+    'border-transparent bg-transparent text-on-surface-variant hover:bg-surface-container-low hover:text-on-surface disabled:border-transparent disabled:bg-transparent disabled:text-on-surface-variant',
 };
 
 const BUTTON_SIZES: Record<ButtonSize, string> = {
-  sm: 'px-2.5 py-1 text-xs',
-  md: 'px-3 py-1.5 text-xs',
+  sm: 'px-3 py-1 text-xs min-h-[32px]',
+  md: 'px-4 py-1.5 text-xs min-h-[36px]',
 };
 
 export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
@@ -76,7 +76,7 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
       <button
         ref={ref}
         type={type}
-        className={`inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded border font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-blue-600 focus:ring-offset-1 disabled:cursor-not-allowed ${BUTTON_VARIANTS[variant]} ${BUTTON_SIZES[size]} ${className}`}
+        className={`inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-full border font-label font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-1 disabled:cursor-not-allowed ${BUTTON_VARIANTS[variant]} ${BUTTON_SIZES[size]} ${className}`}
         {...props}
       />
     );
@@ -264,7 +264,7 @@ export function Card({
   return (
     <div
       data-testid={testId}
-      className={`rounded-md border border-slate-200 bg-white shadow-sm ${className}`}
+      className={`rounded-lg border border-outline-variant bg-surface shadow-none ${className}`}
     >
       {children}
     </div>
@@ -281,10 +281,10 @@ export function SectionHeader({
   right?: React.ReactNode;
 }) {
   return (
-    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-3">
+    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-outline-variant pb-3">
       <div>
-        <h2 className="text-base font-semibold text-slate-900">{title}</h2>
-        {subtitle && <p className="mt-0.5 text-xs text-slate-500">{subtitle}</p>}
+        <h2 className="font-title text-base font-medium text-on-surface">{title}</h2>
+        {subtitle && <p className="mt-0.5 text-xs text-on-surface-variant">{subtitle}</p>}
       </div>
       {right && <div className="flex items-center gap-2">{right}</div>}
     </div>
@@ -297,7 +297,7 @@ export function TableSkeleton({ rows = 4 }: { rows?: number }) {
       {Array.from({ length: rows }).map((_, i) => (
         <div
           key={i}
-          className="h-9 w-full animate-pulse rounded border border-slate-100 bg-slate-50"
+          className="h-9 w-full animate-pulse rounded-sm border border-outline-variant bg-surface-container-low"
         />
       ))}
     </div>
@@ -312,9 +312,9 @@ export function EmptyState({
   description: string;
 }) {
   return (
-    <div className="rounded-md border border-dashed border-slate-300 bg-slate-50 p-8 text-center">
-      <p className="text-sm font-semibold text-slate-900">{title}</p>
-      <p className="mt-1 text-xs text-slate-500">{description}</p>
+    <div className="rounded-lg border border-dashed border-outline-variant bg-surface-container-low p-8 text-center">
+      <p className="font-title text-sm font-medium text-on-surface">{title}</p>
+      <p className="mt-1 text-xs text-on-surface-variant">{description}</p>
     </div>
   );
 }

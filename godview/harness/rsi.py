@@ -19,6 +19,7 @@ Persistence:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
 import tempfile
@@ -70,7 +71,7 @@ def _collect_archived_evidence(ctx: Any, domain: str) -> list[dict[str, Any]]:
         try:
             incidents = docs.list_docs(
                 "incidents",
-                predicate=lambda d: d.get("status") in ("resolved", "mitigated", "false_positive"),
+                predicate=lambda d: (d.get("outcome") or d.get("status")) in ("resolved", "mitigated", "false_positive"),
             )
             for inc in incidents:
                 ep = dict(inc.get("evidence_pack") or {})
@@ -82,7 +83,7 @@ def _collect_archived_evidence(ctx: Any, domain: str) -> list[dict[str, Any]]:
                         "task_id": inc.get("incident_id") or inc.get("doc_id") or "archived-inc",
                         "domain": domain,
                         "description": resolution_summary or f"Archived incident in {domain}",
-                        "outcome": inc.get("status"),
+                        "outcome": inc.get("outcome") or inc.get("status"),
                         "root_cause_category": root_cause,
                         "remediation_capability": remediation,
                         "resolution_summary": resolution_summary,
@@ -243,18 +244,78 @@ def evolve_specialist(
             if existing_doc:
                 cur_v = existing_doc.get("living_model_version", 1)
                 new_version = cur_v + 1
-                if hasattr(docs_store, "set"):
+            else:
+                new_version = 2
+
+        # Record evolution run across Firestore collections
+        run_record = {
+            "agent_id": agent_id,
+            "domain": domain,
+            "task_id": t_id,
+            "trigger": trigger,
+            "winner_tag": winner.tag,
+            "score": winner.score,
+            "passed": winner.passed,
+            "notes": winner.notes,
+            "living_model_version": new_version,
+            "adopted_path": str(final_res.adopted_path) if final_res.adopted_path else None,
+            "created_at_epoch": time.time(),
+            "updated_at_epoch": time.time(),
+        }
+        if docs_store is not None and hasattr(docs_store, "set"):
+            try:
+                run_id = f"hrun-{domain}-{int(time.time())}"
+                docs_store.set("harness_runs", run_id, run_record, merge=True)
+                docs_store.set("harness_trees", f"{domain}__{t_id}", run_record, merge=True)
+                docs_store.set("skills", f"{domain}__{t_id}", run_record, merge=True)
+                docs_store.set("skill_versions", f"{domain}__v{new_version}", run_record, merge=True)
+            except Exception as e:
+                logger.warning("Failed to record evolution in firestore: %s", e)
+
+        # Bump living_model_version on all matching court_agents docs for this domain
+        env_project = (
+            os.environ.get("GCP_PROJECT_ID", "").strip()
+            or os.environ.get("GOOGLE_CLOUD_PROJECT", "").strip()
+        )
+        candidate_ca_ids = {
+            agent_id,
+            domain,
+            f"{domain}__specialist",
+            f"{domain}__env",
+            f"{domain}__default",
+        }
+        if env_project:
+            candidate_ca_ids.add(f"{domain}__{env_project}")
+        if docs_store is not None and hasattr(docs_store, "list_docs"):
+            try:
+                for ca in docs_store.list_docs("court_agents"):
+                    if isinstance(ca, dict):
+                        ca_id = ca.get("_id") or ca.get("doc_id") or ca.get("id")
+                        ca_type = ca.get("agent_type")
+                        if ca_id and (ca_id.startswith(f"{domain}__") or ca_type == domain):
+                            candidate_ca_ids.add(ca_id)
+            except Exception:
+                pass
+
+        for ca_id in candidate_ca_ids:
+            if docs_store is not None and hasattr(docs_store, "set"):
+                try:
+                    cur_doc = docs_store.get("court_agents", ca_id) if hasattr(docs_store, "get") else {}
+                    cur_v = (cur_doc.get("living_model_version") if isinstance(cur_doc, dict) else 1) or 1
+                    bump_v = max(cur_v + 1, new_version, 2)
                     docs_store.set(
                         "court_agents",
-                        agent_id,
+                        ca_id,
                         {
-                            "living_model_version": new_version,
+                            "living_model_version": bump_v,
                             "last_evolution_at": time.time(),
                             "last_evolution_score": winner.score,
                             "last_evolution_trigger": trigger,
                         },
                         merge=True,
                     )
+                except Exception as e:
+                    logger.warning("Failed to bump court_agent %s version: %s", ca_id, e)
 
         # If CourtOrchestrator exists on ctx, hot-load into in-process specialist
         orchestrator = getattr(ctx, "court_orchestrator", None)
@@ -310,6 +371,12 @@ class HookDispatcher:
         for cb in list(self._callbacks):
             try:
                 res = cb(*args, **kwargs)
+                if inspect.isawaitable(res):
+                    try:
+                        loop = asyncio.get_running_loop()
+                        res = loop.create_task(res)
+                    except RuntimeError:
+                        pass
                 results.append(res)
             except Exception as exc:
                 logger.warning("Hook callback failed: %s", exc)
@@ -334,16 +401,33 @@ def register_rsi_hooks(ctx: Any) -> None:
     if hooks is None:
         return
 
-    async def _on_incident_closed(incident_doc: Any) -> None:
+    def _on_incident_closed(incident_doc: Any) -> None:
         data = (
             incident_doc.model_dump(mode="json")
             if hasattr(incident_doc, "model_dump")
             else dict(incident_doc or {})
         )
-        status = str(data.get("status") or "resolved")
+        status = str(data.get("outcome") or data.get("status") or "resolved")
         inc_id = str(data.get("incident_id") or data.get("doc_id") or "inc-closed")
         ep = dict(data.get("evidence_pack") or {})
-        domain = str(data.get("domain") or "application")
+
+        # Resolve domain from data, lead_agent_id, or dedupe_key
+        domain = str(data.get("domain") or "")
+        if not domain or domain == "application":
+            lead_agent = str(data.get("lead_agent_id") or "")
+            if "__" in lead_agent:
+                domain = lead_agent.split("__")[0]
+            else:
+                dedupe_k = str(data.get("dedupe_key") or "").lower()
+                target_r = str(data.get("target_resource") or "").lower()
+                if any(k in dedupe_k or k in target_r for k in ("posture", "lb_requests", "armor", "policy", "probe", "gke", "cloud_run")):
+                    domain = "platform"
+                elif any(k in dedupe_k or k in target_r for k in ("postgres", "sql", "db", "dataset")):
+                    domain = "data"
+                elif any(k in dedupe_k or k in target_r for k in ("commit", "deploy", "build", "change")):
+                    domain = "change"
+                else:
+                    domain = "platform"
         agent_id = f"{domain}__specialist"
 
         if "root_cause_category" in data and "root_cause_category" not in ep:
@@ -374,7 +458,7 @@ def register_rsi_hooks(ctx: Any) -> None:
                 evidence_pack=ep,
             )
 
-    async def _on_approval_decided(approval_doc: Any) -> None:
+    def _on_approval_decided(approval_doc: Any) -> None:
         data = (
             approval_doc.model_dump(mode="json")
             if hasattr(approval_doc, "model_dump")
@@ -382,7 +466,9 @@ def register_rsi_hooks(ctx: Any) -> None:
         )
         state = str(data.get("state") or "approved")
         app_id = str(data.get("approval_id") or data.get("doc_id") or "appr-decided")
-        agent_id = str(data.get("agent_id") or "application__specialist")
+        lead_ag = str(data.get("agent_id") or "")
+        dom = lead_ag.split("__")[0] if "__" in lead_ag else "platform"
+        agent_id = f"{dom}__specialist"
         try:
             loop = asyncio.get_running_loop()
             loop.create_task(
@@ -416,3 +502,45 @@ def register_rsi_hooks(ctx: Any) -> None:
             dispatcher = HookDispatcher(existing)
             dispatcher.append(callback)
             setattr(hooks, hook_name, dispatcher)
+
+    # In GCP mode, schedule a one-time startup task to replay any previously resolved incidents
+    # that have not yet had their Harness2 RSI evolution recorded.
+    if os.environ.get("GODVIEW_ENV", "hermetic").lower() == "gcp":
+
+        async def _replay_closed_incidents_startup() -> None:
+            await asyncio.sleep(4.0)
+            docs = getattr(ctx, "docs", None)
+            if docs is not None and hasattr(docs, "list_docs"):
+                try:
+                    resolved = docs.list_docs(
+                        "incidents",
+                        predicate=lambda d: (d.get("outcome") or d.get("status"))
+                        in ("resolved", "mitigated", "false_positive"),
+                    )
+                    existing_trees = set()
+                    for t in docs.list_docs("harness_trees"):
+                        tid = t.get("task_id")
+                        if tid:
+                            existing_trees.add(tid)
+                        oid = t.get("_id")
+                        if oid:
+                            existing_trees.add(oid)
+
+                    for inc in resolved:
+                        inc_id = str(inc.get("incident_id") or inc.get("doc_id") or "inc")
+                        if inc_id not in existing_trees and not any(
+                            inc_id in str(e) for e in existing_trees
+                        ):
+                            logger.info(
+                                "Auto-replaying closed incident %s for Harness2 RSI evolution",
+                                inc_id,
+                            )
+                            _on_incident_closed(inc)
+                except Exception as e:
+                    logger.warning("Auto-replay of closed incidents failed: %s", e)
+
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_replay_closed_incidents_startup())
+        except RuntimeError:
+            pass

@@ -461,59 +461,121 @@ class PerceptionOrgan:
                 "gce_instance",
                 "backend_service",
             )
+            env_mode = os.environ.get("GODVIEW_ENV", "hermetic").lower()
+
+            # In GCP mode, purge any stale synthetic docs where rps==0.1 and p95_ms==25.0 and error_ratio==0.0
+            if env_mode == "gcp" and hasattr(self._firestore, "list_docs") and hasattr(self._firestore, "delete"):
+                try:
+                    for g in self._firestore.list_docs("golden_signals"):
+                        if (
+                            g.get("rps") == 0.1
+                            and g.get("p95_ms") == 25.0
+                            and g.get("error_ratio") == 0.0
+                        ):
+                            k = g.get("_id") or g.get("node_id") or g.get("service")
+                            if k:
+                                self._firestore.delete("golden_signals", k)
+                except Exception as e:
+                    logger.debug("Failed to purge synthetic golden signals: %s", e)
+
             for svc in services_to_persist:
                 if svc.kind in observed_kinds:
                     doc_id = svc.doc_id or f"{svc.env_id}__{svc.kind}.{svc.name}"
                     svc_id = svc.name
 
-                    rps = 0.1
-                    p95_ms = 25.0
-                    err_ratio = 0.0
+                    rps: float | None = None
+                    p95_ms: float | None = None
+                    err_ratio: float | None = None
 
-                    if (
-                        mon_adapter is not None
-                        and hasattr(mon_adapter, "execute_capability")
-                        and svc.kind == "cloud_run"
-                    ):
-                        try:
-                            ts_res = await mon_adapter.execute_capability(
-                                "monitoring.query_timeseries",
-                                {
-                                    "service_name": svc.name,
-                                    "window_s": 300,
-                                    "filter": (
-                                        f'metric.type="run.googleapis.com/request_latencies" '
-                                        f'AND resource.labels.service_name="{svc.name}"'
-                                    ),
-                                },
-                            )
-                            if isinstance(ts_res, list) and ts_res:
-                                pts = ts_res[0].get("points", [])
-                                if pts:
-                                    p95_val = float(pts[0].get("value", 0.0) or 0.0)
-                                    if p95_val > 0:
-                                        p95_ms = p95_val
-                        except Exception:
-                            pass
+                    if env_mode != "gcp":
+                        rps = 0.1
+                        p95_ms = 25.0
+                        err_ratio = 0.0
+                    else:
+                        if (
+                            mon_adapter is not None
+                            and hasattr(mon_adapter, "execute_capability")
+                            and svc.kind == "cloud_run"
+                        ):
+                            try:
+                                ts_res = await mon_adapter.execute_capability(
+                                    "monitoring.query_timeseries",
+                                    {
+                                        "service_name": svc.name,
+                                        "window_s": 300,
+                                        "filter": (
+                                            f'metric.type="run.googleapis.com/request_latencies" '
+                                            f'AND resource.labels.service_name="{svc.name}"'
+                                        ),
+                                    },
+                                )
+                                if isinstance(ts_res, list) and ts_res:
+                                    pts = ts_res[0].get("points", [])
+                                    if pts:
+                                        p95_val = float(pts[0].get("value", 0.0) or 0.0)
+                                        if p95_val > 0:
+                                            p95_ms = p95_val
+                            except Exception:
+                                pass
 
-                    sig_payload = {
-                        "node_id": doc_id,
-                        "service": svc_id,
-                        "rps": rps,
-                        "p95_ms": p95_ms,
-                        "error_ratio": err_ratio,
-                        "updated_at": now_iso,
-                    }
-                    golden_by_node[svc_id] = sig_payload
-                    golden_by_node[doc_id] = sig_payload
-                    if hasattr(self._firestore, "set"):
-                        try:
-                            self._firestore.set("golden_signals", svc_id, sig_payload, merge=True)
-                            self._firestore.set("golden_signals", doc_id, sig_payload, merge=True)
-                        except Exception:
-                            pass
+                            try:
+                                cnt_res = await mon_adapter.execute_capability(
+                                    "monitoring.query_timeseries",
+                                    {
+                                        "service_name": svc.name,
+                                        "window_s": 300,
+                                        "filter": (
+                                            f'metric.type="run.googleapis.com/request_count" '
+                                            f'AND resource.labels.service_name="{svc.name}"'
+                                        ),
+                                    },
+                                )
+                                if isinstance(cnt_res, list) and cnt_res:
+                                    total_cnt = 0.0
+                                    err_cnt = 0.0
+                                    for series in cnt_res:
+                                        pts = series.get("points", [])
+                                        count = sum(float(p.get("value", 0.0) or 0.0) for p in pts)
+                                        total_cnt += count
+                                        resp_code = str(
+                                            series.get("metric", {})
+                                            .get("labels", {})
+                                            .get("response_code_class", "")
+                                        )
+                                        if resp_code.startswith("5"):
+                                            err_cnt += count
+                                    if total_cnt > 0:
+                                        rps = round(total_cnt / 300.0, 3)
+                                        err_ratio = round(err_cnt / total_cnt, 4)
+                            except Exception:
+                                pass
+
+                    if rps is not None or p95_ms is not None or err_ratio is not None:
+                        sig_payload = {
+                            "node_id": doc_id,
+                            "service": svc_id,
+                            "rps": rps,
+                            "p95_ms": p95_ms,
+                            "error_ratio": err_ratio,
+                            "updated_at": now_iso,
+                        }
+                        golden_by_node[svc_id] = sig_payload
+                        golden_by_node[doc_id] = sig_payload
+                        if hasattr(self._firestore, "set"):
+                            try:
+                                self._firestore.set("golden_signals", svc_id, sig_payload, merge=True)
+                                self._firestore.set("golden_signals", doc_id, sig_payload, merge=True)
+                            except Exception:
+                                pass
 
             for g in self._firestore.list_docs("golden_signals"):
+                if (
+                    env_mode == "gcp"
+                    and g.get("rps") == 0.1
+                    and g.get("p95_ms") == 25.0
+                    and g.get("error_ratio") == 0.0
+                ):
+                    continue
                 node = g.get("node_id") or g.get("service") or g.get("_id")
                 if node:
                     golden_by_node[node] = g

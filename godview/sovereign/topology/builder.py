@@ -339,7 +339,7 @@ class TopologyBuilder:
                 status = "amber"
             elif (rps is not None and rps > 0) or (p95 is not None and p95 > 0):
                 status = "green"
-            elif getattr(s, "status", "active") == "active":
+            elif rps is not None or p95 is not None or err is not None:
                 status = "green"
             else:
                 status = "unknown"

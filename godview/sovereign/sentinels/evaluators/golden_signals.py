@@ -125,7 +125,7 @@ class GoldenSignalsEvaluator(BaseSentinelEvaluator):
         error_rate = (error_count_5xx / total_requests) if total_requests > 0 else 0.0
 
         # Persist measured golden signals snapshot to Firestore for every evaluated service
-        if ctx.firestore is not None and hasattr(ctx.firestore, "set"):
+        if ctx.firestore is not None and hasattr(ctx.firestore, "set") and (total_requests > 0 or p95_ms > 0):
             from datetime import UTC, datetime
 
             now_iso = datetime.now(tz=UTC).isoformat()
@@ -133,7 +133,7 @@ class GoldenSignalsEvaluator(BaseSentinelEvaluator):
                 "node_id": service_name,
                 "service": service_name,
                 "rps": round(total_requests / max(window_s, 1), 4),
-                "p95_ms": round(max(p95_ms, 15.0 if total_requests == 0 and not samples else p95_ms), 2),
+                "p95_ms": round(p95_ms, 2),
                 "error_ratio": round(error_rate, 4),
                 "updated_at": now_iso,
             }

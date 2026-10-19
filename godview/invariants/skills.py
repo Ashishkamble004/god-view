@@ -84,8 +84,19 @@ def _fetch_gcs_access_token() -> str:
 class GcsSkillsStorageClient:
     """Live Google Cloud Storage JSON API client for syncing SKILL.md files without vendor SDK imports."""
 
-    def __init__(self, *, token_provider: Callable[[], str] | None = None) -> None:
-        self._token_provider = token_provider or _fetch_gcs_access_token
+    def __init__(
+        self,
+        *,
+        token_provider: Callable[[], str] | None = None,
+        bucket: str | None = None,
+        auth: Any | None = None,
+        **kwargs: Any,
+    ) -> None:
+        self.bucket = bucket
+        resolved_provider = token_provider
+        if resolved_provider is None and auth is not None and hasattr(auth, "access_token"):
+            resolved_provider = auth.access_token
+        self._token_provider = resolved_provider or _fetch_gcs_access_token
 
     def upload_text(self, gcs_uri: str, content: str) -> None:
         bucket, obj_name = _parse_gs_uri(gcs_uri)

@@ -144,9 +144,9 @@ class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundarySta
   render() {
     if (this.state.hasError) {
       return (
-        <div className="m-6 rounded-xl border border-red-300 bg-red-50 p-6 text-center text-red-900 shadow-sm">
-          <h3 className="text-base font-semibold">Slice render failed</h3>
-          <p className="mt-1 text-xs text-red-700 font-mono">
+        <div className="m-6 rounded-lg border border-outline-variant bg-incident-container p-6 text-center text-on-incident-container">
+          <h3 className="font-title text-base font-medium">Slice render failed</h3>
+          <p className="mt-1 font-mono text-xs text-on-incident-container">
             {this.state.error?.message || 'Unexpected component exception'}
           </p>
           <div className="mt-4">
@@ -596,25 +596,25 @@ export function App() {
   };
 
   return (
-    <div className="min-h-screen bg-white text-slate-700">
+    <div className="min-h-screen bg-surface-container-low text-on-surface">
       {/* Hairline Google four-colour top rule */}
       <div className="google-top-hairline w-full shrink-0" />
 
       {/* Global Top Bar */}
-      <header className="sticky top-0 z-30 shrink-0 border-b border-slate-200 bg-white/95 backdrop-blur-sm">
+      <header className="sticky top-0 z-30 shrink-0 border-b border-outline-variant bg-surface">
         <div className="mx-auto flex max-w-[1440px] flex-wrap items-center justify-between gap-3 px-6 py-3">
           {/* Brand & Environment Chip */}
           <div className="flex flex-wrap items-center gap-3">
-            <div className="flex items-center gap-2">
-              <div className="flex h-7 w-7 items-center justify-center rounded border border-slate-300 bg-slate-900 text-xs font-semibold text-white">
+            <div className="flex items-center gap-2.5">
+              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary font-title text-xs font-medium text-on-primary">
                 GV
               </div>
               <div>
                 <div className="flex items-center gap-2">
-                  <span className="text-sm font-semibold text-slate-900">
+                  <span className="font-title text-sm font-medium text-on-surface">
                     God-View Cockpit
                   </span>
-                  <span className="text-xs text-slate-500">
+                  <span className="text-xs text-on-surface-variant">
                     Sovereign SRE Organism v4.0
                   </span>
                 </div>
@@ -622,7 +622,7 @@ export function App() {
             </div>
 
             {dataset && dataset.perceive && (
-              <div className="flex flex-wrap items-center gap-2 border-l border-slate-200 pl-3 text-xs">
+              <div className="flex flex-wrap items-center gap-2 border-l border-outline-variant pl-3 text-xs">
                 <Badge variant="outline" className="font-mono">
                   {dataset.perceive.env_id}
                 </Badge>
@@ -638,14 +638,14 @@ export function App() {
 
           {/* Right: Live Sync Status, Quick Chaos Drawer Trigger & IAP User Chip */}
           <div className="flex flex-wrap items-center gap-2.5 text-xs">
-            <div className="flex items-center gap-1.5 rounded border border-slate-200 bg-slate-50 px-2.5 py-1 text-slate-600 num-tabular">
+            <div className="flex items-center gap-1.5 rounded-full border border-outline-variant bg-surface-container-low px-3 py-1 text-on-surface-variant num-tabular">
               <span
                 className={`h-2 w-2 rounded-full ${
                   streamStatus === 'connected'
-                    ? 'bg-green-600'
+                    ? 'bg-healthy'
                     : streamStatus === 'reconnecting'
-                    ? 'bg-amber-600'
-                    : 'bg-blue-600'
+                    ? 'bg-warning'
+                    : 'bg-primary'
                 }`}
               />
               <span>{renderConnectionLabel()}</span>
@@ -653,7 +653,7 @@ export function App() {
                 type="button"
                 aria-label="Refresh Sovereign Data"
                 onClick={() => void loadAll(false)}
-                className="ml-1 rounded p-0.5 text-slate-600 hover:bg-slate-200 hover:text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                className="ml-1 rounded-full p-1 text-on-surface-variant hover:bg-surface-container hover:text-on-surface focus:outline-none focus:ring-2 focus:ring-primary"
               >
                 <RefreshCw className="h-3 w-3" />
               </button>
@@ -664,27 +664,27 @@ export function App() {
                 ref={drawerTriggerRef}
                 type="button"
                 onClick={() => setDrawerOpen(true)}
-                className="inline-flex items-center gap-1.5 rounded border border-slate-300 bg-white px-2.5 py-1 text-xs font-semibold text-slate-800 hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:ring-offset-1"
+                className="inline-flex items-center gap-1.5 rounded-full border border-outline-variant bg-surface px-3 py-1 font-label text-xs font-medium text-on-surface hover:bg-surface-container-low focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-1"
               >
-                <Sliders className="h-3.5 w-3.5 text-blue-700" />
+                <Sliders className="h-3.5 w-3.5 text-primary" />
                 Chaos Drills Drawer
               </button>
             )}
 
             {dataset && (
               <div
-                className="inline-flex items-center gap-1.5 rounded border border-slate-200 bg-slate-50 px-2.5 py-1 font-mono text-xs text-slate-900"
+                className="inline-flex items-center gap-1.5 rounded-full border border-outline-variant bg-surface-container-low px-3 py-1 font-mono text-xs text-on-surface"
                 title={dataset.me?.principal || 'Not authenticated'}
               >
                 {dataset.me?.iap_authenticated ? (
                   <>
-                    <UserCheck className="h-3.5 w-3.5 text-green-700" />
+                    <UserCheck className="h-3.5 w-3.5 text-healthy" />
                     <span>{dataset.me.email}</span>
                   </>
                 ) : (
                   <>
-                    <UserX className="h-3.5 w-3.5 text-amber-600" />
-                    <span className="text-slate-500">IAP Unauthenticated</span>
+                    <UserX className="h-3.5 w-3.5 text-warning-text" />
+                    <span className="text-on-surface-variant">IAP Unauthenticated</span>
                   </>
                 )}
               </div>
@@ -695,7 +695,7 @@ export function App() {
         {/* Hash-Routed Navigation Bar */}
         <nav
           aria-label="Cockpit primary navigation"
-          className="mx-auto flex max-w-[1440px] items-center gap-1 overflow-x-auto border-t border-slate-100 px-6"
+          className="mx-auto flex max-w-[1440px] items-center gap-1 overflow-x-auto border-t border-outline-variant px-6"
         >
           {navItems.map((item) => {
             const active = route.tab === item.tab;
@@ -704,19 +704,19 @@ export function App() {
                 key={item.tab}
                 type="button"
                 onClick={() => navigateToHash(item.hash)}
-                className={`inline-flex items-center gap-1.5 border-b-2 px-3 py-2.5 text-xs whitespace-nowrap transition-colors focus:outline-none focus:ring-2 focus:ring-inset focus:ring-blue-600 ${
+                className={`inline-flex items-center gap-1.5 border-b-2 px-3 py-2.5 font-label text-xs whitespace-nowrap transition-colors focus:outline-none focus:ring-2 focus:ring-inset focus:ring-primary ${
                   active
-                    ? 'border-blue-600 text-blue-700 font-semibold'
-                    : 'border-transparent text-slate-600 hover:border-slate-300 hover:text-slate-900'
+                    ? 'border-primary text-primary font-medium'
+                    : 'border-transparent text-on-surface-variant hover:border-outline-variant hover:text-on-surface'
                 }`}
               >
                 <span>{item.label}</span>
                 {item.badge !== undefined && (
                   <span
-                    className={`rounded px-1.5 py-0.2 font-mono text-[11px] num-tabular ${
+                    className={`rounded-full px-2 py-0.5 font-mono text-[11px] num-tabular ${
                       active
-                        ? 'bg-blue-50 text-blue-800 font-semibold'
-                        : 'bg-slate-100 text-slate-700'
+                        ? 'bg-primary-container text-on-primary-container font-medium'
+                        : 'bg-surface-container text-on-surface-variant'
                     }`}
                   >
                     {item.badge}
@@ -735,13 +735,13 @@ export function App() {
           <div
             role="alert"
             data-testid="iap-session-expired-banner"
-            className="mb-4 flex flex-wrap items-center justify-between gap-4 rounded-md border border-amber-300 bg-amber-50 px-5 py-4 text-slate-900"
+            className="mb-4 flex flex-wrap items-center justify-between gap-4 rounded-lg border border-outline-variant bg-warning-container px-5 py-4 text-on-warning-container"
           >
             <div>
-              <h2 className="text-sm font-semibold text-amber-900">
+              <h2 className="font-title text-sm font-medium text-on-warning-container">
                 Session expired — Reload to sign in
               </h2>
-              <p className="mt-1 text-xs text-amber-800">
+              <p className="mt-1 text-xs text-on-warning-container">
                 Your Identity-Aware Proxy (IAP) session cookie has expired or redirected to Google login. Reload the Cockpit to re-authenticate with IAP.
               </p>
             </div>
@@ -760,13 +760,13 @@ export function App() {
           <div
             role="alert"
             data-testid="partial-slice-error-banner"
-            className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-amber-300 bg-amber-50 px-4 py-3 text-xs text-amber-900"
+            className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-outline-variant bg-warning-container px-4 py-3 text-xs text-on-warning-container"
           >
             <div>
-              <span className="font-semibold">
+              <span className="font-medium">
                 Stale data · Retrying failed slice ({sliceErrorKeys.join(', ')})
               </span>
-              <p className="mt-0.5 font-mono text-amber-800">
+              <p className="mt-0.5 font-mono text-on-warning-container">
                 {sliceErrors[sliceErrorKeys[0]]?.code}:{' '}
                 {sliceErrors[sliceErrorKeys[0]]?.message}
               </p>
@@ -784,13 +784,13 @@ export function App() {
         {actionError && (
           <div
             role="alert"
-            className="mb-4 flex items-center justify-between rounded border border-red-300 bg-red-50 px-4 py-2.5 text-xs text-red-900"
+            className="mb-4 flex items-center justify-between rounded-lg border border-outline-variant bg-incident-container px-4 py-2.5 text-xs text-on-incident-container"
           >
             <span>Action Error: {actionError}</span>
             <button
               type="button"
               onClick={() => setActionError(null)}
-              className="rounded font-semibold underline focus:outline-none focus:ring-2 focus:ring-red-600"
+              className="rounded-full px-2 py-0.5 font-medium underline focus:outline-none focus:ring-2 focus:ring-incident"
             >
               Dismiss
             </button>
@@ -802,15 +802,15 @@ export function App() {
         {error && !dataset && !iapExpired && (
           <div
             role="alert"
-            className="rounded-md border border-red-300 bg-red-50 p-6 text-slate-900"
+            className="rounded-lg border border-outline-variant bg-incident-container p-6 text-on-incident-container"
           >
             <div className="flex flex-wrap items-start justify-between gap-4">
               <div>
-                <h2 className="text-sm font-semibold text-red-900">
+                <h2 className="font-title text-sm font-medium text-on-incident-container">
                   Sovereign Control API Error
                 </h2>
-                <p className="mt-1 font-mono text-xs text-red-800">{error}</p>
-                <p className="mt-2 text-xs text-slate-700">
+                <p className="mt-1 font-mono text-xs text-on-incident-container">{error}</p>
+                <p className="mt-2 text-xs text-on-surface">
                   The Cockpit never falls back to synthetic or fake data on production API errors. Verify IAP session and Sovereign Cloud Run service status.
                 </p>
               </div>
@@ -1218,7 +1218,7 @@ export function App() {
       {/* Slide-out Chaos Drills Drawer (available from any tab) */}
       {drawerOpen && dataset && (
         <div
-          className="fixed inset-0 z-50 flex justify-end bg-slate-900/30"
+          className="fixed inset-0 z-50 flex justify-end bg-scrim/30"
           role="dialog"
           aria-modal="true"
           aria-label="Chaos Drills Drawer"
@@ -1229,14 +1229,14 @@ export function App() {
             }
           }}
         >
-          <div className="h-full w-full max-w-lg overflow-y-auto border-l border-slate-200 bg-white p-5 shadow-sm">
+          <div className="h-full w-full max-w-lg overflow-y-auto rounded-l-xl border-l border-outline-variant bg-surface p-5 shadow-elev-3">
             <ErrorBoundary key="chaos-drills-drawer">
-              <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+              <div className="flex items-center justify-between border-b border-outline-variant pb-3">
                 <div>
-                  <h2 className="text-sm font-semibold text-slate-900">
+                  <h2 className="font-title text-sm font-medium text-on-surface">
                     Opt-In Chaos Drills Drawer ({dataset.perceive?.managed_scope_label ?? 'Estate scope'})
                   </h2>
-                  <p className="text-xs text-slate-500">
+                  <p className="text-xs text-on-surface-variant">
                     Trigger or halt proving-ground faults while watching live sentinels
                   </p>
                 </div>
@@ -1245,7 +1245,7 @@ export function App() {
                   type="button"
                   aria-label="Close Chaos Drills Drawer"
                   onClick={closeDrawer}
-                  className="rounded p-1 text-slate-600 hover:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                  className="rounded-full p-1.5 text-on-surface-variant hover:bg-surface-container-low focus:outline-none focus:ring-2 focus:ring-primary"
                 >
                   <X className="h-4 w-4" />
                 </button>
@@ -1256,12 +1256,12 @@ export function App() {
                   dataset.drills.map((drill) => (
                     <div
                       key={drill.drill_id}
-                      className="rounded border border-slate-200 bg-slate-50 p-3 text-xs"
+                      className="rounded-md border border-outline-variant bg-surface-container-low p-3 text-xs"
                     >
                       <div className="flex items-start justify-between gap-2">
                         <div>
                           <div className="flex items-center gap-1.5">
-                            <span className="font-semibold text-slate-900">
+                            <span className="font-title font-medium text-on-surface">
                               {drill.title}
                             </span>
                             <Badge
@@ -1274,7 +1274,7 @@ export function App() {
                               {formatEnumLabel(drill.fault_class)}
                             </Badge>
                           </div>
-                          <p className="mt-0.5 font-mono text-slate-600">
+                          <p className="mt-0.5 font-mono text-on-surface-variant">
                             target: {drill.target_service} · {drill.mttd_target}
                           </p>
                         </div>

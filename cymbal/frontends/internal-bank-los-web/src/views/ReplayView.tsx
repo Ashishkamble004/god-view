@@ -30,7 +30,7 @@ export const ReplayView: React.FC<ReplayViewProps> = ({ replayQueueLoans }) => {
               <code>FAILED</code> state caused by downstream CBS VM timeouts (
               <code>504 Gateway Timeout</code>). Mutating idempotent replay
               execution (
-              <code>POST /admin/v1/disbursements/&#123;loan_id&#125;:replay</code>
+              <code>POST /admin/v1/disbursements/{'{loan_id}'}:replay</code>
               ) is strictly governed by the God-View Sovereign Control Plane via
               the <code>biz.replay_disbursement</code> capability.
             </p>

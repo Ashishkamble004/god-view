@@ -54,7 +54,8 @@ describe('God-View Autonomous Estate Topology & Service Mesh Cockpit', () => {
 
     await screen.findByText(/Autonomous Estate Topology & Service Mesh/i);
 
-    const firstNode = dataset.topology!.nodes[0];
+    const firstNode =
+      dataset.topology?.nodes[0] ?? dataset.perceive.discovered_services[0];
     const nodeButtons = await screen.findAllByText(firstNode.name);
     await user.click(nodeButtons[0]);
 
@@ -77,7 +78,8 @@ describe('God-View Autonomous Estate Topology & Service Mesh Cockpit', () => {
     const searchInput = screen.getByPlaceholderText(
       /Search 115\+ services, kinds, domains.../i
     );
-    const targetNode = dataset.topology!.nodes[0];
+    const targetNode =
+      dataset.topology?.nodes[0] ?? dataset.perceive.discovered_services[0];
     await user.type(searchInput, targetNode.name.slice(0, 6));
 
     await waitFor(() => {
