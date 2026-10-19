@@ -266,19 +266,22 @@ def build_router(ctx: Any) -> APIRouter:
         bus = getattr(ctx, "bus", None)
         if bus is not None and hasattr(bus, "publish"):
             now_str = datetime.now(tz=UTC).isoformat()
-            pub_res = bus.publish(
-                "godview.court.warm",
-                {
-                    "id": f"evt-{agent_id}-{int(datetime.now(tz=UTC).timestamp())}",
-                    "type": "godview.court.warm",
-                    "source": "//sovereign/control-api",
-                    "subject": agent_id,
-                    "time": now_str,
-                    "data": {"agent_id": agent_id, "manual_wake": True},
-                },
-            )
-            if asyncio.iscoroutine(pub_res):
-                await pub_res
+            try:
+                pub_res = bus.publish(
+                    "godview.court.warm",
+                    {
+                        "id": f"evt-{agent_id}-{int(datetime.now(tz=UTC).timestamp())}",
+                        "type": "godview.court.warm",
+                        "source": "//sovereign/control-api",
+                        "subject": agent_id,
+                        "time": now_str,
+                        "data": {"agent_id": agent_id, "manual_wake": True},
+                    },
+                )
+                if asyncio.iscoroutine(pub_res):
+                    await pub_res
+            except Exception as bus_err:
+                logger.debug("Failed to publish godview.court.warm event: %s", bus_err)
         return _enrich_court_agent(updated, ctx)
 
     @router.post("/court/{agent_id}:warm", dependencies=[Depends(auth_dependency)])
