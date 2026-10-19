@@ -251,6 +251,27 @@ class SpecialistTools:
             headers["Authorization"] = f"Bearer {token}"
         return headers
 
+    def get_available_capability_ids(self) -> list[str]:
+        """Return registered or well-known read-only capability IDs."""
+        caps: set[str] = {
+            "monitoring.query_timeseries",
+            "obs.list_timeseries",
+            "http.probe",
+            "trace.get_trace",
+            "logging.read_entries",
+            "tf.drift_diff",
+            "cloud_armor.get_policy",
+        }
+        if self.ctx is not None:
+            if hasattr(self.ctx, "executors") and self.ctx.executors:
+                caps.update(self.ctx.executors.keys())
+            disp = getattr(self.ctx, "capability_dispatcher", None) or getattr(
+                self.ctx, "remediation_dispatcher", None
+            )
+            if disp is not None and hasattr(disp, "registry") and disp.registry:
+                caps.update(disp.registry.keys())
+        return sorted(list(caps))
+
     def invoke_capability(
         self, capability_id: str, args: dict[str, Any] | None = None
     ) -> dict[str, Any]:
@@ -268,36 +289,57 @@ class SpecialistTools:
                 ),
             }
 
-        # 1. Dispatch via Sovereign capability registry executors
-        if self.ctx is not None and hasattr(self.ctx, "executors") and self.ctx.executors is not None:
-            executor = self.ctx.executors.get(capability_id)
-            if executor is not None:
-                res = executor(**arg_dict)
-                return res if isinstance(res, dict) else {"status": "ok", "result": res}
+        avail_caps = self.get_available_capability_ids()
 
-        if self.ctx is not None and hasattr(self.ctx, "remediation_dispatcher") and self.ctx.remediation_dispatcher is not None:
-            dispatcher = self.ctx.remediation_dispatcher
-            if hasattr(dispatcher, "invoke_read"):
-                return dispatcher.invoke_read(capability_id, arg_dict)
+        try:
+            # 1. Dispatch via Sovereign capability registry executors
+            if self.ctx is not None and hasattr(self.ctx, "executors") and self.ctx.executors is not None:
+                executor = self.ctx.executors.get(capability_id)
+                if executor is not None:
+                    res = executor(**arg_dict)
+                    return res if isinstance(res, dict) else {"status": "ok", "result": res}
 
-        # 2. Remote Sovereign dispatch over HTTP with ID token
-        if self.sovereign_url:
-            try:
-                import httpx
+            if self.ctx is not None and hasattr(self.ctx, "remediation_dispatcher") and self.ctx.remediation_dispatcher is not None:
+                dispatcher = self.ctx.remediation_dispatcher
+                if hasattr(dispatcher, "invoke_read"):
+                    res = dispatcher.invoke_read(capability_id, arg_dict)
+                    return res if isinstance(res, dict) else {"status": "ok", "result": res}
 
-                url = f"{self.sovereign_url}/api/v1/capabilities/{capability_id}:invoke"
-                headers = self._get_auth_headers()
-                with httpx.Client(timeout=15.0) as client:
-                    resp = client.post(url, json={"args": arg_dict}, headers=headers)
-                    if resp.status_code == 200:
-                        return resp.json()
-            except Exception as exc:
-                logger.warning("Remote invoke_capability failed for %s: %s", capability_id, exc)
+            # 2. Remote Sovereign dispatch over HTTP with ID token
+            if self.sovereign_url:
+                try:
+                    import httpx
 
-        # Zero Echo: Never return fabricated status string when unhandled. Fail closed with NoExecutorError.
-        from godview.sovereign.remediation.types import NoExecutorError
+                    url = f"{self.sovereign_url}/api/v1/capabilities/{capability_id}:invoke"
+                    headers = self._get_auth_headers()
+                    with httpx.Client(timeout=15.0) as client:
+                        resp = client.post(url, json={"args": arg_dict}, headers=headers)
+                        if resp.status_code == 200:
+                            return resp.json()
+                        return {
+                            "status": "error",
+                            "error": f"HTTP {resp.status_code}: {resp.text[:200]}",
+                            "available_capabilities": avail_caps,
+                        }
+                except Exception as exc:
+                    logger.warning("Remote invoke_capability failed for %s: %s", capability_id, exc)
+                    return {
+                        "status": "error",
+                        "error": str(exc),
+                        "available_capabilities": avail_caps,
+                    }
+        except Exception as exc:
+            return {
+                "status": "error",
+                "error": str(exc),
+                "available_capabilities": avail_caps,
+            }
 
-        raise NoExecutorError(capability_id)
+        return {
+            "status": "error",
+            "error": f"No executor registered for capability '{capability_id}'",
+            "available_capabilities": avail_caps,
+        }
 
     async def invoke_capability_async(
         self, capability_id: str, args: dict[str, Any] | None = None
@@ -316,38 +358,59 @@ class SpecialistTools:
                 ),
             }
 
-        if self.ctx is not None and hasattr(self.ctx, "executors") and self.ctx.executors is not None:
-            executor = self.ctx.executors.get(capability_id)
-            if executor is not None:
-                res = executor(**arg_dict)
-                if inspect.isawaitable(res):
-                    res = await res
-                return res if isinstance(res, dict) else {"status": "ok", "result": res}
+        avail_caps = self.get_available_capability_ids()
 
-        if self.ctx is not None and hasattr(self.ctx, "remediation_dispatcher") and self.ctx.remediation_dispatcher is not None:
-            dispatcher = self.ctx.remediation_dispatcher
-            if hasattr(dispatcher, "invoke_read"):
-                res = dispatcher.invoke_read(capability_id, arg_dict)
-                if inspect.isawaitable(res):
-                    res = await res
-                return res
+        try:
+            if self.ctx is not None and hasattr(self.ctx, "executors") and self.ctx.executors is not None:
+                executor = self.ctx.executors.get(capability_id)
+                if executor is not None:
+                    res = executor(**arg_dict)
+                    if inspect.isawaitable(res):
+                        res = await res
+                    return res if isinstance(res, dict) else {"status": "ok", "result": res}
 
-        if self.sovereign_url:
-            try:
-                import httpx
+            if self.ctx is not None and hasattr(self.ctx, "remediation_dispatcher") and self.ctx.remediation_dispatcher is not None:
+                dispatcher = self.ctx.remediation_dispatcher
+                if hasattr(dispatcher, "invoke_read"):
+                    res = dispatcher.invoke_read(capability_id, arg_dict)
+                    if inspect.isawaitable(res):
+                        res = await res
+                    return res if isinstance(res, dict) else {"status": "ok", "result": res}
 
-                url = f"{self.sovereign_url}/api/v1/capabilities/{capability_id}:invoke"
-                headers = self._get_auth_headers()
-                async with httpx.AsyncClient(timeout=15.0) as client:
-                    resp = await client.post(url, json={"args": arg_dict}, headers=headers)
-                    if resp.status_code == 200:
-                        return resp.json()
-            except Exception as exc:
-                logger.warning("Remote async invoke_capability failed for %s: %s", capability_id, exc)
+            if self.sovereign_url:
+                try:
+                    import httpx
 
-        from godview.sovereign.remediation.types import NoExecutorError
+                    url = f"{self.sovereign_url}/api/v1/capabilities/{capability_id}:invoke"
+                    headers = self._get_auth_headers()
+                    async with httpx.AsyncClient(timeout=15.0) as client:
+                        resp = await client.post(url, json={"args": arg_dict}, headers=headers)
+                        if resp.status_code == 200:
+                            return resp.json()
+                        return {
+                            "status": "error",
+                            "error": f"HTTP {resp.status_code}: {resp.text[:200]}",
+                            "available_capabilities": avail_caps,
+                        }
+                except Exception as exc:
+                    logger.warning("Remote async invoke_capability failed for %s: %s", capability_id, exc)
+                    return {
+                        "status": "error",
+                        "error": str(exc),
+                        "available_capabilities": avail_caps,
+                    }
+        except Exception as exc:
+            return {
+                "status": "error",
+                "error": str(exc),
+                "available_capabilities": avail_caps,
+            }
 
-        raise NoExecutorError(capability_id)
+        return {
+            "status": "error",
+            "error": f"No executor registered for capability '{capability_id}'",
+            "available_capabilities": avail_caps,
+        }
 
     def get_business_context(self, service_id: str | None = None) -> dict[str, Any]:
         """Fetch discovered BusinessContext for a service."""
@@ -498,8 +561,18 @@ class SpecialistTools:
         async def invoke_capability(
             capability_id: str, args: dict[str, Any] | None = None
         ) -> dict[str, Any]:
-            """Invoke a capability. Read capabilities execute freely; mutating capabilities require approval."""
-            return await self.invoke_capability_async(capability_id, args)
+            """Invoke a registered capability. Read capabilities execute freely; mutating capabilities require approval.
+            Available registered read capability IDs: monitoring.query_timeseries, http.probe, trace.get_trace, logging.read_entries, tf.drift_diff, cloud_armor.get_policy.
+            Do NOT invent unregistered capability names like logging.query_logs.
+            """
+            try:
+                return await self.invoke_capability_async(capability_id, args)
+            except Exception as exc:
+                return {
+                    "status": "error",
+                    "error": str(exc),
+                    "available_capabilities": self.get_available_capability_ids(),
+                }
 
         async def get_business_context(service_id: str | None = None) -> dict[str, Any]:
             """Fetch discovered BusinessContext for a service."""
@@ -608,6 +681,7 @@ class SpecialistAgent:
         user_content = (
             f"Instruction:\n{self.instruction}\n\n"
             f"Analyze the following evidence pack for incident {incident_id} on {self.subject_ref}.\n"
+            "Registered read capability IDs for invoke_capability tool: monitoring.query_timeseries, http.probe, trace.get_trace, logging.read_entries, tf.drift_diff. Do NOT call nonexistent tools like logging.query_logs.\n"
             f"Evidence: {json.dumps(prompt_data, default=str)}\n"
         )
         if challenges:

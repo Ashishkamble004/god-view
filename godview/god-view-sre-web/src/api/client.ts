@@ -546,6 +546,8 @@ export function subscribeCockpitStream(options: SseSubscriptionOptions): () => v
   let disposed = false;
 
   const handleNamedEvent = (evt: MessageEvent) => {
+    retryAttempt = 0;
+    options.onStatusChange?.('connected');
     try {
       const parsed = JSON.parse(evt.data) as { type?: string; data?: unknown };
       options.onEvent(evt.type || parsed.type || 'message', parsed.data ?? parsed);

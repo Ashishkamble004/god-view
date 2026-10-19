@@ -44,6 +44,24 @@ from godview.sovereign.sentinels.models import SentinelEvaluation
 logger = logging.getLogger(__name__)
 
 
+def _has_real_diagnosis(diagnoses: Sequence[Any] | None) -> bool:
+    """Return True only if at least one diagnosis has confidence > 0.0 and is not pending consensus."""
+    if not diagnoses:
+        return False
+    for d in diagnoses:
+        conf = getattr(d, "confidence", None)
+        if conf is None and isinstance(d, dict):
+            conf = d.get("confidence")
+        conf_val = float(conf or 0.0)
+        hyp = getattr(d, "hypothesis", None)
+        if hyp is None and isinstance(d, dict):
+            hyp = d.get("hypothesis")
+        hyp_str = str(hyp or "").lower()
+        if conf_val > 0.0 and "pending swarm consensus" not in hyp_str:
+            return True
+    return False
+
+
 class IncidentManager:
     """Manages the full lifecycle of episodic incidents."""
 
@@ -395,11 +413,11 @@ class IncidentManager:
         payload = incident.model_dump(mode="json", by_alias=True)
         if hasattr(self._firestore, "set"):
             try:
-                self._firestore.set("incidents", incident.doc_id, payload)
+                self._firestore.set("incidents", incident.doc_id, payload, merge=True)
             except ValueError:
                 pass
             try:
-                self._firestore.set("episodic_incidents", incident.doc_id, payload)
+                self._firestore.set("episodic_incidents", incident.doc_id, payload, merge=True)
             except ValueError:
                 pass
 
@@ -521,10 +539,10 @@ class IncidentManager:
                 )[:10]
 
             # Sync diagnoses from Firestore if populated by async court callback
-            if not incident.diagnoses and self._firestore is not None and incident.doc_id:
+            if not _has_real_diagnosis(incident.diagnoses) and self._firestore is not None and incident.doc_id:
                 try:
                     stored_inc = self._firestore.get("incidents", incident.doc_id)
-                    if stored_inc and stored_inc.get("diagnoses"):
+                    if stored_inc and stored_inc.get("diagnoses") and _has_real_diagnosis(stored_inc["diagnoses"]):
                         from godview_shared.contracts import Diagnosis
 
                         incident.diagnoses = [
@@ -535,7 +553,7 @@ class IncidentManager:
                     pass
 
             self._persist_incident(incident)
-            if not incident.diagnoses and incident.evidence_pack is not None:
+            if not _has_real_diagnosis(incident.diagnoses) and incident.evidence_pack is not None:
                 await self._notify_court(incident, incident.evidence_pack)
             await self._emit_incident_event("incident.updated", incident)
             return incident, False

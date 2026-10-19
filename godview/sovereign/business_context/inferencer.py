@@ -117,15 +117,45 @@ def extract_bundle_valid_refs(evidence_bundle: dict[str, Any]) -> set[str]:
                 if v:
                     valid_refs.add(f"label:{k_str}={v}")
 
+    # Attributes & config summary
+    attrs = evidence_bundle.get("attributes", {})
+    if isinstance(attrs, dict):
+        for k, v in attrs.items():
+            k_str = str(k).strip()
+            if k_str:
+                valid_refs.add(f"attr:{k_str}")
+                valid_refs.add(f"attribute:{k_str}")
+                valid_refs.add(k_str)
+                if v is not None and not isinstance(v, (dict, list)):
+                    valid_refs.add(f"attr:{k_str}={v}")
+                    valid_refs.add(f"{k_str}={v}")
+
+    config = evidence_bundle.get("config_summary", {})
+    if isinstance(config, dict):
+        for k, v in config.items():
+            k_str = str(k).strip()
+            if k_str:
+                valid_refs.add(f"config:{k_str}")
+                valid_refs.add(f"attr:{k_str}")
+                valid_refs.add(k_str)
+                if v is not None and not isinstance(v, (dict, list)):
+                    valid_refs.add(f"config:{k_str}={v}")
+
     # 3. Upstreams / Downstreams
-    for up in evidence_bundle.get("upstreams", []):
+    all_upstreams = list(evidence_bundle.get("upstreams", [])) + list(
+        evidence_bundle.get("upstream_services", [])
+    )
+    for up in all_upstreams:
         up_str = str(up).strip()
         if up_str:
             valid_refs.add(f"trace:{up_str}")
             valid_refs.add(f"edge:{up_str}")
             valid_refs.add(f"upstream:{up_str}")
             valid_refs.add(up_str)
-    for down in evidence_bundle.get("downstreams", []):
+    all_downstreams = list(evidence_bundle.get("downstreams", [])) + list(
+        evidence_bundle.get("downstream_services", [])
+    )
+    for down in all_downstreams:
         down_str = str(down).strip()
         if down_str:
             valid_refs.add(f"trace:{down_str}")
@@ -162,6 +192,21 @@ def extract_bundle_valid_refs(evidence_bundle: dict[str, Any]) -> set[str]:
         valid_refs.add("doc_excerpt")
         if svc_name:
             valid_refs.add(f"doc:{svc_name}")
+
+    # 7. IAM summary
+    iam = evidence_bundle.get("iam_summary")
+    if iam:
+        valid_refs.add("iam")
+        valid_refs.add("iam_summary")
+        if isinstance(iam, (list, tuple, set)):
+            for item in iam:
+                item_str = str(item).strip()
+                if item_str:
+                    valid_refs.add(f"iam:{item_str}")
+                    valid_refs.add(item_str)
+        elif isinstance(iam, str):
+            valid_refs.add(f"iam:{iam}")
+            valid_refs.add(iam)
 
     return valid_refs
 
@@ -222,6 +267,20 @@ def is_business_context_stale(bc: BusinessContext | None) -> bool:
         for e in evidence
     ):
         return True
+    role_summary = str(getattr(bc, "role_summary", "") or "").lower()
+    if "cannot be verified" in role_summary:
+        return True
+    risk_notes = getattr(bc, "risk_notes", []) or []
+    for rk in risk_notes:
+        rk_str = str(
+            getattr(rk, "description", None)
+            or getattr(rk, "note", None)
+            or (rk.get("description") if isinstance(rk, dict) else None)
+            or (rk.get("note") if isinstance(rk, dict) else None)
+            or rk
+        ).lower()
+        if "cannot be verified" in rk_str:
+            return True
     return False
 
 
@@ -271,14 +330,38 @@ class BusinessContextInferencer:
             elif k in ("databases", "users"):
                 env_names.append(f"{k}:{v}")
 
-        # 3. Call graph neighbours from edges
+        # 3. Call graph neighbours from edges (matching node ID, short name, or backend target)
         upstreams: list[str] = []
         downstreams: list[str] = []
+        upstream_services: list[str] = []
+        downstream_services: list[str] = []
+        svc_name = service.name
         for e in edges:
-            if e.dst == node_id or e.dst.endswith(f".{service.name}"):
+            is_dst = (
+                e.dst == node_id
+                or e.dst == svc_name
+                or e.dst.endswith(f".{svc_name}")
+                or e.dst.endswith(f"__{svc_name}")
+                or f".{svc_name}" in e.dst
+            )
+            if is_dst:
                 upstreams.append(e.src)
-            if e.src == node_id or e.src.endswith(f".{service.name}"):
+                src_short = e.src.split(".")[-1].split("__")[-1]
+                upstream_services.append(src_short)
+                upstream_services.append(e.src)
+
+            is_src = (
+                e.src == node_id
+                or e.src == svc_name
+                or e.src.endswith(f".{svc_name}")
+                or e.src.endswith(f"__{svc_name}")
+                or f".{svc_name}" in e.src
+            )
+            if is_src:
                 downstreams.append(e.dst)
+                dst_short = e.dst.split(".")[-1].split("__")[-1]
+                downstream_services.append(dst_short)
+                downstream_services.append(e.dst)
 
         # 4. Filter logs for this service
         service_logs: list[str] = []
@@ -290,15 +373,40 @@ class BusinessContextInferencer:
                     if sample:
                         service_logs.append(str(sample)[:200])
 
+        # 5. Attributes, IAM, Config summary
+        attrs = getattr(service, "attributes", {}) or {}
+        labels = {k: v for k, v in service.labels.items() if not k.startswith("env_var_")}
+        iam_summary = []
+        if "service_account" in service.labels:
+            iam_summary.append(f"service_account:{service.labels['service_account']}")
+        if "iam_role" in service.labels:
+            iam_summary.append(f"role:{service.labels['iam_role']}")
+
+        config_summary = {
+            "kind": service.kind,
+            "locator": service.locator,
+            "adapter_family": service.adapter_family,
+        }
+        for k in ("region", "zone", "port", "ingress", "min_instances", "max_instances"):
+            if k in service.labels:
+                config_summary[k] = service.labels[k]
+            elif isinstance(attrs, dict) and k in attrs:
+                config_summary[k] = attrs[k]
+
         return {
             "service_name": service.name,
             "kind": service.kind,
             "locator": service.locator,
-            "labels": {k: v for k, v in service.labels.items() if not k.startswith("env_var_")},
+            "labels": labels,
+            "attributes": attrs,
             "env_var_names": sorted(set(env_names)),
             "routes": routes_summary,
             "upstreams": sorted(set(upstreams)),
             "downstreams": sorted(set(downstreams)),
+            "upstream_services": sorted(set(upstream_services)),
+            "downstream_services": sorted(set(downstream_services)),
+            "iam_summary": sorted(set(iam_summary)),
+            "config_summary": config_summary,
             "logs_sample": service_logs[:10],
             "doc_excerpt": docs[:500] if docs else None,
         }
@@ -545,17 +653,6 @@ class BusinessContextInferencer:
                 res_bc.confidence = min(res_bc.confidence, 0.3)
                 _attach_metadata(res_bc, "inference_status", "uncited")
             else:
-                if (
-                    len(res_bc.evidence) >= 3
-                    and (
-                        routes
-                        or evidence_bundle.get("env_var_names")
-                        or upstreams
-                        or downstreams
-                    )
-                    and res_bc.confidence < 0.65
-                ):
-                    res_bc.confidence = round(min(0.85, 0.55 + 0.04 * len(res_bc.evidence)), 2)
                 _attach_metadata(res_bc, "inference_status", "inferred")
 
             # Same check for KPIs/invariants/journeys: their evidence must also resolve to bundle items, or the item is dropped

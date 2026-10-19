@@ -357,9 +357,10 @@ export function App() {
   useEffect(() => {
     const unsubscribe = subscribeCockpitStream({
       onEvent: (eventType: string) => {
-        if (eventType === 'sovereign.heartbeat') {
-          // Heartbeat pulse: resets freshness counter without firing 12 requests
+        if (eventType === 'sovereign.heartbeat' || eventType === 'heartbeat') {
+          // Heartbeat pulse: resets freshness counter and ensures connected status
           setSecondsSinceUpdate(0);
+          setStreamStatus('connected');
           return;
         }
 

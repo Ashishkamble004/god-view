@@ -751,7 +751,11 @@ export const OrganismTab: React.FC<OrganismTabProps> = ({
                     </Badge>
                   </div>
                 </div>
-                <p className="mt-1 text-slate-600">{sense.evidence}</p>
+                <p className="mt-1 text-slate-600">
+                  {typeof sense.evidence === 'object' && sense.evidence !== null
+                    ? JSON.stringify(sense.evidence)
+                    : String(sense.evidence ?? '')}
+                </p>
               </div>
             ))}
           </div>

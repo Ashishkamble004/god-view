@@ -23,6 +23,9 @@ export interface IncidentsTabProps {
   onSelectAgent: (agentId: string) => void;
 }
 
+const getIncidentId = (inc: any): string =>
+  inc?.incident_id || inc?.id || inc?.doc_id || 'unknown';
+
 export const IncidentsTab: React.FC<IncidentsTabProps> = ({
   incidents,
   selectedIncidentId,
@@ -44,7 +47,7 @@ export const IncidentsTab: React.FC<IncidentsTabProps> = ({
   }
 
   const activeIncident =
-    incidents.find((i) => i.incident_id === selectedIncidentId) ??
+    incidents.find((i) => getIncidentId(i) === selectedIncidentId) ??
     incidents[0] ??
     null;
 
@@ -99,25 +102,28 @@ export const IncidentsTab: React.FC<IncidentsTabProps> = ({
             </button>
             <span className="text-slate-500">/</span>
             <span className="font-mono font-semibold text-slate-900">
-              {activeIncident.incident_id}
+              {getIncidentId(activeIncident)}
             </span>
           </div>
 
           <div className="flex flex-wrap items-center gap-1.5">
-            {incidents.map((inc) => (
-              <button
-                key={inc.incident_id}
-                type="button"
-                onClick={() => onSelectIncident(inc.incident_id)}
-                className={`rounded border px-2.5 py-1 font-mono text-xs transition-colors focus:outline-none focus:ring-2 focus:ring-blue-600 ${
-                  inc.incident_id === activeIncident.incident_id
-                    ? 'border-blue-600 bg-blue-50 font-semibold text-blue-800'
-                    : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
-                }`}
-              >
-                {inc.incident_id}
-              </button>
-            ))}
+            {incidents.map((inc) => {
+              const incId = getIncidentId(inc);
+              return (
+                <button
+                  key={incId}
+                  type="button"
+                  onClick={() => onSelectIncident(incId)}
+                  className={`rounded border px-2.5 py-1 font-mono text-xs transition-colors focus:outline-none focus:ring-2 focus:ring-blue-600 ${
+                    incId === getIncidentId(activeIncident)
+                      ? 'border-blue-600 bg-blue-50 font-semibold text-blue-800'
+                      : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+                  }`}
+                >
+                  {incId}
+                </button>
+              );
+            })}
           </div>
         </div>
       ) : (
@@ -207,18 +213,25 @@ export const IncidentsTab: React.FC<IncidentsTabProps> = ({
                 </thead>
                 <tbody className="divide-y divide-slate-200 num-tabular">
                   {incidents.map((inc) => {
-                    const selected =
-                      inc.incident_id === activeIncident.incident_id;
+                    const incId = getIncidentId(inc);
+                    const selected = incId === getIncidentId(activeIncident);
+                    const convergenceStr =
+                      inc.convergence &&
+                      typeof inc.convergence === 'object' &&
+                      'consensus' in inc.convergence &&
+                      inc.convergence.consensus !== null
+                        ? `${((Number(inc.convergence.consensus) || 0) * 100).toFixed(0)}% · ${inc.convergence.rounds ?? 1}r · ${inc.convergence.seconds ?? 0}s`
+                        : '—';
                     return (
                       <tr
-                        key={inc.incident_id}
-                        onClick={() => onSelectIncident(inc.incident_id)}
+                        key={incId}
+                        onClick={() => onSelectIncident(incId)}
                         className={`cursor-pointer transition-colors ${
                           selected ? 'bg-blue-50/70' : 'hover:bg-slate-50'
                         }`}
                       >
                         <td className="whitespace-nowrap px-3 py-2.5 font-mono font-semibold text-blue-700">
-                          {inc.incident_id}
+                          {incId}
                         </td>
                         <td className="whitespace-nowrap px-3 py-2.5">
                           <SeverityBadge severity={inc.severity} />
@@ -233,8 +246,7 @@ export const IncidentsTab: React.FC<IncidentsTabProps> = ({
                           {formatCurrency(inc.value_impact || 0)}
                         </td>
                         <td className="whitespace-nowrap px-3 py-2.5 font-mono text-slate-700">
-                          {((inc.convergence?.consensus ?? 0) * 100).toFixed(0)}% ·{' '}
-                          {inc.convergence?.rounds ?? 0}r · {inc.convergence?.seconds ?? 0}s
+                          {convergenceStr}
                         </td>
                         <td className="whitespace-nowrap px-3 py-2.5">
                           <Badge
@@ -256,7 +268,7 @@ export const IncidentsTab: React.FC<IncidentsTabProps> = ({
                             size="sm"
                             onClick={(e) => {
                               e.stopPropagation();
-                              onSelectIncident(inc.incident_id);
+                              onSelectIncident(incId);
                             }}
                           >
                             Open drill-down
@@ -279,7 +291,7 @@ export const IncidentsTab: React.FC<IncidentsTabProps> = ({
           <div className="space-y-1.5">
             <div className="flex flex-wrap items-center gap-2">
               <span className="font-mono text-lg font-semibold text-slate-900">
-                {activeIncident.incident_id}
+                {getIncidentId(activeIncident)}
               </span>
               <SeverityBadge severity={activeIncident.severity} />
               <Badge
@@ -370,7 +382,7 @@ export const IncidentsTab: React.FC<IncidentsTabProps> = ({
               subtitle={`Schema v${evp?.schema_version ?? '5.0'} · Dispatched at ${formatShortTime(evp?.fired_at ?? activeIncident.opened_at)}`}
               right={
                 <Badge variant="outline" className="font-mono">
-                  {evp?.evidence_pack_id ?? (evp as any)?.pack_id ?? activeIncident.incident_id}
+                  {evp?.evidence_pack_id ?? (evp as any)?.pack_id ?? getIncidentId(activeIncident)}
                 </Badge>
               }
             />

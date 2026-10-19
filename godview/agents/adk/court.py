@@ -538,22 +538,36 @@ def register_in_process_court(ctx: Any) -> CourtOrchestrator:
         )
 
         diag_dict = diagnosis.model_dump(mode="json")
+
+        def _is_placeholder(d: Any) -> bool:
+            conf = getattr(d, "confidence", None)
+            if conf is None and isinstance(d, dict):
+                conf = d.get("confidence")
+            hyp = getattr(d, "hypothesis", None)
+            if hyp is None and isinstance(d, dict):
+                hyp = d.get("hypothesis")
+            return float(conf or 0.0) == 0.0 or "pending swarm consensus" in str(hyp or "").lower()
+
         if hasattr(incident_doc, "diagnoses") and isinstance(incident_doc.diagnoses, list):
+            incident_doc.diagnoses = [d for d in incident_doc.diagnoses if not _is_placeholder(d)]
             incident_doc.diagnoses.append(diagnosis)
         elif isinstance(incident_doc, dict):
-            incident_doc.setdefault("diagnoses", []).append(diag_dict)
+            existing_d = [d for d in incident_doc.get("diagnoses", []) if not _is_placeholder(d)]
+            existing_d.append(diag_dict)
+            incident_doc["diagnoses"] = existing_d
 
         inc_mgr = getattr(ctx, "incident_manager", None)
         if inc_mgr is not None and hasattr(inc_mgr, "_active_incidents"):
             for active_inc in inc_mgr._active_incidents.values():
                 if getattr(active_inc, "doc_id", None) == inc_id:
+                    active_inc.diagnoses = [d for d in active_inc.diagnoses if not _is_placeholder(d)]
                     if diagnosis not in active_inc.diagnoses:
                         active_inc.diagnoses.append(diagnosis)
 
         if hasattr(ctx, "docs") and ctx.docs is not None:
             existing = ctx.docs.get("incidents", inc_id)
             if existing is not None:
-                diagnoses = list(existing.get("diagnoses", []))
+                diagnoses = [d for d in existing.get("diagnoses", []) if not _is_placeholder(d)]
                 diagnoses.append(diag_dict)
                 ctx.docs.set(
                     "incidents",
@@ -596,6 +610,25 @@ def register_in_process_court(ctx: Any) -> CourtOrchestrator:
                 cap_id = getattr(act, "capability_id", "") or ""
                 if not cap_id or not is_mutating_capability(cap_id):
                     continue
+                # Verify that armor.set_waf_sensitivity is ONLY attached to actual WAF / edge-policy incidents
+                if cap_id == "armor.set_waf_sensitivity":
+                    dedupe_k = str(inc_data.get("dedupe_key") or "")
+                    symptom_s = str(inc_data.get("symptom_summary") or "").lower()
+                    target_r = str(inc_data.get("target_resource") or "").lower()
+                    if "asset_404" in dedupe_k or "probe_asset_404" in symptom_s or "404" in dedupe_k:
+                        continue
+                    is_waf_incident = (
+                        "edge-policy" in dedupe_k
+                        or "edge-policy" in target_r
+                        or "waf" in dedupe_k
+                        or "waf" in target_r
+                        or "armor" in dedupe_k
+                        or "403" in symptom_s
+                        or "attack" in symptom_s
+                        or "sqli" in symptom_s
+                    )
+                    if not is_waf_incident:
+                        continue
                 already_open = any(
                     a.get("incident_id") == inc_id
                     and (a.get("capability") == cap_id or a.get("action_type") == cap_id)

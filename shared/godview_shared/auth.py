@@ -497,14 +497,53 @@ class AuthService:
             return None
 
     async def require_operator(self, request: Request) -> Principal:
-        """FastAPI dependency requiring an authenticated human operator (via IAP JWT)."""
+        """FastAPI dependency requiring an authenticated human operator (via IAP JWT or Bearer ID token)."""
         principal = self.verify_iap_jwt(request)
-        if principal is None or not principal.email:
-            raise HTTPException(
-                status_code=401,
-                detail="Unauthorized: valid operator identity (IAP JWT) required",
+        if principal is not None and principal.email:
+            return principal
+
+        # If IAP header is absent, check Bearer ID token (e.g. gcloud auth print-identity-token)
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.startswith("Bearer "):
+            raw_tok = auth_header.split(" ", 1)[1].strip()
+            try:
+                from google.auth.transport import requests as google_requests
+                from google.oauth2 import id_token as google_id_token
+
+                claims = google_id_token.verify_oauth2_token(
+                    raw_tok, google_requests.Request()
+                )
+                if claims and claims.get("iss") in (
+                    "https://accounts.google.com",
+                    "accounts.google.com",
+                ):
+                    email = claims.get("email")
+                    if email:
+                        return Principal(
+                            email=str(email),
+                            subject=str(claims.get("sub") or ""),
+                            issuer=str(claims.get("iss") or ""),
+                            audience=str(claims.get("aud") or ""),
+                            claims=claims,
+                        )
+            except Exception as e:
+                logger.warning("Bearer token verification failed in require_operator: %s", e)
+
+        if self.settings.env_mode in ("hermetic", "local"):
+            email = _clean_iap_email(request.headers.get("x-goog-authenticated-user-email")) or "operator@local.dev"
+            return Principal(
+                email=email,
+                subject="operator-local",
+                issuer=self.settings.env_mode,
+                audience="local",
             )
-        return principal
+
+        raise HTTPException(
+            status_code=401,
+            detail="Unauthorized: valid operator identity (IAP JWT or Bearer ID token) required",
+        )
+
+    require_operator_identity = require_operator
 
     def require_service(
         self,

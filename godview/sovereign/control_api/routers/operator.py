@@ -173,7 +173,9 @@ def build_router(ctx: Any) -> APIRouter:
         request: Request,
     ) -> Any:
         if ctx and hasattr(ctx, "auth") and ctx.auth is not None:
-            require_op = getattr(ctx.auth, "require_operator", None)
+            require_op = getattr(ctx.auth, "require_operator_identity", None) or getattr(
+                ctx.auth, "require_operator", None
+            )
             if callable(require_op):
                 try:
                     return await require_op(request)
@@ -185,6 +187,28 @@ def build_router(ctx: Any) -> APIRouter:
                     return await require_svc(request)
                 except HTTPException:
                     pass
+
+        # Check Bearer ID token directly
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.startswith("Bearer "):
+            raw_tok = auth_header.split(" ", 1)[1].strip()
+            try:
+                from google.auth.transport import requests as google_requests
+                from google.oauth2 import id_token as google_id_token
+
+                claims = google_id_token.verify_oauth2_token(
+                    raw_tok, google_requests.Request()
+                )
+                if claims and claims.get("iss") in (
+                    "https://accounts.google.com",
+                    "accounts.google.com",
+                ):
+                    email = claims.get("email")
+                    if email:
+                        return str(email)
+            except Exception:
+                pass
+
         env_mode = _get_env_mode(ctx)
         if env_mode == "hermetic":
             header_email = (
