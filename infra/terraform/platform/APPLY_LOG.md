@@ -221,6 +221,10 @@
   - **Result**: 0 added, 1 changed, 0 destroyed. In-place additive schema update adding nullable `parent_span_id` (STRING) to BigQuery table `godview_ledger.events`. Deletion protection preserved. Verified live via BigQuery client API.
   - **Rollback**: Schema cannot drop columns in BigQuery once added; no destructive action needed as column is nullable.
 
+- **2026-10-18T09:09:24Z**
+  - **Status**: gcloud/ADC session lapsed (`Reauthentication required. Please enter your password:`). Cloud mutations paused per protocol. Exact pending commands recorded in `DEPLOY_RUNBOOK.md`.
+
+
 
 
 

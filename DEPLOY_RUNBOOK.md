@@ -324,6 +324,47 @@ gcloud scheduler jobs run godview-tenant-resume --location=us-central1 --project
   - **Result**: 0 added, 1 changed, 0 destroyed. In-place additive schema update adding nullable `parent_span_id` (STRING) to BigQuery table `godview_ledger.events`. Deletion protection preserved. Verified live via BigQuery client API.
   - **Rollback**: Schema cannot drop columns in BigQuery once added; no destructive action needed as column is nullable.
 
+### Pending Commands (Blocked on gcloud / ADC Session Reauthentication)
+
+The gcloud / ADC auth session lapsed at ~09:09Z (`Reauthentication required. Please enter your password:`).
+Operator must run `gcloud auth login` or reauthenticate the session in the shell.
+
+Once reauthenticated, run the following exact pending commands:
+
+#### 1. Build and Deploy Sovereign v5 (Commit `61524f6` — incorporates discovery rev 11, sentinels rev 7, neutrality rev 6, runtime-core 9202363, and BigQuery parent_span_id):
+```bash
+./infra/deploy/build_image.sh god-view-sovereign --pin
+SOV_DIGEST="$(./infra/deploy/build_image.sh god-view-sovereign --pin)"
+./infra/deploy/pin_image.py --root platform --service god-view-hibernate-job --image "${SOV_DIGEST}"
+./infra/deploy/deploy_run.sh god-view-sovereign "${SOV_DIGEST}"
+curl -s -H "Authorization: Bearer $(gcloud auth print-identity-token)" "https://god-view-sovereign-mcj3w7ujpq-uc.a.run.app/public/healthz"
+```
+
+#### 2. Build and Deploy Cockpit (Commit `062bc4d` — Cockpit Rev 5 PASS #249):
+```bash
+./infra/deploy/build_image.sh god-view-sre-web --pin
+COCKPIT_DIGEST="$(./infra/deploy/build_image.sh god-view-sre-web --pin)"
+./infra/deploy/deploy_run.sh god-view-sre-web "${COCKPIT_DIGEST}"
+```
+
+#### 3. Deploy Vertex AI Agent Engine Court (Agents Rev 5 `0f5d0e2` PASS #186):
+```bash
+SOV_URL="$(gcloud run services describe god-view-sovereign --project=general-ak --region=us-central1 --format='value(status.url)')"
+PYTHONPATH=. uv run --with "google-cloud-aiplatform[agent_engines,adk]" python infra/deploy/deploy_agent_engine.py \
+  --from-perceive \
+  --sovereign-url "${SOV_URL}" \
+  --project-id general-ak \
+  --location us-central1 \
+  --staging-bucket gs://general-ak-god-view-agent-staging \
+  --service-account godview-sense-sa@general-ak.iam.gserviceaccount.com
+```
+
+#### 4. Replay Nervous System DLQ (from `2026-10-17T08:00:00Z`):
+```bash
+gcloud pubsub subscriptions seek godview-nervous-system-dlq-sub --time="2026-10-17T08:00:00Z" --project=general-ak
+```
+
+
 
 
 
