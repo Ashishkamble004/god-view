@@ -49,6 +49,7 @@ RUN rm -rf /app/godview/god-view-sre-web \
         a2a-sdk \
         google-genai \
         google-auth \
+        requests \
         PyJWT \
         cryptography \
         /app/shared \

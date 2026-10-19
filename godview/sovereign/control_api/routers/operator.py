@@ -191,15 +191,15 @@ def build_router(ctx: Any) -> APIRouter:
             raw_tok = auth_header.split(" ", 1)[1].strip()
             claims = None
             try:
-                from google.auth.transport import requests as google_requests
                 from google.oauth2 import id_token as google_id_token
+                from godview_shared.auth import get_google_auth_request
 
                 claims = google_id_token.verify_oauth2_token(
-                    raw_tok, google_requests.Request()
+                    raw_tok, get_google_auth_request()
                 )
             except Exception:
                 from godview_shared.auth import decode_cloud_run_stripped_jwt
-                claims = decode_cloud_run_stripped_jwt(raw_tok)
+                claims = decode_cloud_run_stripped_jwt(raw_tok, request=request)
 
             try:
                 if claims and claims.get("iss") in (

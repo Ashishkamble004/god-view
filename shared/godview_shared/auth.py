@@ -119,18 +119,67 @@ def _resolve_sa_unique_id(sa_email: str) -> str | None:
     return None
 
 
-def decode_cloud_run_stripped_jwt(raw_tok: str) -> dict[str, Any] | None:
-    """If running in Cloud Run (K_SERVICE set) and token signature was stripped or modified by GFE, decode payload."""
+class _HttpxAuthResponse:
+    def __init__(self, r: Any) -> None:
+        self.status = r.status_code
+        self.headers = dict(r.headers)
+        self.data = r.content
+
+
+class _HttpxAuthRequest:
+    """Fallback transport request using httpx for Google ID token verification."""
+
+    def __init__(self) -> None:
+        import httpx
+        self._client = httpx.Client(timeout=10.0)
+
+    def __call__(
+        self,
+        url: str,
+        method: str = "GET",
+        body: Any = None,
+        headers: dict[str, str] | None = None,
+        timeout: float | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        resp = self._client.request(
+            method=method,
+            url=url,
+            content=body,
+            headers=headers,
+            timeout=timeout or 10.0,
+        )
+        return _HttpxAuthResponse(resp)
+
+
+def get_google_auth_request() -> Any:
+    """Return a google.auth.transport.Request compatible object, using requests or httpx."""
+    try:
+        from google.auth.transport import requests as google_requests
+        return google_requests.Request()
+    except Exception:
+        return _HttpxAuthRequest()
+
+
+def decode_cloud_run_stripped_jwt(raw_tok: str, request: Any = None) -> dict[str, Any] | None:
+    """If running in Cloud Run (K_SERVICE set) and token signature was stripped by GFE, decode payload."""
     if not os.environ.get("K_SERVICE"):
         return None
+    # Reject if request arrived with X-Serverless-Authorization (where Authorization is untrusted pass-through)
+    if request is not None and hasattr(request, "headers"):
+        if request.headers.get("x-serverless-authorization"):
+            logger.warning("Rejected unverified Bearer token because X-Serverless-Authorization is present")
+            return None
+
+    parts = raw_tok.split(".")
+    if len(parts) != 3 or parts[2] != "SIGNATURE_REMOVED_BY_GOOGLE":
+        return None
+
     try:
         import base64
         import json
         import time
 
-        parts = raw_tok.split(".")
-        if len(parts) != 3:
-            return None
         payload_b64 = parts[1]
         payload_b64 += "=" * (-len(payload_b64) % 4)
         payload_bytes = base64.urlsafe_b64decode(payload_b64.encode("utf-8"))
@@ -202,12 +251,7 @@ class AuthService:
 
     def _get_auth_request(self) -> Any:
         if self._auth_request is None:
-            try:
-                from google.auth.transport.requests import Request as GoogleAuthRequest
-
-                self._auth_request = GoogleAuthRequest()
-            except ImportError:
-                self._auth_request = None
+            self._auth_request = get_google_auth_request()
         return self._auth_request
 
     def access_token(self) -> str:
@@ -558,14 +602,13 @@ class AuthService:
             raw_tok = auth_header.split(" ", 1)[1].strip()
             claims = None
             try:
-                from google.auth.transport import requests as google_requests
                 from google.oauth2 import id_token as google_id_token
 
                 claims = google_id_token.verify_oauth2_token(
-                    raw_tok, google_requests.Request()
+                    raw_tok, get_google_auth_request()
                 )
             except Exception as e:
-                claims = decode_cloud_run_stripped_jwt(raw_tok)
+                claims = decode_cloud_run_stripped_jwt(raw_tok, request=request)
                 if claims is None:
                     logger.warning("Bearer token verification failed in require_operator: %s", e)
 

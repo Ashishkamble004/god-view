@@ -514,7 +514,61 @@ class CourtOrchestrator:
                 if revised_candidates:
                     candidates = revised_candidates
 
+        ep_dict = ep if isinstance(ep, dict) else (ep.model_dump(mode="json") if hasattr(ep, "model_dump") else {})
+        inc_summary = {
+            "dedupe_key": ep_dict.get("dedupe_key") or ep_dict.get("signature") or incident_id,
+            "target_resource": ep_dict.get("target_resource") or ep_dict.get("resource_id") or "",
+            "symptom_summary": ep_dict.get("symptom_summary") or "",
+            "raw_evidence": ep_dict.get("raw_evidence") or {},
+        }
+        final_diagnosis.proposed_actions = _filter_actions_by_relevance(
+            final_diagnosis.proposed_actions, inc_summary
+        )
         return final_diagnosis
+
+
+def _filter_actions_by_relevance(
+    actions: list[ProposedAction], inc_data: dict[str, Any]
+) -> list[ProposedAction]:
+    """Filter proposed actions by tenant-neutral capability relevance to the incident target/symptoms."""
+    filtered: list[ProposedAction] = []
+    dedupe_k = str(inc_data.get("dedupe_key") or "").lower()
+    target_r = str(inc_data.get("target_resource") or inc_data.get("resource_id") or "").lower()
+    symptom = str(inc_data.get("symptom_summary") or "").lower()
+    raw_ev = inc_data.get("raw_evidence") or {}
+    raw_str = json.dumps(raw_ev, default=str).lower() if isinstance(raw_ev, (dict, list)) else str(raw_ev).lower()
+
+    # WAF / Cloud Armor security policy relevance (tenant-neutral: checks capability target kind / signature)
+    is_waf_relevant = (
+        "policy" in target_r
+        or "armor" in target_r
+        or "waf" in target_r
+        or "policy" in dedupe_k
+        or "armor" in dedupe_k
+        or "waf" in dedupe_k
+        or "anomaly-sqli" in dedupe_k
+        or "sqli" in dedupe_k
+        or "403" in symptom
+        or "403" in raw_str
+        or "deny" in symptom
+        or "deny" in raw_str
+    )
+    is_probe_404 = (
+        "404" in dedupe_k
+        or "probe" in dedupe_k
+        or "asset" in dedupe_k
+        or "404" in symptom
+    )
+
+    for act in actions:
+        cap = getattr(act, "capability_id", "") or ""
+        if cap == "armor.set_waf_sensitivity":
+            if is_probe_404 and not is_waf_relevant:
+                continue
+            if not is_waf_relevant:
+                continue
+        filtered.append(act)
+    return filtered
 
 
 def register_in_process_court(ctx: Any) -> CourtOrchestrator:
@@ -537,6 +591,9 @@ def register_in_process_court(ctx: Any) -> CourtOrchestrator:
             evidence_pack=ep,
         )
 
+        diagnosis.proposed_actions = _filter_actions_by_relevance(
+            diagnosis.proposed_actions, inc_data
+        )
         diag_dict = diagnosis.model_dump(mode="json")
 
         def _is_placeholder(d: Any) -> bool:
@@ -547,6 +604,12 @@ def register_in_process_court(ctx: Any) -> CourtOrchestrator:
             if hyp is None and isinstance(d, dict):
                 hyp = d.get("hypothesis")
             return float(conf or 0.0) == 0.0 or "pending swarm consensus" in str(hyp or "").lower()
+
+        if _is_placeholder(diagnosis):
+            logger.info("Court convene returned placeholder diagnosis for incident %s; skipping update", inc_id)
+            return None
+
+        consensus_val = round(float(diagnosis.confidence), 2)
 
         if hasattr(incident_doc, "diagnoses") and isinstance(incident_doc.diagnoses, list):
             incident_doc.diagnoses = [d for d in incident_doc.diagnoses if not _is_placeholder(d)]
@@ -576,10 +639,10 @@ def register_in_process_court(ctx: Any) -> CourtOrchestrator:
                         "diagnoses": diagnoses,
                         "participants": list(ARCHETYPE_DOMAINS),
                         "convergence": {
-                            "consensus": diagnosis.confidence,
+                            "consensus": consensus_val,
                             "rounds": 1,
                             "seconds": 5.0,
-                            "exit_reason": "consensus_reached" if diagnosis.confidence >= CONSENSUS_THRESHOLD else "max_rounds",
+                            "exit_reason": "consensus_reached" if consensus_val >= CONSENSUS_THRESHOLD else "max_rounds",
                             "escalated_to_argon": True,
                             "escalation_model": MODEL_TABLE["reasoning"].model_id,
                         },
