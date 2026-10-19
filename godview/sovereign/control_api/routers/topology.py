@@ -324,7 +324,10 @@ def build_router(ctx: Any) -> APIRouter:
             vanished_service_ids=[],
         )
         if raw_services or raw_edges:
-            perception.last_report = synth_report
+            try:
+                perception._last_report = synth_report  # noqa: SLF001
+            except Exception:
+                pass
         res = _format_perception_response(synth_report, docs, ctx)
         if not raw_services and not raw_edges:
             res["status"] = "not_perceived"
