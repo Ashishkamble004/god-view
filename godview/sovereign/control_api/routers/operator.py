@@ -178,15 +178,12 @@ def build_router(ctx: Any) -> APIRouter:
             )
             if callable(require_op):
                 try:
-                    return await require_op(request)
+                    op = await require_op(request)
+                    if op is not None:
+                        return op.email if hasattr(op, "email") else str(op)
                 except HTTPException:
-                    pass
-            require_svc = getattr(ctx.auth, "require_service", None)
-            if callable(require_svc):
-                try:
-                    return await require_svc(request)
-                except HTTPException:
-                    pass
+                    if _get_env_mode(ctx) != "hermetic":
+                        raise
 
         # Check Bearer ID token directly
         auth_header = request.headers.get("authorization", "")
@@ -203,9 +200,38 @@ def build_router(ctx: Any) -> APIRouter:
                     "https://accounts.google.com",
                     "accounts.google.com",
                 ):
-                    email = claims.get("email")
+                    email = str(claims.get("email") or "").strip().lower()
+                    if email.endswith(".gserviceaccount.com"):
+                        raise HTTPException(
+                            status_code=403,
+                            detail="Forbidden: Service accounts cannot act as human operators",
+                        )
+                    if not claims.get("email_verified", True):
+                        raise HTTPException(
+                            status_code=401,
+                            detail="Unauthorized: Email must be verified",
+                        )
+                    allowed_ops = {
+                        s.strip().lower()
+                        for s in (
+                            os.environ.get("GODVIEW_OPERATOR_EMAILS", "")
+                            or os.environ.get("GODVIEW_OPERATOR_EMAIL", "")
+                        ).split(",")
+                        if s.strip()
+                    }
+                    if allowed_ops:
+                        is_allowed = email in allowed_ops or email.endswith("@google.com")
+                    else:
+                        is_allowed = email.endswith("@google.com")
+                    if not is_allowed:
+                        raise HTTPException(
+                            status_code=403,
+                            detail=f"Forbidden: Operator '{email}' is not in the operator allowlist",
+                        )
                     if email:
                         return str(email)
+            except HTTPException:
+                raise
             except Exception:
                 pass
 

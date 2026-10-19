@@ -799,3 +799,71 @@ def test_bigquery_json_serialization_and_oidc_unique_id_auth() -> None:
             p_rejected = auth.verify_google_oidc("mock-token")
             assert p_rejected is None
 
+
+@pytest.mark.asyncio
+async def test_require_operator_security_hardening():
+    """Verify require_operator rejects service accounts, unverified emails, and non-allowlisted operators."""
+    from unittest.mock import patch
+    from fastapi import HTTPException, Request
+    from starlette.datastructures import Headers
+    from godview_shared.auth import AuthService, GodViewSettings
+
+    auth = AuthService(
+        settings=GodViewSettings(env_mode="gcp", service_url="https://godview.example.com"),
+    )
+
+    def _make_req(bearer: str) -> Request:
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/v1/approvals/apr-123/approve",
+            "headers": [(b"authorization", f"Bearer {bearer}".encode("utf-8"))],
+        }
+        return Request(scope)
+
+    # 1. Service account is rejected with 403
+    with patch("google.oauth2.id_token.verify_oauth2_token", return_value={
+        "iss": "https://accounts.google.com",
+        "email": "service-worker-sa@sample-env.iam.gserviceaccount.com",
+        "email_verified": True,
+    }):
+        with pytest.raises(HTTPException) as exc_info:
+            await auth.require_operator(_make_req("sa-tok"))
+        assert exc_info.value.status_code == 403
+        assert "Service accounts cannot act as human operators" in exc_info.value.detail
+
+    # 2. Unverified email is rejected with 401
+    with patch("google.oauth2.id_token.verify_oauth2_token", return_value={
+        "iss": "https://accounts.google.com",
+        "email": "attacker@google.com",
+        "email_verified": False,
+    }):
+        with pytest.raises(HTTPException) as exc_info:
+            await auth.require_operator(_make_req("unverified-tok"))
+        assert exc_info.value.status_code == 401
+        assert "Email must be verified" in exc_info.value.detail
+
+    # 3. Non-google email without allowlist is rejected with 403
+    with patch("google.oauth2.id_token.verify_oauth2_token", return_value={
+        "iss": "https://accounts.google.com",
+        "email": "random@attacker.com",
+        "email_verified": True,
+    }):
+        with pytest.raises(HTTPException) as exc_info:
+            await auth.require_operator(_make_req("random-tok"))
+        assert exc_info.value.status_code == 403
+        assert "not in the operator allowlist" in exc_info.value.detail
+
+    # 4. Verified @google.com email is accepted
+    with patch("google.oauth2.id_token.verify_oauth2_token", return_value={
+        "iss": "https://accounts.google.com",
+        "email": "kambleashish@google.com",
+        "email_verified": True,
+        "sub": "123456",
+    }):
+        principal = await auth.require_operator(_make_req("google-tok"))
+        assert principal is not None
+        assert principal.email == "kambleashish@google.com"
+        assert principal.is_operator is True
+
+

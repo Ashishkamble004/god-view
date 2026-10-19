@@ -90,7 +90,8 @@ def build_router(ctx: Any) -> APIRouter:
                 try:
                     return await require_op(request)
                 except HTTPException:
-                    pass
+                    if _get_env_mode(ctx) != "hermetic":
+                        raise
         env_mode = _get_env_mode(ctx)
         if env_mode == "hermetic":
             header_email = (

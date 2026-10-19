@@ -161,6 +161,15 @@ class AuthService:
         ]
         self._allowed_trace_principals = set(raw_trace)
         self._allowed_service_principals = set(raw_principals)
+        raw_ops = [
+            s.strip().lower()
+            for s in (
+                os.environ.get("GODVIEW_OPERATOR_EMAILS", "")
+                or os.environ.get("GODVIEW_OPERATOR_EMAIL", "")
+            ).split(",")
+            if s.strip()
+        ]
+        self._allowed_operator_emails = set(raw_ops)
         self._auth_request: Any = None
 
     def _get_auth_request(self) -> Any:
@@ -517,15 +526,46 @@ class AuthService:
                     "https://accounts.google.com",
                     "accounts.google.com",
                 ):
-                    email = claims.get("email")
+                    email = str(claims.get("email") or "").strip().lower()
+                    # Reject service accounts: operators must be human identities
+                    if email.endswith(".gserviceaccount.com"):
+                        logger.warning("Rejected service account '%s' in require_operator", email)
+                        raise HTTPException(
+                            status_code=403,
+                            detail="Forbidden: Service accounts cannot act as human operators",
+                        )
+                    # Check email verification
+                    if not claims.get("email_verified", True):
+                        logger.warning("Rejected unverified email '%s' in require_operator", email)
+                        raise HTTPException(
+                            status_code=401,
+                            detail="Unauthorized: Email must be verified",
+                        )
+                    # Enforce operator allowlist: explicitly allowed emails or @google.com
+                    allowed_ops = self._allowed_operator_emails
+                    if allowed_ops:
+                        is_allowed = email in allowed_ops or email.endswith("@google.com")
+                    else:
+                        is_allowed = email.endswith("@google.com")
+
+                    if not is_allowed:
+                        logger.warning("Operator email '%s' not in allowlist", email)
+                        raise HTTPException(
+                            status_code=403,
+                            detail=f"Forbidden: Operator '{email}' is not in the operator allowlist",
+                        )
+
                     if email:
                         return Principal(
-                            email=str(email),
+                            email=email,
                             subject=str(claims.get("sub") or ""),
                             issuer=str(claims.get("iss") or ""),
                             audience=str(claims.get("aud") or ""),
                             claims=claims,
+                            is_operator=True,
                         )
+            except HTTPException:
+                raise
             except Exception as e:
                 logger.warning("Bearer token verification failed in require_operator: %s", e)
 
