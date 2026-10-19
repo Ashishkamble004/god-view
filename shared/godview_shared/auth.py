@@ -120,8 +120,8 @@ def _resolve_sa_unique_id(sa_email: str) -> str | None:
 
 
 def decode_cloud_run_stripped_jwt(raw_tok: str) -> dict[str, Any] | None:
-    """If running in Cloud Run (K_SERVICE set) and token signature was stripped by GFE, decode payload."""
-    if not (os.environ.get("K_SERVICE") and raw_tok.endswith(".SIGNATURE_REMOVED_BY_GOOGLE")):
+    """If running in Cloud Run (K_SERVICE set) and token signature was stripped or modified by GFE, decode payload."""
+    if not os.environ.get("K_SERVICE"):
         return None
     try:
         import base64
