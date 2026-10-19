@@ -509,6 +509,19 @@ class AuthService:
         """FastAPI dependency requiring an authenticated human operator (via IAP JWT or Bearer ID token)."""
         principal = self.verify_iap_jwt(request)
         if principal is not None and principal.email:
+            email = str(principal.email).strip().lower()
+            if email.endswith(".gserviceaccount.com"):
+                logger.warning("Rejected service account '%s' in require_operator", email)
+                raise HTTPException(
+                    status_code=403,
+                    detail="Forbidden: Service accounts cannot act as human operators",
+                )
+            if self._allowed_operator_emails and email not in self._allowed_operator_emails:
+                logger.warning("Operator email '%s' from IAP not in allowlist", email)
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Forbidden: Operator '{email}' is not in the operator allowlist",
+                )
             return principal
 
         # If IAP header is absent, check Bearer ID token (e.g. gcloud auth print-identity-token)
@@ -541,14 +554,8 @@ class AuthService:
                             status_code=401,
                             detail="Unauthorized: Email must be verified",
                         )
-                    # Enforce operator allowlist: explicitly allowed emails or @google.com
-                    allowed_ops = self._allowed_operator_emails
-                    if allowed_ops:
-                        is_allowed = email in allowed_ops or email.endswith("@google.com")
-                    else:
-                        is_allowed = email.endswith("@google.com")
-
-                    if not is_allowed:
+                    # Enforce operator allowlist: when allowlist is set, it alone decides
+                    if self._allowed_operator_emails and email not in self._allowed_operator_emails:
                         logger.warning("Operator email '%s' not in allowlist", email)
                         raise HTTPException(
                             status_code=403,

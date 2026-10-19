@@ -219,11 +219,7 @@ def build_router(ctx: Any) -> APIRouter:
                         ).split(",")
                         if s.strip()
                     }
-                    if allowed_ops:
-                        is_allowed = email in allowed_ops or email.endswith("@google.com")
-                    else:
-                        is_allowed = email.endswith("@google.com")
-                    if not is_allowed:
+                    if allowed_ops and email not in allowed_ops:
                         raise HTTPException(
                             status_code=403,
                             detail=f"Forbidden: Operator '{email}' is not in the operator allowlist",

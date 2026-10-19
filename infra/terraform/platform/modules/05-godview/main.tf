@@ -230,6 +230,10 @@ resource "google_cloud_run_v2_service" "sovereign" {
         value = "gcp"
       }
       env {
+        name  = "GODVIEW_OPERATOR_EMAILS"
+        value = var.operator_email
+      }
+      env {
         name  = "GOOGLE_CLOUD_PROJECT"
         value = var.project_id
       }

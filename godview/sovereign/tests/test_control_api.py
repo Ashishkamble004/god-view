@@ -843,27 +843,71 @@ async def test_require_operator_security_hardening():
         assert exc_info.value.status_code == 401
         assert "Email must be verified" in exc_info.value.detail
 
-    # 3. Non-google email without allowlist is rejected with 403
+    # 3. Allowlist enforcement: only explicitly allowlisted operator emails can act
+    auth_with_allowlist = AuthService(
+        settings=GodViewSettings(env_mode="gcp", service_url="https://godview.example.com"),
+    )
+    auth_with_allowlist._allowed_operator_emails = {"admin-operator@custom-corp.com"}
+
     with patch("google.oauth2.id_token.verify_oauth2_token", return_value={
         "iss": "https://accounts.google.com",
-        "email": "random@attacker.com",
+        "email": "unauthorized-user@custom-corp.com",
         "email_verified": True,
     }):
         with pytest.raises(HTTPException) as exc_info:
-            await auth.require_operator(_make_req("random-tok"))
+            await auth_with_allowlist.require_operator(_make_req("unauthorized-tok"))
         assert exc_info.value.status_code == 403
         assert "not in the operator allowlist" in exc_info.value.detail
 
-    # 4. Verified @google.com email is accepted
+    # 4. Verified allowlisted operator email is accepted
     with patch("google.oauth2.id_token.verify_oauth2_token", return_value={
         "iss": "https://accounts.google.com",
-        "email": "kambleashish@google.com",
+        "email": "admin-operator@custom-corp.com",
         "email_verified": True,
         "sub": "123456",
     }):
-        principal = await auth.require_operator(_make_req("google-tok"))
+        principal = await auth_with_allowlist.require_operator(_make_req("allowed-tok"))
         assert principal is not None
-        assert principal.email == "kambleashish@google.com"
+        assert principal.email == "admin-operator@custom-corp.com"
         assert principal.is_operator is True
+
+    # 5. IAP JWT path also enforces allowlist and rejects service accounts
+    with patch.object(auth_with_allowlist, "verify_iap_jwt") as mock_iap:
+        from godview_shared.auth import Principal
+        mock_iap.return_value = Principal(
+            email="service-sa@sample-env.iam.gserviceaccount.com",
+            subject="sa-sub",
+            issuer="https://cloud.google.com/iap",
+            audience="aud",
+            is_operator=True,
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            await auth_with_allowlist.require_operator(_make_req("dummy"))
+        assert exc_info.value.status_code == 403
+        assert "Service accounts cannot act as human operators" in exc_info.value.detail
+
+        mock_iap.return_value = Principal(
+            email="unlisted@custom-corp.com",
+            subject="unlisted-sub",
+            issuer="https://cloud.google.com/iap",
+            audience="aud",
+            is_operator=True,
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            await auth_with_allowlist.require_operator(_make_req("dummy"))
+        assert exc_info.value.status_code == 403
+        assert "not in the operator allowlist" in exc_info.value.detail
+
+        mock_iap.return_value = Principal(
+            email="admin-operator@custom-corp.com",
+            subject="admin-sub",
+            issuer="https://cloud.google.com/iap",
+            audience="aud",
+            is_operator=True,
+        )
+        iap_op = await auth_with_allowlist.require_operator(_make_req("dummy"))
+        assert iap_op is not None
+        assert iap_op.email == "admin-operator@custom-corp.com"
+        assert iap_op.is_operator is True
 
 
