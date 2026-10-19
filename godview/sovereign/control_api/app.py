@@ -240,7 +240,15 @@ def create_app(
                         try:
                             inc_mgr = ctx.incident_manager
                             from godview.sovereign.incidents.manager import _has_real_diagnosis, _is_placeholder
-                            for inc in list(getattr(inc_mgr, "_active_incidents", {}).values()):
+                            active_incs = list(getattr(inc_mgr, "_active_incidents", {}).values())
+                            active_incs.sort(
+                                key=lambda inc: (
+                                    0 if any(k in str(getattr(inc, "dedupe_key", "")).lower() for k in ("waf", "policy", "probe", "posture")) else 1,
+                                    0 if "posture" in str(getattr(inc, "dedupe_key", "")).lower() else 1,
+                                    -(len(getattr(inc, "raw_evidence", {}).get("latest_samples", []))),
+                                )
+                            )
+                            for inc in active_incs:
                                 if getattr(inc, "outcome", "") == "open":
                                     diags = getattr(inc, "diagnoses", [])
                                     real_diags = [d for d in diags if not _is_placeholder(d)]

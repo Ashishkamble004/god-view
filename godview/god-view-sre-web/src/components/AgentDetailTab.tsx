@@ -104,8 +104,19 @@ export const AgentDetailTab: React.FC<AgentDetailTabProps> = ({
     );
   }
 
-  const lm = activeAgent.living_model;
-  const firstThresholds = activeAgent.trust_records[0]?.thresholds;
+  const rawLm = activeAgent.living_model;
+  const lm = {
+    entities: rawLm?.entities ?? [],
+    rules: rawLm?.rules ?? [],
+    state_machines: rawLm?.state_machines ?? [],
+    decision_boundaries: rawLm?.decision_boundaries ?? [],
+    feature_flags: rawLm?.feature_flags ?? [],
+    routes: rawLm?.routes ?? [],
+    dependencies: rawLm?.dependencies ?? [],
+    commit_diffs: rawLm?.commit_diffs ?? [],
+  };
+  const trustRecords = activeAgent.trust_records ?? [];
+  const firstThresholds = trustRecords[0]?.thresholds;
 
   return (
     <div className="space-y-6">
@@ -372,7 +383,17 @@ export const AgentDetailTab: React.FC<AgentDetailTabProps> = ({
           }
         />
         <div className="mt-3 space-y-3">
-          {activeAgent.trust_records.map((rec) => (
+          {trustRecords.map((rec) => {
+            const thresholds = rec.thresholds ?? { n1: 5, n2: 15, n3: 30 };
+            const counters = rec.counters ?? {
+              recommendations_correct: 0,
+              approved_executions: 0,
+              verified_outcomes: 0,
+              business_successes: 0,
+              regressions: 0,
+            };
+            const history = rec.history ?? [];
+            return (
             <div
               key={rec.id}
               className="rounded border border-slate-200 bg-slate-50 p-3.5 text-xs"
@@ -406,45 +427,45 @@ export const AgentDetailTab: React.FC<AgentDetailTabProps> = ({
               <div className="mt-2.5 grid grid-cols-2 gap-3 sm:grid-cols-5 num-tabular">
                 <div className="rounded border border-slate-200 bg-white p-2">
                   <span className="text-slate-500">
-                    Recommendations (N1={rec.thresholds.n1})
+                    Recommendations (N1={thresholds.n1})
                   </span>
                   <p className="mt-0.5 font-semibold text-slate-900">
-                    {rec.counters.recommendations_correct} / {rec.thresholds.n1}
+                    {counters.recommendations_correct} / {thresholds.n1}
                   </p>
                 </div>
                 <div className="rounded border border-slate-200 bg-white p-2">
                   <span className="text-slate-500">
-                    Approved Execs (N2={rec.thresholds.n2})
+                    Approved Execs (N2={thresholds.n2})
                   </span>
                   <p className="mt-0.5 font-semibold text-slate-900">
-                    {rec.counters.approved_executions} / {rec.thresholds.n2}
+                    {counters.approved_executions} / {thresholds.n2}
                   </p>
                 </div>
                 <div className="rounded border border-slate-200 bg-white p-2">
                   <span className="text-slate-500">Verified Outcomes</span>
                   <p className="mt-0.5 font-semibold text-slate-900">
-                    {rec.counters.verified_outcomes}
+                    {counters.verified_outcomes}
                   </p>
                 </div>
                 <div className="rounded border border-slate-200 bg-white p-2">
                   <span className="text-slate-500">
-                    Business Successes (N3={rec.thresholds.n3})
+                    Business Successes (N3={thresholds.n3})
                   </span>
                   <p className="mt-0.5 font-semibold text-slate-900">
-                    {rec.counters.business_successes} / {rec.thresholds.n3}
+                    {counters.business_successes} / {thresholds.n3}
                   </p>
                 </div>
                 <div className="rounded border border-slate-200 bg-white p-2">
                   <span className="text-slate-500">Regressions</span>
                   <p className="mt-0.5 font-semibold text-green-800">
-                    {rec.counters.regressions} (0 required)
+                    {counters.regressions} (0 required)
                   </p>
                 </div>
               </div>
 
-              {rec.history.length > 0 && (
+              {history.length > 0 && (
                 <div className="mt-2.5 space-y-1 border-t border-slate-200 pt-2">
-                  {rec.history.map((h, idx) => (
+                  {history.map((h, idx) => (
                     <div
                       key={idx}
                       className="flex items-center justify-between text-slate-600"
@@ -460,7 +481,8 @@ export const AgentDetailTab: React.FC<AgentDetailTabProps> = ({
                 </div>
               )}
             </div>
-          ))}
+            );
+          })}
         </div>
       </Card>
 
@@ -495,17 +517,17 @@ export const AgentDetailTab: React.FC<AgentDetailTabProps> = ({
                     <p className="mt-1.5 text-slate-600">
                       Correlation Keys:{' '}
                       <span className="font-mono text-slate-800">
-                        {ent.correlation_keys.join(', ')}
+                        {(ent.correlation_keys ?? []).join(', ')}
                       </span>
                     </p>
                     <p className="mt-1 text-slate-600">
                       Tables:{' '}
                       <span className="font-mono text-slate-800">
-                        {ent.tables.join(', ')}
+                        {(ent.tables ?? []).join(', ')}
                       </span>
                     </p>
                     <div className="mt-2 flex flex-wrap gap-1">
-                      {ent.fields.map((f) => (
+                      {(ent.fields ?? []).map((f) => (
                         <Badge key={f} variant="outline" className="font-mono">
                           {f}
                         </Badge>
@@ -571,14 +593,14 @@ export const AgentDetailTab: React.FC<AgentDetailTabProps> = ({
                       Entity: {sm.entity}
                     </div>
                     <div className="flex flex-wrap gap-1.5">
-                      {sm.states.map((st) => (
+                      {(sm.states ?? []).map((st) => (
                         <Badge key={st} variant="secondary" className="font-mono">
                           {st}
                         </Badge>
                       ))}
                     </div>
                     <div className="divide-y divide-slate-200 rounded border border-slate-200">
-                      {sm.transitions.map((tr, i) => (
+                      {(sm.transitions ?? []).map((tr, i) => (
                         <div
                           key={i}
                           className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5"
@@ -704,7 +726,7 @@ export const AgentDetailTab: React.FC<AgentDetailTabProps> = ({
                       </div>
                     </div>
                     <p className="mt-1 text-slate-600">
-                      Auth: {rt.auth} · Writes: {rt.writes.join(', ')}
+                      Auth: {rt.auth} · Writes: {(rt.writes ?? []).join(', ')}
                     </p>
                   </div>
                 ))}
@@ -758,7 +780,7 @@ export const AgentDetailTab: React.FC<AgentDetailTabProps> = ({
                       {cd.business_summary}
                     </p>
                     <p className="mt-1 font-mono text-slate-500">
-                      Files: {cd.files_changed.join(', ')}
+                      Files: {(cd.files_changed ?? []).join(', ')}
                     </p>
                   </div>
                 ))

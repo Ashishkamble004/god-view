@@ -101,12 +101,13 @@ def ensure_open_incident_approvals(ctx: Any) -> list[dict[str, Any]]:
 
         # Expire legacy synthetic card if present
         for a in all_approvals:
-            if a.get("approval_id") == "apr-20261019-ff0c570f" and a.get("decision", a.get("status")) == "pending":
-                logger.info("Expiring legacy synthetic approval card apr-20261019-ff0c570f")
+            aid = a.get("approval_id") or a.get("id") or ""
+            if aid in ("apr-20261019-ff0c570f", "apr-20261019-7a43c23a") and a.get("decision", a.get("status")) == "pending":
+                logger.info("Expiring legacy synthetic approval card %s", aid)
                 try:
                     docs_store.set(
                         "approvals",
-                        "apr-20261019-ff0c570f",
+                        aid,
                         {**a, "decision": "expired", "status": "expired", "rejection_reason": "Superseded by genuine Court diagnosis action"},
                         merge=True,
                     )

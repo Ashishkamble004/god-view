@@ -200,7 +200,9 @@ export const ApprovalsTab: React.FC<ApprovalsTabProps> = ({
                   <div>
                     <span className="text-slate-500">Target Resource Scope</span>
                     <p className="mt-0.5 font-mono font-semibold text-slate-900">
-                      {card.target_resource}
+                      {typeof card.target_resource === 'string'
+                        ? card.target_resource
+                        : JSON.stringify(card.target_resource ?? 'estate-resource')}
                     </p>
                   </div>
                   <div>
@@ -229,9 +231,13 @@ export const ApprovalsTab: React.FC<ApprovalsTabProps> = ({
                     <span className="text-slate-500">
                       Mandatory Reversal Recipe
                     </span>
-                    <p className="mt-0.5 font-mono text-slate-800">
+                    <p className="mt-0.5 font-mono text-slate-800 break-all">
                       {card.reversal_recipe?.capability ?? 'cloudrun.rollback_revision'}:{' '}
-                      {card.reversal_recipe?.args ?? '--to-previous-healthy'}
+                      {typeof card.reversal_recipe?.args === 'string'
+                        ? card.reversal_recipe.args
+                        : card.reversal_recipe?.args
+                        ? JSON.stringify(card.reversal_recipe.args)
+                        : '--to-previous-healthy'}
                     </p>
                   </div>
                 </div>

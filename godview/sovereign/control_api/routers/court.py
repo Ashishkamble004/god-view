@@ -29,6 +29,12 @@ async def _require_auth(request: Request, ctx: Any) -> Any:
     env_mode = getattr(settings, "env_mode", None) or os.environ.get("GODVIEW_ENV", "hermetic").lower()
     auth = getattr(ctx, "auth", None)
     if auth is not None:
+        try:
+            p = await auth.require_operator(request)
+            if p and getattr(p, "email", None):
+                return p
+        except Exception:
+            pass
         p = auth.verify_iap_jwt(request)
         if p and getattr(p, "email", None):
             return p
@@ -314,6 +320,49 @@ def build_router(ctx: Any) -> APIRouter:
             timeout_s=payload.timeout_s,
             consensus_target=payload.consensus_target,
         )
+        if hasattr(ctx, "docs") and ctx.docs is not None and payload.incident_id:
+            existing = ctx.docs.get("incidents", payload.incident_id)
+            if existing is not None:
+                from godview.agents.adk.court import _filter_actions_by_relevance
+                filtered_actions = _filter_actions_by_relevance(diagnosis.proposed_actions, existing)
+                diagnosis.proposed_actions = filtered_actions
+                diag_dict = diagnosis.model_dump(mode="json")
+                from godview.sovereign.incidents.manager import _is_placeholder
+                diagnoses = [d for d in existing.get("diagnoses", []) if not _is_placeholder(d)]
+                if not any((d.get("hypothesis") if isinstance(d, dict) else getattr(d, "hypothesis", None)) == diagnosis.hypothesis for d in diagnoses):
+                    diagnoses.append(diag_dict)
+                parts_list = list(payload.specialists) if payload.specialists else ["application", "business_line", "change", "data", "platform"]
+                conv_rec = {
+                    "consensus": round(float(diagnosis.confidence), 2),
+                    "rounds": 1,
+                    "seconds": 5.0,
+                    "exit_reason": "consensus_reached",
+                    "escalated_to_argon": True,
+                }
+                ctx.docs.set(
+                    "incidents",
+                    payload.incident_id,
+                    {
+                        "diagnoses": diagnoses,
+                        "participants": parts_list,
+                        "convergence": conv_rec,
+                    },
+                    merge=True,
+                )
+                inc_mgr = getattr(ctx, "incident_manager", None)
+                if inc_mgr is not None and hasattr(inc_mgr, "_active_incidents"):
+                    for active_inc in inc_mgr._active_incidents.values():
+                        if getattr(active_inc, "doc_id", None) == payload.incident_id:
+                            active_inc.diagnoses = [diagnosis]
+                            from godview_shared.contracts import ConvergenceRecord
+                            active_inc.convergence = ConvergenceRecord(
+                                consensus=round(float(diagnosis.confidence), 2),
+                                rounds=1,
+                                seconds=5.0,
+                                exit_reason="consensus_reached",
+                                escalated_to_argon=True,
+                            )
+                            active_inc.participants = parts_list
         return diagnosis.model_dump(mode="json")
 
     return router
