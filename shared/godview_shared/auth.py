@@ -390,8 +390,28 @@ class AuthService:
                 is_operator=True,
             )
 
-        # In non-hermetic modes, fail closed if token or backend IDs are missing
+        # In non-hermetic modes, if IAP is explicitly disabled on the edge, fall back to default operator
+        # when no explicit Authorization header or test-principal spoofing header is present.
         if not token:
+            if (
+                isinstance(request_or_token, Request)
+                and os.environ.get("GODVIEW_IAP_DISABLED", "").strip().lower() in ("1", "true", "yes")
+                and not test_principal_hdr
+                and not request_or_token.headers.get("authorization")
+                and not request_or_token.headers.get("x-serverless-authorization")
+            ):
+                default_op = (
+                    next(iter(sorted(self._allowed_operator_emails)), None)
+                    or os.environ.get("GODVIEW_OPERATOR_EMAIL", "").strip()
+                    or "operator@local.dev"
+                )
+                return Principal(
+                    email=default_op,
+                    subject=f"sub-{default_op}",
+                    issuer="iap-disabled",
+                    audience="godview-direct",
+                    is_operator=True,
+                )
             return None
 
         if not self._iap_backend_service_ids:
