@@ -684,6 +684,7 @@ def create_app(
 
     @api.post("/trust-records/{record_id}:whitelist")
     async def whitelist_trust_record(
+        request: Request,
         record_id: str,
         body: WhitelistRequest | None = None,
         x_goog_authenticated_user_email: str | None = Header(
@@ -691,6 +692,15 @@ def create_app(
         ),
     ) -> dict[str, Any]:
         iap_email = _clean_iap_email(x_goog_authenticated_user_email)
+        if (
+            not iap_email
+            and hasattr(ctx, "auth")
+            and ctx.auth
+            and ctx.settings.env_mode not in ("hermetic", "local")
+        ):
+            p = ctx.auth.verify_iap_jwt(request)
+            if p and getattr(p, "email", None):
+                iap_email = str(p.email)
         if body is not None and body.agent_id and body.action_type:
             agent_id, action_type = body.agent_id, body.action_type
         elif "__" in record_id:
