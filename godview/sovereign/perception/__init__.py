@@ -73,6 +73,21 @@ def resolve_env_id(settings: GodViewSettings) -> str:
     return f"gcp-{settings.env_mode}"
 
 
+def _extract_point_float(pt: dict[str, Any]) -> float:
+    """Extract numeric metric float from Cloud Monitoring point value object or scalar."""
+    v = pt.get("value")
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, dict):
+        if "doubleValue" in v:
+            return float(v["doubleValue"])
+        if "int64Value" in v:
+            return float(v["int64Value"])
+        if "distributionValue" in v:
+            return float(v["distributionValue"].get("mean", 0.0) or 0.0)
+    return 0.0
+
+
 class PerceptionReport(BaseModel):
     """Structured output of a 6-step PerceptionOrgan pass."""
 
@@ -502,19 +517,22 @@ class PerceptionOrgan:
                                     "monitoring.query_timeseries",
                                     {
                                         "service_name": svc.name,
-                                        "window_s": 300,
+                                        "window_s": 3600,
                                         "filter": (
                                             f'metric.type="run.googleapis.com/request_latencies" '
+                                            f'AND resource.type="cloud_run_revision" '
                                             f'AND resource.labels.service_name="{svc.name}"'
                                         ),
                                     },
                                 )
                                 if isinstance(ts_res, list) and ts_res:
-                                    pts = ts_res[0].get("points", [])
-                                    if pts:
-                                        p95_val = float(pts[0].get("value", 0.0) or 0.0)
-                                        if p95_val > 0:
-                                            p95_ms = p95_val
+                                    for series in ts_res:
+                                        pts = series.get("points", [])
+                                        if pts:
+                                            p95_val = _extract_point_float(pts[0])
+                                            if p95_val > 0:
+                                                p95_ms = round(p95_val, 2)
+                                                break
                             except Exception:
                                 pass
 
@@ -523,30 +541,32 @@ class PerceptionOrgan:
                                     "monitoring.query_timeseries",
                                     {
                                         "service_name": svc.name,
-                                        "window_s": 300,
+                                        "window_s": 3600,
                                         "filter": (
                                             f'metric.type="run.googleapis.com/request_count" '
+                                            f'AND resource.type="cloud_run_revision" '
                                             f'AND resource.labels.service_name="{svc.name}"'
                                         ),
                                     },
                                 )
                                 if isinstance(cnt_res, list) and cnt_res:
-                                    total_cnt = 0.0
-                                    err_cnt = 0.0
+                                    total_rate = 0.0
+                                    err_rate = 0.0
                                     for series in cnt_res:
                                         pts = series.get("points", [])
-                                        count = sum(float(p.get("value", 0.0) or 0.0) for p in pts)
-                                        total_cnt += count
-                                        resp_code = str(
-                                            series.get("metric", {})
-                                            .get("labels", {})
-                                            .get("response_code_class", "")
-                                        )
-                                        if resp_code.startswith("5"):
-                                            err_cnt += count
-                                    if total_cnt > 0:
-                                        rps = round(total_cnt / 300.0, 3)
-                                        err_ratio = round(err_cnt / total_cnt, 4)
+                                        if pts:
+                                            val = _extract_point_float(pts[0])
+                                            total_rate += val
+                                            resp_code = str(
+                                                series.get("metric", {})
+                                                .get("labels", {})
+                                                .get("response_code_class", "")
+                                            )
+                                            if resp_code.startswith("5"):
+                                                err_rate += val
+                                    if total_rate > 0:
+                                        rps = round(total_rate, 3)
+                                        err_ratio = round(err_rate / total_rate, 4)
                             except Exception:
                                 pass
 

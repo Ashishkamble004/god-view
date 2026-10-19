@@ -54,6 +54,57 @@ def _extract_parents(text: str) -> list[str]:
     return [p.strip() for p in m.group(1).split(",") if p.strip()]
 
 
+def _extract_json_arrays(text: str) -> list[list[dict[str, Any]]]:
+    """Robustly extract JSON arrays from text, handling markdown fences and nested objects."""
+    results: list[list[dict[str, Any]]] = []
+    for fence in re.findall(r"```(?:json)?\s*(\[[\s\S]*?\])\s*```", text):
+        try:
+            val = json.loads(fence.strip())
+            if isinstance(val, list):
+                results.append(val)
+        except Exception:
+            pass
+    if results:
+        return results
+
+    start = text.find("[")
+    while start != -1:
+        depth = 0
+        in_string = False
+        escape = False
+        end = -1
+        for i in range(start, len(text)):
+            c = text[i]
+            if escape:
+                escape = False
+                continue
+            if c == "\\":
+                escape = True
+                continue
+            if c == '"':
+                in_string = not in_string
+                continue
+            if not in_string:
+                if c == "[":
+                    depth += 1
+                elif c == "]":
+                    depth -= 1
+                    if depth == 0:
+                        end = i + 1
+                        break
+        if end != -1:
+            try:
+                val = json.loads(text[start:end])
+                if isinstance(val, list):
+                    results.append(val)
+            except Exception:
+                pass
+            start = text.find("[", end)
+        else:
+            break
+    return results
+
+
 class VertexGeminiProposer(Proposer):
     """Meta-agent proposer backed by Vertex AI Gemini using ADC."""
 
@@ -103,15 +154,86 @@ class VertexGeminiProposer(Proposer):
         active_model = self.resolve_active_model()
         env_mode = os.environ.get("GODVIEW_ENV", "hermetic").lower()
 
-        # Check if ctx.llm is available first
-        if self.ctx is not None and hasattr(self.ctx, "llm") and self.ctx.llm is not None:
+        ctx_dir = work_dir / "context"
+        harness_dir = ctx_dir / "harness"
+        is_reflection = "EXPERIENCE.md" in prompt and "INDEX_ENTRY.md" in prompt
+
+        # Augment prompt with context files and strict JSON output contract
+        augmented_prompt = prompt
+        context_parts: list[str] = []
+        if ctx_dir.is_dir():
+            task_file = ctx_dir / "task.md"
+            if task_file.is_file():
+                context_parts.append(
+                    f"### Problem Description (task.md):\n{task_file.read_text(encoding='utf-8')[:8000]}"
+                )
+
+            if harness_dir.is_dir():
+                file_snippets = []
+                for p in sorted(harness_dir.rglob("*")):
+                    if p.is_file():
+                        rel = p.relative_to(harness_dir).as_posix()
+                        try:
+                            file_snippets.append(
+                                f"File `{rel}`:\n```\n{p.read_text(encoding='utf-8')[:3000]}\n```"
+                            )
+                        except Exception:
+                            file_snippets.append(f"File `{rel}` (binary)")
+                if file_snippets:
+                    context_parts.append(
+                        "### Current Files in ./context/harness/:\n" + "\n\n".join(file_snippets[:10])
+                    )
+
+        if is_reflection:
+            contract = (
+                "### OUTPUT CONTRACT (MANDATORY):\n"
+                "You MUST output the two requested files as a JSON array inside a ```json code fence:\n"
+                "```json\n"
+                "[\n"
+                '  {"path": "EXPERIENCE.md", "content": "# Harness² Experience Report\\n\\n## Task Fingerprint\\n...\\n\\n## Evolution Trajectory\\n...\\n\\n## Reusable Components\\n..."},\n'
+                '  {"path": "INDEX_ENTRY.md", "content": "- **`<task_slug>`**: Summary of changes and reusable skills/scripts\\n"}\n'
+                "]\n"
+                "```\n"
+                "Ensure EXPERIENCE.md contains ## Task Fingerprint, ## Evolution Trajectory, and ## Reusable Components.\n"
+                "End your response with `<notes>mode: reflect | parents: h0 | ...</notes>`."
+            )
+        else:
+            contract = (
+                "### OUTPUT CONTRACT (MANDATORY):\n"
+                "You MUST output your proposed file edits as a JSON array inside a ```json code fence:\n"
+                "```json\n"
+                "[\n"
+                '  {"path": "skills/<skill-slug>/SKILL.md", "content": "---\\nid: <skill-slug>\\nname: <skill-slug>\\nversion: 1.0.0\\ndomain: platform\\nautotrigger: <symptom or error condition matching task.md>\\n---\\n# Skill: <skill-slug>\\n..."},\n'
+                '  {"path": "scripts/<script_name>.py", "content": "# Deterministic check\\nimport json, sys\\n...\\nprint(json.dumps({\\"ok\\": True}))\\n"},\n'
+                '  {"path": "hooks.json", "content": "{\\"Stop\\": [{\\"script\\": \\"scripts/<script_name>.py\\"}]}"}\n'
+                "]\n"
+                "```\n"
+                "Requirements:\n"
+                "1. Each `SKILL.md` MUST include YAML frontmatter with a non-empty `autotrigger:` line matching task.md.\n"
+                "2. Each Python script under `scripts/` MUST be valid, compilable Python 3 with standard library imports only, outputting JSON with `\"ok\": true`.\n"
+                "3. Wire the script into `hooks.json` under `Stop` or `PostToolUse`.\n"
+                "4. End your response with `<notes>mode: refine | parents: h0 | ...</notes>`."
+            )
+
+        if context_parts:
+            augmented_prompt = augmented_prompt + "\n\n" + "\n\n".join(context_parts)
+        augmented_prompt = augmented_prompt + "\n\n" + contract
+
+        # Check if hermetic mode first
+        if env_mode == "hermetic":
+            self.last_model_used = active_model
+            raw_output = self._run_hermetic_synthesis(
+                work_dir=work_dir, prompt=augmented_prompt, active_model=active_model
+            )
+            ok = True
+        elif self.ctx is not None and hasattr(self.ctx, "llm") and self.ctx.llm is not None:
             try:
                 import inspect
 
                 def _call_llm_generate() -> Any:
                     return self.ctx.llm.generate(
                         role="reasoning",
-                        contents=[{"role": "user", "parts": [{"text": prompt}]}],
+                        contents=[{"role": "user", "parts": [{"text": augmented_prompt}]}],
                     )
 
                 try:
@@ -141,36 +263,42 @@ class VertexGeminiProposer(Proposer):
                 ok = bool(raw_output and not raw_output.startswith("<coroutine"))
             except Exception as exc:
                 logger.error("ctx.llm failed in proposer: %s", exc)
-                if env_mode == "hermetic":
-                    raw_output = self._run_hermetic_synthesis(
-                        work_dir=work_dir, prompt=prompt, active_model=active_model
-                    )
-                    ok = True
-                else:
-                    raw_output = ""
-                    ok = False
-        elif env_mode != "hermetic":
+                raw_output = ""
+                ok = False
+        else:
             # Use ADC credentials if available
             raw_output, used_model, ok = self._call_vertex_with_adc(
                 work_dir=work_dir,
-                prompt=prompt,
+                prompt=augmented_prompt,
                 primary_model=active_model,
             )
             self.last_model_used = used_model
-        else:
-            self.last_model_used = active_model
-            raw_output = self._run_hermetic_synthesis(
-                work_dir=work_dir, prompt=prompt, active_model=active_model
-            )
-            ok = True
 
-        ctx_dir = work_dir / "context"
-        harness_dir = ctx_dir / "harness"
-        if harness_dir.is_dir() and raw_output and env_mode != "hermetic":
+        if raw_output and env_mode != "hermetic":
             try:
-                self._apply_model_edits(harness_dir, raw_output)
+                self._apply_model_edits(harness_dir, raw_output, ctx_dir=ctx_dir)
             except Exception as edit_exc:
                 logger.warning("Failed to apply model edits to candidate tree: %s", edit_exc)
+
+        # Reflection fallback: ensure EXPERIENCE.md and INDEX_ENTRY.md are populated
+        if is_reflection and ctx_dir.is_dir():
+            exp_file = ctx_dir / "EXPERIENCE.md"
+            if not exp_file.is_file() or not exp_file.read_text(encoding="utf-8").strip():
+                exp_text = ""
+                m_exp = re.search(r"<experience>(.*?)</experience>", raw_output, re.DOTALL)
+                if m_exp:
+                    exp_text = m_exp.group(1).strip()
+                elif "## Task Fingerprint" in raw_output or "# Experience" in raw_output:
+                    exp_text = raw_output
+                if exp_text:
+                    exp_file.write_text(exp_text + "\n", encoding="utf-8")
+
+            idx_file = ctx_dir / "INDEX_ENTRY.md"
+            if not idx_file.is_file() or not idx_file.read_text(encoding="utf-8").strip():
+                for line in raw_output.splitlines():
+                    if line.strip().startswith("- **") or line.strip().startswith("* **"):
+                        idx_file.write_text(line.strip() + "\n", encoding="utf-8")
+                        break
 
         (work_dir / "proposer_output.log").write_text(raw_output, encoding="utf-8")
         notes = _extract_notes(raw_output)
@@ -203,29 +331,37 @@ class VertexGeminiProposer(Proposer):
             asyncio.run(coro)
 
     @staticmethod
-    def _apply_model_edits(harness_dir: Path, raw_output: str) -> bool:
+    def _apply_model_edits(
+        harness_dir: Path, raw_output: str, ctx_dir: Path | None = None
+    ) -> bool:
         """Parse structured schema edits [{"path": ..., "content": ...}] and apply to candidate tree."""
-        if not harness_dir.is_dir() or not raw_output:
+        if not raw_output:
             return False
 
         applied = False
-        json_blocks = re.findall(r"\[\s*\{.*?\}\s*\]", raw_output, re.DOTALL)
-        for block in json_blocks:
-            try:
-                items = json.loads(block)
-                if isinstance(items, list):
-                    for item in items:
-                        if isinstance(item, dict) and "path" in item and "content" in item:
-                            rel_path = item["path"].strip().lstrip("/")
-                            content = item["content"]
-                            target = harness_dir / rel_path
-                            target.parent.mkdir(parents=True, exist_ok=True)
-                            if target.suffix == ".py":
+        json_arrays = _extract_json_arrays(raw_output)
+        for items in json_arrays:
+            for item in items:
+                if isinstance(item, dict) and "path" in item and "content" in item:
+                    rel_path = item["path"].strip().lstrip("/")
+                    content = str(item["content"])
+                    if rel_path in ("EXPERIENCE.md", "INDEX_ENTRY.md") and ctx_dir is not None:
+                        ctx_dir.mkdir(parents=True, exist_ok=True)
+                        (ctx_dir / rel_path).write_text(content, encoding="utf-8")
+                        applied = True
+                        continue
+
+                    if harness_dir.is_dir():
+                        target = harness_dir / rel_path
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        if target.suffix == ".py":
+                            try:
                                 validate_script_ast(target, content, raise_on_error=True)
-                            target.write_text(content, encoding="utf-8")
-                            applied = True
-            except Exception as exc:
-                logger.debug("Failed to apply structured edit block: %s", exc)
+                            except Exception as ast_exc:
+                                logger.warning("Script AST validation failed for %s: %s", rel_path, ast_exc)
+                                continue
+                        target.write_text(content, encoding="utf-8")
+                        applied = True
 
         return applied
 
@@ -483,10 +619,27 @@ class VertexGeminiProposer(Proposer):
     @staticmethod
     def _extract_task_meta(task_md: str) -> dict[str, str]:
         """Extract generic task metadata and synthesized assets without canned numbers."""
-        script_name = "check_error_rate.py"
-        skill_slug = "error-rate-guard"
-        autotrigger_val = "when service error rate exceeds threshold or HTTP 5xx responses spike"
-        summary = "Monitor service error rates against baseline thresholds."
+        t_low = task_md.lower()
+        if "certificate" in t_low or "expired" in t_low:
+            script_name = "check_certificate_expiry.py"
+            skill_slug = "certificate-expiry-guard"
+            autotrigger_val = "when tls certificate expires or cert validation fails"
+            summary = "Monitor TLS certificates for expiration."
+        elif "schema" in t_low:
+            script_name = "check_payload_schema.py"
+            skill_slug = "payload-schema-guard"
+            autotrigger_val = "inbound request payload schema drift and validation"
+            summary = "Validate request payloads against expected schemas."
+        elif "distribution" in t_low:
+            script_name = "check_distribution_shift.py"
+            skill_slug = "distribution-shift-guard"
+            autotrigger_val = "statistical distribution shift across feature vectors"
+            summary = "Detect distribution shift in customer feature vectors."
+        else:
+            script_name = "check_error_rate.py"
+            skill_slug = "error-rate-guard"
+            autotrigger_val = "when service error rate exceeds threshold or HTTP 5xx responses spike"
+            summary = "Monitor service error rates against baseline thresholds."
         script_code = '''# Copyright 2026 Google LLC
 # SPDX-License-Identifier: Apache-2.0
 """Deterministic validator for service error rate thresholds."""

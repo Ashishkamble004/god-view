@@ -131,6 +131,11 @@ def evolve_specialist(
 
         # 1. Register archived evidence packs as fitness replay scenarios
         archived_cases = _collect_archived_evidence(ctx, domain)
+        if not task_id and archived_cases:
+            t_id = archived_cases[0]["task_id"]
+        else:
+            t_id = task_id or f"rsi_{domain}_{int(time.time())}"
+
         for case in archived_cases:
             adapter.register_scenario(case["task_id"], case)
 
@@ -243,8 +248,12 @@ def evolve_specialist(
             )
 
         winner = final_res.winner
+        h0 = final_res.h0
+        h0_score = getattr(h0, "score", 0.0) or 0.0
+        improved = (winner.score or 0.0) > h0_score
+
         adopted_path = final_res.adopted_path
-        if adopted_path is None and winner.passed:
+        if improved and adopted_path is None and winner.passed:
             from godview.harness.core.recursion import Ledger
 
             adopted_path = reflect_adoption(
@@ -259,15 +268,14 @@ def evolve_specialist(
                 work_dir=root_dir / "reflect",
             )
 
-        # 5. Hot-load winning tree and bump version in Firestore court_agents
-        new_version = 1
+        # 5. Hot-load winning tree and bump version in Firestore court_agents ONLY if improved
+        cur_version = 1
         if docs_store is not None and hasattr(docs_store, "get"):
             existing_doc = docs_store.get("court_agents", agent_id)
-            if existing_doc:
-                cur_v = existing_doc.get("living_model_version", 1)
-                new_version = cur_v + 1
-            else:
-                new_version = 2
+            if existing_doc and "living_model_version" in existing_doc:
+                cur_version = int(existing_doc["living_model_version"])
+
+        new_version = (cur_version + 1) if (improved and adopted_path is not None) else cur_version
 
         # Record evolution run across Firestore collections
         run_record = {
@@ -277,10 +285,11 @@ def evolve_specialist(
             "trigger": trigger,
             "winner_tag": winner.tag,
             "score": winner.score,
+            "h0_score": h0_score,
             "passed": winner.passed,
-            "notes": winner.notes,
+            "notes": winner.notes if improved else (winner.notes or "No improvement over seed h0"),
             "living_model_version": new_version,
-            "adopted_path": str(adopted_path) if adopted_path else None,
+            "adopted_path": str(adopted_path) if (improved and adopted_path) else None,
             "created_at_epoch": time.time(),
             "updated_at_epoch": time.time(),
         }
@@ -294,54 +303,55 @@ def evolve_specialist(
             except Exception as e:
                 logger.warning("Failed to record evolution in firestore: %s", e)
 
-        # Bump living_model_version on all matching court_agents docs for this domain
-        env_project = (
-            os.environ.get("GCP_PROJECT_ID", "").strip()
-            or os.environ.get("GOOGLE_CLOUD_PROJECT", "").strip()
-        )
-        candidate_ca_ids = {
-            agent_id,
-            domain,
-            f"{domain}__specialist",
-            f"{domain}__env",
-            f"{domain}__default",
-        }
-        if env_project:
-            candidate_ca_ids.add(f"{domain}__{env_project}")
-        if docs_store is not None and hasattr(docs_store, "list_docs"):
-            try:
-                for ca in docs_store.list_docs("court_agents"):
-                    if isinstance(ca, dict):
-                        ca_id = ca.get("_id") or ca.get("doc_id") or ca.get("id")
-                        ca_type = ca.get("agent_type")
-                        if ca_id and (ca_id.startswith(f"{domain}__") or ca_type == domain):
-                            candidate_ca_ids.add(ca_id)
-            except Exception:
-                pass
-
-        for ca_id in candidate_ca_ids:
-            if docs_store is not None and hasattr(docs_store, "set"):
+        # Bump living_model_version on matching court_agents docs ONLY IF IMPROVED
+        if improved and adopted_path is not None:
+            env_project = (
+                os.environ.get("GCP_PROJECT_ID", "").strip()
+                or os.environ.get("GOOGLE_CLOUD_PROJECT", "").strip()
+            )
+            candidate_ca_ids = {
+                agent_id,
+                domain,
+                f"{domain}__specialist",
+                f"{domain}__env",
+                f"{domain}__default",
+            }
+            if env_project:
+                candidate_ca_ids.add(f"{domain}__{env_project}")
+            if docs_store is not None and hasattr(docs_store, "list_docs"):
                 try:
-                    cur_doc = docs_store.get("court_agents", ca_id) if hasattr(docs_store, "get") else {}
-                    cur_v = (cur_doc.get("living_model_version") if isinstance(cur_doc, dict) else 1) or 1
-                    bump_v = max(cur_v + 1, new_version, 2)
-                    docs_store.set(
-                        "court_agents",
-                        ca_id,
-                        {
-                            "living_model_version": bump_v,
-                            "last_evolution_at": time.time(),
-                            "last_evolution_score": winner.score,
-                            "last_evolution_trigger": trigger,
-                        },
-                        merge=True,
-                    )
-                except Exception as e:
-                    logger.warning("Failed to bump court_agent %s version: %s", ca_id, e)
+                    for ca in docs_store.list_docs("court_agents"):
+                        if isinstance(ca, dict):
+                            ca_id = ca.get("_id") or ca.get("doc_id") or ca.get("id")
+                            ca_type = ca.get("agent_type")
+                            if ca_id and (ca_id.startswith(f"{domain}__") or ca_type == domain):
+                                candidate_ca_ids.add(ca_id)
+                except Exception:
+                    pass
+
+            for ca_id in candidate_ca_ids:
+                if docs_store is not None and hasattr(docs_store, "set"):
+                    try:
+                        cur_doc = docs_store.get("court_agents", ca_id) if hasattr(docs_store, "get") else {}
+                        cur_v = (cur_doc.get("living_model_version") if isinstance(cur_doc, dict) else 1) or 1
+                        bump_v = max(cur_v + 1, new_version, 2)
+                        docs_store.set(
+                            "court_agents",
+                            ca_id,
+                            {
+                                "living_model_version": bump_v,
+                                "last_evolution_at": time.time(),
+                                "last_evolution_score": winner.score,
+                                "last_evolution_trigger": trigger,
+                            },
+                            merge=True,
+                        )
+                    except Exception as e:
+                        logger.warning("Failed to bump court_agent %s version: %s", ca_id, e)
 
         # If CourtOrchestrator exists on ctx, hot-load into in-process specialist
         orchestrator = getattr(ctx, "court_orchestrator", None)
-        if orchestrator is not None and hasattr(orchestrator, "_in_process_specialists"):
+        if improved and orchestrator is not None and hasattr(orchestrator, "_in_process_specialists"):
             in_proc = orchestrator._in_process_specialists.get(domain)
             if in_proc is not None and adopted_path is not None:
                 new_harness_dir = adopted_path / "harness"
