@@ -108,14 +108,23 @@ def build_router(ctx: Any) -> APIRouter:
     operator_dep = _get_operator_dep(ctx)
 
     @router.get("/sentinels")
-    async def get_sentinels() -> dict[str, Any]:
-        """List all registered sentinels."""
-        return {
-            "sentinels": [
-                {**s.model_dump(mode="json", by_alias=True), "id": s.sentinel_id}
-                for s in engine.list_sentinels()
-            ]
-        }
+    async def get_sentinels(limit: int = 100) -> dict[str, Any]:
+        """List registered sentinels (capped for fast cockpit rendering)."""
+        capped = min(max(1, limit), 250)
+        now_iso = datetime.now(tz=UTC).isoformat()
+        all_snts = engine.list_sentinels()[:capped]
+        out_snts = []
+        for s in all_snts:
+            dumped = s.model_dump(mode="json", by_alias=True)
+            if not isinstance(dumped.get("last_result"), dict):
+                dumped["last_result"] = {
+                    "count": 0,
+                    "breached": False,
+                    "evaluated_at": dumped.get("compiled_at") or now_iso,
+                }
+            dumped["id"] = s.sentinel_id
+            out_snts.append(dumped)
+        return {"sentinels": out_snts}
 
     @router.post("/sentinels", dependencies=[Depends(operator_dep)])
     async def create_sentinel(payload: dict[str, Any]) -> dict[str, Any]:

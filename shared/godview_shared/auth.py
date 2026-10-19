@@ -399,6 +399,7 @@ class AuthService:
                 and not test_principal_hdr
                 and not request_or_token.headers.get("authorization")
                 and not request_or_token.headers.get("x-serverless-authorization")
+                and request_or_token.method in ("GET", "HEAD", "OPTIONS")
             ):
                 default_op = (
                     next(iter(sorted(self._allowed_operator_emails)), None)

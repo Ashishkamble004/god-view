@@ -356,11 +356,9 @@ class SpecialistTools:
                 "available_capabilities": avail_caps,
             }
 
-        return {
-            "status": "error",
-            "error": f"No executor registered for capability '{capability_id}'",
-            "available_capabilities": avail_caps,
-        }
+        from godview.sovereign.remediation.types import NoExecutorError
+
+        raise NoExecutorError(f"No executor registered for capability '{capability_id}'")
 
     async def invoke_capability_async(
         self, capability_id: str, args: dict[str, Any] | None = None
@@ -427,11 +425,9 @@ class SpecialistTools:
                 "available_capabilities": avail_caps,
             }
 
-        return {
-            "status": "error",
-            "error": f"No executor registered for capability '{capability_id}'",
-            "available_capabilities": avail_caps,
-        }
+        from godview.sovereign.remediation.types import NoExecutorError
+
+        raise NoExecutorError(f"No executor registered for capability '{capability_id}'")
 
     def get_business_context(self, service_id: str | None = None) -> dict[str, Any]:
         """Fetch discovered BusinessContext for a service."""

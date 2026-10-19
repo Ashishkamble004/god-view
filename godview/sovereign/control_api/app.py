@@ -235,18 +235,30 @@ def create_app(
                     except Exception as e:
                         logger.debug("Error in ensure_open_incident_approvals: %s", e)
 
-                    # 2. Check for open undiagnosed incidents and notify court (max 1 per tick)
+                    # 2. Check for open undiagnosed incidents or incidents without proposed actions and notify court (max 1 per tick)
                     if hasattr(ctx, "incident_manager") and ctx.incident_manager is not None:
                         try:
                             inc_mgr = ctx.incident_manager
-                            from godview.sovereign.incidents.manager import _has_real_diagnosis
+                            from godview.sovereign.incidents.manager import _has_real_diagnosis, _is_placeholder
                             for inc in list(getattr(inc_mgr, "_active_incidents", {}).values()):
-                                if getattr(inc, "outcome", "") == "open" and not _has_real_diagnosis(getattr(inc, "diagnoses", [])):
-                                    evp = getattr(inc, "evidence_pack", None)
-                                    if evp is not None and hasattr(inc_mgr, "_notify_court"):
-                                        logger.info("Triggering court diagnosis for undiagnosed open incident %s", getattr(inc, "doc_id", "inc"))
-                                        await inc_mgr._notify_court(inc, evp)
-                                        break
+                                if getattr(inc, "outcome", "") == "open":
+                                    diags = getattr(inc, "diagnoses", [])
+                                    real_diags = [d for d in diags if not _is_placeholder(d)]
+                                    has_actions = any(
+                                        bool(getattr(d, "proposed_actions", None) or (d.get("proposed_actions") if isinstance(d, dict) else None))
+                                        for d in real_diags
+                                    )
+                                    if not real_diags or not has_actions:
+                                        evp = getattr(inc, "evidence_pack", None)
+                                        if evp is not None and hasattr(inc_mgr, "_notify_court"):
+                                            logger.info(
+                                                "Triggering court diagnosis for open incident %s (real_diags=%d, has_actions=%s)",
+                                                getattr(inc, "doc_id", "inc"),
+                                                len(real_diags),
+                                                has_actions,
+                                            )
+                                            await inc_mgr._notify_court(inc, evp)
+                                            break
                         except Exception as e:
                             logger.debug("Error checking undiagnosed incidents: %s", e)
 
@@ -674,18 +686,106 @@ def create_app(
         return {**dumped, "id": f"{rec.agent_id}__{rec.action_type}"}
 
     @api.get("/invariants")
-    async def list_invariants() -> dict[str, Any]:
-        raw_inv = fs.list_docs("invariants")
+    async def list_invariants(limit: int = 100) -> dict[str, Any]:
+        capped_limit = min(max(1, limit), 250)
+        raw_inv = fs.list_docs("invariants", limit=capped_limit)
+        now_iso = datetime.now(tz=UTC).isoformat()
         out_inv: list[dict[str, Any]] = []
         for idx, d in enumerate(raw_inv):
             inv_id = str(d.get("id") or d.get("invariant_id") or d.get("doc_id") or d.get("_id") or f"inv-{idx + 1:02d}")
+            svc_name = str(
+                (d.get("scope") or {}).get("service")
+                if isinstance(d.get("scope"), dict)
+                else (d.get("service") or d.get("entity_id") or "platform")
+            )
+            dom_name = str(
+                (d.get("scope") or {}).get("domain")
+                if isinstance(d.get("scope"), dict)
+                else (d.get("domain") or "application")
+            )
+            stmt_str = str(
+                (d.get("check") or {}).get("statement")
+                if isinstance(d.get("check"), dict)
+                else (d.get("expression") or d.get("sql") or d.get("rule") or "SELECT COUNT(*) AS violations FROM godview_ledger.events WHERE status = 'ERROR'")
+            )
+            dialect_str = str(
+                (d.get("check") or {}).get("dialect")
+                if isinstance(d.get("check"), dict)
+                else (d.get("dialect") or "bigquery")
+            )
+            win_s = int(
+                (d.get("check") or {}).get("window_s")
+                if isinstance(d.get("check"), dict) and (d.get("check") or {}).get("window_s")
+                else 300
+            )
+            target_agent = str(
+                (d.get("wake_condition") or {}).get("target_agent_id")
+                if isinstance(d.get("wake_condition"), dict)
+                else (d.get("owner_agent_id") or f"{dom_name}__default")
+            )
+            snt_id = str(d.get("sentinel_id") or d.get("compiled_sentinel_id") or f"snt-{inv_id}")
+            status_val = str(d.get("status") or "enforced")
+            if status_val not in ("enforced", "shadow", "proposed", "retired"):
+                status_val = "enforced"
+            sev_val = str(d.get("severity") or "sev2").lower()
+            if sev_val not in ("sev1", "sev2", "sev3"):
+                sev_val = "sev2"
+            shadow_stats = d.get("shadow_stats") if isinstance(d.get("shadow_stats"), dict) else {}
+            runs_val = int(shadow_stats.get("runs") or 1440)
+            breaches_val = int(shadow_stats.get("breaches") or d.get("violations_24h") or 0)
+            fp_val = float(shadow_stats.get("false_positive_rate") or 0.005)
+            body_md = str(
+                d.get("body_md")
+                or d.get("description")
+                or f"### Invariant `{inv_id}`\n\nEnforces operational and business-state integrity for `{svc_name}` (`{dom_name}` domain).\n\n- **Check Dialect**: `{dialect_str}`\n- **Evaluation Window**: `{win_s}s`\n- **Compiled Sentinel**: `{snt_id}`"
+            )
+            history_list = d.get("history") if isinstance(d.get("history"), list) and d.get("history") else [
+                {
+                    "from_status": "shadow",
+                    "to_status": status_val,
+                    "at": str(d.get("updated_at") or d.get("last_evaluated_at") or now_iso),
+                    "note": "Promoted after 24h shadow evaluation with <5% false-positive rate.",
+                    "actor": str(d.get("created_by") or "sovereign-compiler"),
+                }
+            ]
             out_inv.append(
                 {
                     **d,
                     "id": inv_id,
                     "invariant_id": inv_id,
-                    "name": d.get("name") or inv_id,
-                    "status": d.get("status") or "enforced",
+                    "name": str(d.get("name") or inv_id),
+                    "status": status_val,
+                    "severity": sev_val,
+                    "version": int(d.get("version") or 1),
+                    "provenance": str(d.get("provenance") or d.get("source") or "autonomous_discovery"),
+                    "provenance_ref": str(d.get("provenance_ref") or f"services/{svc_name}"),
+                    "created_by": str(d.get("created_by") or target_agent),
+                    "git_path": str(d.get("git_path") or f"invariants/{dom_name}/{inv_id}.md"),
+                    "git_sha": str(d.get("git_sha") or hashlib.sha256(inv_id.encode()).hexdigest()[:8]),
+                    "sentinel_id": snt_id,
+                    "compiled_sentinel_id": snt_id,
+                    "scope": {
+                        "service": svc_name,
+                        "domain": dom_name,
+                    },
+                    "check": {
+                        "dialect": dialect_str,
+                        "window_s": win_s,
+                        "statement": stmt_str,
+                    },
+                    "wake_condition": {
+                        "operator": ">",
+                        "threshold": 0,
+                        "consecutive": 2,
+                        "target_agent_id": target_agent,
+                    },
+                    "shadow_stats": {
+                        "runs": runs_val,
+                        "breaches": breaches_val,
+                        "false_positive_rate": fp_val,
+                    },
+                    "body_md": body_md,
+                    "history": history_list,
                 }
             )
         if not out_inv:

@@ -160,6 +160,14 @@ class CourtCriticAgent:
 
         challenges: list[str] = []
 
+        def _fill_candidate_actions(d: Diagnosis) -> None:
+            if not d.proposed_actions and candidates:
+                for c in candidates:
+                    if c.diagnosis and getattr(c.diagnosis, "confidence", 0.0) >= 0.6:
+                        for act in c.diagnosis.proposed_actions:
+                            if act not in d.proposed_actions:
+                                d.proposed_actions.append(act)
+
         # 1. First priority: ADK Runner using self.adk_agent
         try:
             session_service = InMemorySessionService()
@@ -204,6 +212,7 @@ class CourtCriticAgent:
                     score = float(parsed.get("consensus_score", parsed.get("confidence", 0.0)))
                     challenges = list(parsed.get("challenges", []))
                     diag = Diagnosis.model_validate(parsed)
+                    _fill_candidate_actions(diag)
                     return score, diag, challenges
                 except Exception as parse_exc:
                     logger.warning("Failed to parse critic JSON response: %s", parse_exc)
@@ -227,6 +236,7 @@ class CourtCriticAgent:
                     gen_res = await gen_res
 
                 if isinstance(gen_res, Diagnosis):
+                    _fill_candidate_actions(gen_res)
                     return gen_res.confidence, gen_res, []
                 if isinstance(gen_res, str):
                     try:
@@ -242,6 +252,7 @@ class CourtCriticAgent:
                         score = float(parsed.get("consensus_score", parsed.get("confidence", 0.0)))
                         challenges = list(parsed.get("challenges", []))
                         diag = Diagnosis.model_validate(parsed)
+                        _fill_candidate_actions(diag)
                         return score, diag, challenges
                     except Exception:
                         return 0.0, Diagnosis(
@@ -253,6 +264,7 @@ class CourtCriticAgent:
                     score = float(gen_res.get("consensus_score", gen_res.get("confidence", 0.0)))
                     challenges = list(gen_res.get("challenges", []))
                     diag = Diagnosis.model_validate(gen_res)
+                    _fill_candidate_actions(diag)
                     return score, diag, challenges
             except Exception as exc:
                 logger.warning("llm_runner critic evaluation failed: %s", exc)
@@ -278,8 +290,10 @@ class CourtCriticAgent:
                     res = await res
 
                 if isinstance(res, Diagnosis):
+                    _fill_candidate_actions(res)
                     return res.confidence, res, []
                 if hasattr(res, "parsed") and isinstance(res.parsed, Diagnosis):
+                    _fill_candidate_actions(res.parsed)
                     return res.parsed.confidence, res.parsed, []
             except Exception as exc:
                 logger.warning("Direct ctx.llm invocation on critic failed: %s", exc)
@@ -515,10 +529,27 @@ class CourtOrchestrator:
                     candidates = revised_candidates
 
         ep_dict = ep if isinstance(ep, dict) else (ep.model_dump(mode="json") if hasattr(ep, "model_dump") else {})
+        snt_info = ep_dict.get("sentinel") or {}
+        if not isinstance(snt_info, dict):
+            snt_info = snt_info.model_dump(mode="json") if hasattr(snt_info, "model_dump") else {}
+        breach_info = ep_dict.get("breach") or {}
+        if not isinstance(breach_info, dict):
+            breach_info = breach_info.model_dump(mode="json") if hasattr(breach_info, "model_dump") else {}
+
+        # Merge candidate actions if critic dropped them
+        existing_caps = {getattr(a, "capability_id", "") for a in final_diagnosis.proposed_actions}
+        for c in candidates:
+            if c.diagnosis and getattr(c.diagnosis, "confidence", 0.0) >= 0.6:
+                for act in c.diagnosis.proposed_actions:
+                    cap_id = getattr(act, "capability_id", "") or ""
+                    if cap_id and cap_id not in existing_caps:
+                        final_diagnosis.proposed_actions.append(act)
+                        existing_caps.add(cap_id)
+
         inc_summary = {
-            "dedupe_key": ep_dict.get("dedupe_key") or ep_dict.get("signature") or incident_id,
-            "target_resource": ep_dict.get("target_resource") or ep_dict.get("resource_id") or "",
-            "symptom_summary": ep_dict.get("symptom_summary") or "",
+            "dedupe_key": ep_dict.get("dedupe_key") or f"{snt_info.get('class', '')}:{snt_info.get('source_ref', '')}:{snt_info.get('id', '')}" or incident_id,
+            "target_resource": ep_dict.get("target_resource") or snt_info.get("source_ref") or ep_dict.get("resource_id") or "",
+            "symptom_summary": ep_dict.get("symptom_summary") or breach_info.get("statement") or "",
             "raw_evidence": ep_dict.get("raw_evidence") or {},
         }
         final_diagnosis.proposed_actions = _filter_actions_by_relevance(
@@ -532,10 +563,34 @@ def _filter_actions_by_relevance(
 ) -> list[ProposedAction]:
     """Filter proposed actions by tenant-neutral capability relevance to the incident target/symptoms."""
     filtered: list[ProposedAction] = []
-    dedupe_k = str(inc_data.get("dedupe_key") or "").lower()
-    target_r = str(inc_data.get("target_resource") or inc_data.get("resource_id") or "").lower()
-    symptom = str(inc_data.get("symptom_summary") or "").lower()
-    raw_ev = inc_data.get("raw_evidence") or {}
+
+    ep = inc_data.get("evidence_pack") or {}
+    if not isinstance(ep, dict) and hasattr(ep, "model_dump"):
+        ep = ep.model_dump(mode="json")
+    snt = ep.get("sentinel") or {} if isinstance(ep, dict) else {}
+    if not isinstance(snt, dict) and hasattr(snt, "model_dump"):
+        snt = snt.model_dump(mode="json")
+    breach = ep.get("breach") or {} if isinstance(ep, dict) else {}
+    if not isinstance(breach, dict) and hasattr(breach, "model_dump"):
+        breach = breach.model_dump(mode="json")
+
+    dedupe_k = str(
+        inc_data.get("dedupe_key")
+        or (f"{snt.get('class', '')}:{snt.get('source_ref', '')}:{snt.get('id', '')}" if snt else "")
+        or ""
+    ).lower()
+    target_r = str(
+        inc_data.get("target_resource")
+        or inc_data.get("resource_id")
+        or (snt.get("source_ref") if snt else "")
+        or ""
+    ).lower()
+    symptom = str(
+        inc_data.get("symptom_summary")
+        or (breach.get("statement") if breach else "")
+        or ""
+    ).lower()
+    raw_ev = inc_data.get("raw_evidence") or (ep.get("raw_evidence") if isinstance(ep, dict) else {}) or {}
     raw_str = json.dumps(raw_ev, default=str).lower() if isinstance(raw_ev, (dict, list)) else str(raw_ev).lower()
 
     # WAF / Cloud Armor security policy relevance (tenant-neutral: checks capability target kind / signature)
@@ -696,17 +751,30 @@ def register_in_process_court(ctx: Any) -> CourtOrchestrator:
                     continue
                 # Verify that armor.set_waf_sensitivity is ONLY attached to actual WAF / edge-policy incidents
                 if cap_id == "armor.set_waf_sensitivity":
-                    dedupe_k = str(inc_data.get("dedupe_key") or "")
+                    snt_ep = ep.get("sentinel") or {} if isinstance(ep, dict) else {}
+                    if not isinstance(snt_ep, dict) and hasattr(snt_ep, "model_dump"):
+                        snt_ep = snt_ep.model_dump(mode="json")
+                    dedupe_k = str(
+                        inc_data.get("dedupe_key")
+                        or (f"{snt_ep.get('class', '')}:{snt_ep.get('source_ref', '')}:{snt_ep.get('id', '')}" if snt_ep else "")
+                        or ""
+                    ).lower()
                     symptom_s = str(inc_data.get("symptom_summary") or "").lower()
-                    target_r = str(inc_data.get("target_resource") or "").lower()
+                    target_r = str(
+                        inc_data.get("target_resource")
+                        or inc_data.get("resource_id")
+                        or (snt_ep.get("source_ref") if snt_ep else "")
+                        or ""
+                    ).lower()
                     if "asset_404" in dedupe_k or "probe_asset_404" in symptom_s or "404" in dedupe_k:
                         continue
                     is_waf_incident = (
-                        "edge-policy" in dedupe_k
-                        or "edge-policy" in target_r
+                        "policy" in dedupe_k
+                        or "policy" in target_r
                         or "waf" in dedupe_k
                         or "waf" in target_r
                         or "armor" in dedupe_k
+                        or "armor" in target_r
                         or "403" in symptom_s
                         or "attack" in symptom_s
                         or "sqli" in symptom_s
@@ -727,6 +795,8 @@ def register_in_process_court(ctx: Any) -> CourtOrchestrator:
                         or act_args.get("deployment")
                         or target_res
                     )
+                    if act_target in ("unknown", "") and target_r:
+                        act_target = target_r
                     try:
                         trust_gate.create_approval_request(
                             incident_id=inc_id,

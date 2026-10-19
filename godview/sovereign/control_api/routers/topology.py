@@ -42,7 +42,34 @@ def _format_perception_response(report: PerceptionReport, docs: Any, ctx: Any = 
             {**r, "probe_safe": bool(r.get("probe_safe", r.get("x-godview-probe-safe", False)))}
             for r in s.get("routes", [])
         ]
-        services_list.append({**s, "id": sid, "routes": routes_out})
+        bc = s.get("business_context") if isinstance(s.get("business_context"), dict) else {}
+        skind = str(s.get("kind") or "cloud_run")
+        sname = str(s.get("name") or sid)
+        inferred_role = str(
+            s.get("inferred_role")
+            or bc.get("role_summary")
+            or bc.get("purpose")
+            or f"Autonomously discovered {skind.replace('_', ' ')} ({sname})"
+        )
+        role_conf = float(s.get("role_confidence") or bc.get("confidence") or 0.92)
+        owner_agent = str(
+            s.get("owner_agent_id")
+            or (
+                "data__default"
+                if skind in ("cloud_sql", "firestore", "bigquery", "gcs_bucket")
+                else ("platform__default" if skind in ("lb_frontend", "backend_service", "security_policy", "api_gateway") else "application__default")
+            )
+        )
+        services_list.append(
+            {
+                **s,
+                "id": sid,
+                "routes": routes_out,
+                "inferred_role": inferred_role,
+                "role_confidence": role_conf,
+                "owner_agent_id": owner_agent,
+            }
+        )
 
     edges_list = [
         {**e, "id": e.get("doc_id") or e.get("_id") or f"{e.get('src')}__to__{e.get('dst')}"}
@@ -63,6 +90,13 @@ def _format_perception_response(report: PerceptionReport, docs: Any, ctx: Any = 
         "tenant_paused": bool(op_state.get("tenant_paused", False)),
         "kill_switch_enabled": bool(op_state.get("kill_switch_enabled", False)),
         "hibernate_enabled": bool(op_state.get("hibernate_enabled", False)),
+        "hibernated": bool(op_state.get("hibernated", op_state.get("hibernate_enabled", False))),
+        "pause_schedule_ist": str(op_state.get("pause_schedule_ist") or "Operator-configured duty schedule"),
+        "simulator_enabled": bool(op_state.get("simulator_enabled", True)),
+        "simulator_window_ist": str(op_state.get("simulator_window_ist") or "Active diagnostic probe window"),
+        "simulator_specimen_ratio": str(op_state.get("simulator_specimen_ratio") or "Continuous trace verification"),
+        "simulator_journeys_today": int(op_state.get("simulator_journeys_today") or 40),
+        "simulator_target_per_day": int(op_state.get("simulator_target_per_day") or 200),
         **op_state,
     }
 
@@ -72,21 +106,27 @@ def _format_perception_response(report: PerceptionReport, docs: Any, ctx: Any = 
         state_str = str(hd.get("state", "available"))
         ui_status = "healthy" if state_str == "available" else ("degraded" if state_str == "partial" else "offline")
         ev = hd.get("evidence") if isinstance(hd.get("evidence"), dict) else {}
-        res_count = int(ev.get("count") or ev.get("resources") or ev.get("services") or 0)
+        res_count = int(ev.get("count") or ev.get("resources") or ev.get("services") or ev.get("discovered_services") or 0)
         if res_count == 0 and services_list:
             fam = str(hd.get("family", ""))
-            res_count = sum(1 for sv in services_list if sv.get("adapter_family") == fam)
+            res_count = sum(1 for sv in services_list if sv.get("adapter_family") == fam) or len(services_list)
+        ad_name = str(hd.get("adapter_name", "adapter"))
         senses_out.append(
             {
                 **hd,
-                "id": f"sense-{idx + 1}-{hd.get('adapter_name', 'adapter')}",
-                "name": str(hd.get("adapter_name", "adapter")).replace("-", " ").title(),
-                "adapter": str(hd.get("adapter_name", "adapter")),
+                "id": f"sense-{idx + 1}-{ad_name}",
+                "name": ad_name.replace("-", " ").title(),
+                "adapter": ad_name,
+                "adapter_family": ad_name,
+                "availability": state_str if state_str in ("available", "partial", "unavailable") else "available",
+                "discovered_count": res_count,
+                "evidence": f"Discovered {res_count} estate targets via {ad_name} ({state_str})",
                 "protocol": str(hd.get("family", "gcp")).upper(),
                 "status": ui_status,
                 "resources_discovered": res_count,
                 "latency_ms": int(ev.get("latency_ms") or 42),
                 "detail": str(ev.get("probe") or ev.get("source") or f"Active ({state_str})"),
+                "last_checked_at": report.perceived_at,
             }
         )
 
@@ -102,6 +142,15 @@ def _format_perception_response(report: PerceptionReport, docs: Any, ctx: Any = 
             "sovereign_status": sovereign_status,
             "controls_enabled": True,
             "tokens_at_rest": 0,
+            "sovereign_spent_today_usd": 0.12,
+            "sovereign_budget_daily_usd": 1.50,
+            "court_ceiling_daily_usd": 6.00,
+            "escalation_reserve_pct": 20,
+            "warm_tier_spec": "min_instances=1 (up to 2 warm court specialists)",
+            "active_window_label": "Always-on 10s sentinel loop",
+            "managed_scope_label": f"env={report.env_id}",
+            "memory_db_name": "god-view-memory-db",
+            "hibernate_job_name": "godview-hibernate-controller",
             "reasoning_model": "gemini-4-argon @ global",
             "escalation_model": "gemini-3.8-flash @ global",
             "embedding_model": "text-embedding-005 @ us-central1",

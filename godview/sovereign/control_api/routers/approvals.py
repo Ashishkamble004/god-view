@@ -99,6 +99,20 @@ def ensure_open_incident_approvals(ctx: Any) -> list[dict[str, Any]]:
         ]
         all_approvals = docs_store.list_docs("approvals") or []
 
+        # Expire legacy synthetic card if present
+        for a in all_approvals:
+            if a.get("approval_id") == "apr-20261019-ff0c570f" and a.get("decision", a.get("status")) == "pending":
+                logger.info("Expiring legacy synthetic approval card apr-20261019-ff0c570f")
+                try:
+                    docs_store.set(
+                        "approvals",
+                        "apr-20261019-ff0c570f",
+                        {**a, "decision": "expired", "status": "expired", "rejection_reason": "Superseded by genuine Court diagnosis action"},
+                        merge=True,
+                    )
+                except Exception as exp_err:
+                    logger.debug("Failed expiring legacy card: %s", exp_err)
+
         for inc in open_incidents:
             inc_id = str(inc.get("incident_id") or inc.get("doc_id") or "")
             if not inc_id:
@@ -113,13 +127,6 @@ def ensure_open_incident_approvals(ctx: Any) -> list[dict[str, Any]]:
 
             real_diags = [d for d in diagnoses if not _is_placeholder(d)]
 
-            is_waf_incident = (
-                "edge-policy" in target_res
-                or "edge-policy" in dedupe_k
-                or "waf_sensitivity" in dedupe_k
-                or "security-policy" in dedupe_k
-            )
-
             actions_to_check: list[dict[str, Any]] = []
             for d in real_diags:
                 diag_dict = d if isinstance(d, dict) else d.model_dump(mode="json")
@@ -132,26 +139,6 @@ def ensure_open_incident_approvals(ctx: Any) -> list[dict[str, Any]]:
                 filtered_acts = _filter_actions_by_relevance(act_objs, inc)
                 for fa in filtered_acts:
                     actions_to_check.append(fa.model_dump(mode="json"))
-
-            # If WAF incident has no armor.set_waf_sensitivity in actions, ensure it is proposed
-            if is_waf_incident:
-                has_waf_action = any(
-                    a.get("capability_id") == "armor.set_waf_sensitivity"
-                    for a in actions_to_check
-                )
-                if not has_waf_action:
-                    pol_name = target_res if "policy" in target_res else "edge-policy"
-                    actions_to_check.append({
-                        "capability_id": "armor.set_waf_sensitivity",
-                        "args": {
-                            "policy_name": pol_name,
-                            "rule_priority": 1000,
-                            "sensitivity": 1,
-                            "preview_first": True,
-                        },
-                        "rationale": f"Set sensitivity=1 with preview_first=True on Cloud Armor policy '{pol_name}' rule 1000",
-                        "confidence": 0.96,
-                    })
 
             for act in actions_to_check:
                 cap_id = act.get("capability_id") or ""

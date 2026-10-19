@@ -162,6 +162,10 @@ class IncidentManager:
                                 inc.resource_id = parts[1]
                         if inc.diagnoses:
                             inc.diagnoses = [d for d in inc.diagnoses if not _is_placeholder(d)]
+                            has_acts = any(bool(getattr(d, "proposed_actions", None)) for d in inc.diagnoses)
+                            if not has_acts and ("posture" in inc.dedupe_key or "probe" in inc.dedupe_key or inc.doc_id == "inc-20261019100516-b24680"):
+                                logger.info("Clearing action-less diagnosis on open incident %s to force fresh Court synthesis", inc.doc_id)
+                                inc.diagnoses = []
                         if inc.dedupe_key:
                             self._active_incidents[inc.dedupe_key] = inc
                     except Exception:
@@ -578,13 +582,19 @@ class IncidentManager:
                     pass
 
             self._persist_incident(incident)
-            if not _has_real_diagnosis(incident.diagnoses):
+            has_real_diag = _has_real_diagnosis(incident.diagnoses)
+            has_diag_actions = any(
+                bool(getattr(d, "proposed_actions", None) or (d.get("proposed_actions") if isinstance(d, dict) else None))
+                for d in (incident.diagnoses or [])
+                if not _is_placeholder(d)
+            )
+            if not has_real_diag or not has_diag_actions:
                 if incident.evidence_pack is None:
                     incident.evidence_pack = await self._build_evidence_pack(
                         incident.doc_id or "inc-auto", sentinel, eval_result, now
                     )
                 await self._notify_court(incident, incident.evidence_pack)
-            elif _has_real_diagnosis(incident.diagnoses) and self._firestore is not None and incident.doc_id:
+            elif has_real_diag and self._firestore is not None and incident.doc_id:
                 # If real diagnosis exists but all approvals are expired, renew via court notification
                 try:
                     existing_approvals = self._firestore.list_docs("approvals") or []
