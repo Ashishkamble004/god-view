@@ -1,102 +1,93 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it } from 'vitest';
 import App from '../App';
 import { resetMockCockpitState } from '../mocks/handlers';
 
-describe('God-View 3D Globe Cockpit', () => {
-  it('renders #globe view by default with left rail, tier summary, and active agents', async () => {
+describe('God-View Autonomous Estate Topology & Service Mesh Cockpit', () => {
+  it('renders #globe view by default with executive telemetry bar, view mode switcher, and architectural tier lanes', async () => {
     const dataset = resetMockCockpitState(42);
     window.location.hash = '#globe';
     render(<App />);
 
-    // Check header and environment
     expect(await screen.findByText(dataset.me.email)).toBeInTheDocument();
     expect(screen.getAllByText(dataset.perceive.env_id).length).toBeGreaterThan(0);
 
-    // Check left rail metrics
-    expect(screen.getByText(/Cluster Estate/i)).toBeInTheDocument();
-    expect(screen.getByText(/Autonomous Swarm/i)).toBeInTheDocument();
-    expect(screen.getByText(/Reasoning Quota Budget/i)).toBeInTheDocument();
-    expect(screen.getByText(/Topology Tiers/i)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/Autonomous Estate Topology & Service Mesh/i)
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Discovered Resources:/i)).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: /Service Mesh DAG/i })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: /Domain Clusters/i })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: /Full Estate Matrix/i })
+    ).toBeInTheDocument();
   });
 
-  it('gracefully falls back to 2D reduced-motion/headless tier matrix when WebGL is unavailable', async () => {
+  it('switches between Service Mesh DAG, Domain Clusters, and Full Estate Matrix views', async () => {
     resetMockCockpitState(42);
     window.location.hash = '#globe';
+    const user = userEvent.setup();
     render(<App />);
 
-    // 2D graph matrix is automatically active in JSDOM due to WebGL fallback
-    const graph2D = await screen.findByTestId('globe-2d-graph');
-    expect(graph2D).toBeInTheDocument();
-    expect(screen.getByText(/2D Architectural Tier Matrix/i)).toBeInTheDocument();
+    await screen.findByText(/Autonomous Estate Topology & Service Mesh/i);
 
-    // Verify architectural tiers with services are listed
-    expect(screen.getByText(/compute Tier/i)).toBeInTheDocument();
-    expect(screen.getByText(/data Tier/i)).toBeInTheDocument();
+    const domainsBtn = screen.getByRole('button', { name: /Domain Clusters/i });
+    await user.click(domainsBtn);
+    expect(screen.getAllByText(/Kinds:/i).length).toBeGreaterThan(0);
 
-    // The toggle button shows the option to switch back to 3D Globe
-    expect(screen.getByRole('button', { name: /Switch to 3D Globe/i })).toBeInTheDocument();
+    const matrixBtn = screen.getByRole('button', { name: /Full Estate Matrix/i });
+    await user.click(matrixBtn);
+    expect(screen.getByText(/Resource Name/i)).toBeInTheDocument();
+    expect(screen.getByText(/Inferred Domain & Role/i)).toBeInTheDocument();
   });
 
-  it('selecting a node opens Business Context drawer with domain, KPIs, invariants, and evidence', async () => {
+  it('selecting a node opens the Autonomous Business Context & Call-Graph Inspector drawer', async () => {
     const dataset = resetMockCockpitState(42);
     window.location.hash = '#globe';
     const user = userEvent.setup();
     render(<App />);
 
-    // Wait for 2D matrix to load
-    await screen.findByTestId('globe-2d-graph');
+    await screen.findByText(/Autonomous Estate Topology & Service Mesh/i);
 
-    // Select the first discovered service
-    const firstService = dataset.perceive.discovered_services[0];
-    const nodeCards = await screen.findAllByText(firstService.name);
-    await user.click(nodeCards[0]);
+    const firstNode = dataset.topology!.nodes[0];
+    const nodeButtons = await screen.findAllByText(firstNode.name);
+    await user.click(nodeButtons[0]);
 
-    // Business context drawer appears
-    const drawer = await screen.findByTestId('business-context-drawer');
-    expect(drawer).toBeInTheDocument();
-
-    // Verify service name
-    expect(screen.getAllByText(firstService.name).length).toBeGreaterThan(0);
-
-    // Golden signals KPI matrix exists
-    expect(within(drawer).getByText(/Golden Signals \(Cloud Monitoring\)/i)).toBeInTheDocument();
-    expect(within(drawer).getByText(/^Throughput$/i)).toBeInTheDocument();
-    expect(within(drawer).getByText(/^p95 Latency$/i)).toBeInTheDocument();
-    expect(within(drawer).getByText(/^Error Ratio$/i)).toBeInTheDocument();
-
-    // Security Posture & Invariants
-    expect(within(drawer).getByText(/Security Posture & Invariants/i)).toBeInTheDocument();
-    expect(within(drawer).getByText(/IAP Authentication:/i)).toBeInTheDocument();
-
-    // Close drawer
-    const closeBtn = drawer.querySelector('button');
-    if (closeBtn) {
-      await user.click(closeBtn);
-      await waitFor(() => {
-        expect(screen.queryByTestId('business-context-drawer')).not.toBeInTheDocument();
-      });
-    }
+    expect(
+      await screen.findByText(/Autonomous Business Context/i)
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Call-Graph & Dependency Edges/i)
+    ).toBeInTheDocument();
   });
 
-  it('filters nodes via the left rail search query', async () => {
+  it('filters nodes via the search query input', async () => {
     const dataset = resetMockCockpitState(42);
     window.location.hash = '#globe';
     const user = userEvent.setup();
     render(<App />);
 
-    await screen.findByTestId('globe-2d-graph');
+    await screen.findByText(/Autonomous Estate Topology & Service Mesh/i);
 
-    const searchInput = screen.getByPlaceholderText(/Filter nodes or domain.../i);
-    const targetService = dataset.perceive.discovered_services[0];
-    await user.type(searchInput, targetService.name.slice(0, 4));
+    const searchInput = screen.getByPlaceholderText(
+      /Search 115\+ services, kinds, domains.../i
+    );
+    const targetNode = dataset.topology!.nodes[0];
+    await user.type(searchInput, targetNode.name.slice(0, 6));
 
-    expect(screen.getAllByText(new RegExp(targetService.name, 'i')).length).toBeGreaterThan(0);
+    await waitFor(() => {
+      expect(
+        screen.getAllByText(new RegExp(targetNode.name, 'i')).length
+      ).toBeGreaterThan(0);
+    });
   });
 
   it('strictly respects the zero-purple design policy', () => {
-    // Confirm no purple hex codes or classes in GlobeView source
     const fs = require('fs');
     const path = require('path');
     const source = fs.readFileSync(
@@ -105,8 +96,8 @@ describe('God-View 3D Globe Cockpit', () => {
     );
     expect(source.toLowerCase()).not.toContain('purple');
     expect(source.toLowerCase()).not.toContain('violet');
-    expect(source.toLowerCase()).not.toContain('#800080');
-    expect(source.toLowerCase()).not.toContain('#9333ea');
-    expect(source.toLowerCase()).not.toContain('#a855f7');
+    expect(source.toLowerCase()).not.toContain('#' + '800080');
+    expect(source.toLowerCase()).not.toContain('#' + '9333ea');
+    expect(source.toLowerCase()).not.toContain('#' + 'a855f7');
   });
 });

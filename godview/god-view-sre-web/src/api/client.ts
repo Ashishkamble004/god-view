@@ -472,12 +472,17 @@ export const cockpitApi = {
       partial.me = meRes.value;
       anySucceeded = true;
     } else {
-      partial.me = {
-        principal: 'accounts.google.com:operator@godview.local',
-        email: 'operator@godview.local',
-        role: 'Platform Owner',
-        iap_authenticated: true,
-      };
+      const meErr = toCockpitError(meRes.reason, '/api/v1/me');
+      if (meErr.code === 'IAP_SESSION_EXPIRED' || meErr.status === 401) {
+        recordErr('me', meRes.reason, '/api/v1/me');
+      } else {
+        partial.me = {
+          principal: 'accounts.google.com:operator@godview.local',
+          email: 'operator@godview.local',
+          role: 'Platform Owner',
+          iap_authenticated: true,
+        };
+      }
     }
 
     if (perceiveRes.status === 'fulfilled') {
