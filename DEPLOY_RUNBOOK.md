@@ -62,8 +62,8 @@
 | `ai-customer-simulator` | Cloud Run (`us-central1`, port 8080) | `ai-customer-simulator` | `agents-verifier` PASS | `us-central1-docker.pkg.dev/general-ak/god-view-containers/ai-customer-simulator@sha256:3bbaf3d170e67cc735944a55c95a6d262661c6e133ec4f76ca3b4d0992245b98` | `ai-customer-simulator-00002-2x7` | `https://ai-customer-simulator-mcj3w7ujpq-uc.a.run.app` (INTERNAL) | **Deployed & Serving (Tenant Frozen)** |
 | `customer-loan-portal-web` | Cloud Run (`us-central1`, port 8080) | `frontends-tenant` | `frontend-verifier` PASS | `us-central1-docker.pkg.dev/general-ak/god-view-containers/customer-loan-portal-web@sha256:01d710e41e20a1358f82ca95e250c7d7d774cc8e404d1d5cd65d5696b9c3d7c7` | `customer-loan-portal-web-00002-9vt` | `https://customer-loan-portal-web-mcj3w7ujpq-uc.a.run.app` (`https://cymbal.ak-demos.com`) | **Deployed & Serving (Tenant Frozen)** |
 | `internal-bank-los-web` | Cloud Run (`us-central1`, port 8080) | `frontends-tenant` | `frontend-verifier` PASS | `us-central1-docker.pkg.dev/general-ak/god-view-containers/internal-bank-los-web@sha256:f2ef782277ed6e9a40483c32eac78877d16fa150719af78e78fc5fd6773ba2d5` | `internal-bank-los-web-00002-qgj` | `https://internal-bank-los-web-mcj3w7ujpq-uc.a.run.app` (`https://los.cymbal.ak-demos.com`) | **Deployed & Serving (Tenant Frozen)** |
-| `god-view-sre-web` | Cloud Run (`us-central1`, port 8080) | `cockpit` | Pending `verifier-edge` PASS | `us-central1-docker.pkg.dev/general-ak/god-view-containers/god-view-sre-web@sha256:016809f6dc8719c8f2472a7dc54334f396864b047ce54f8f5628de6a714281e9` (stale v4) | `god-view-sre-web-00002-rgp` | `https://god-view-sre-web-mcj3w7ujpq-uc.a.run.app` (`https://godview.ak-demos.com`) | **Pending v5 3D Globe Deploy** |
-| `god-view-sovereign` | Cloud Run (`us-central1`, port 8080) | `runtime-core` + `discovery` + `sentinels` + `remediation` | `verifier-core` PASS | `us-central1-docker.pkg.dev/general-ak/god-view-containers/god-view-sovereign@sha256:33f61bd59024058bc154afad7b480a712540bda9561cb019152ce66fd0d1c213` | `god-view-sovereign-00010-9jz` | `https://god-view-sovereign-mcj3w7ujpq-uc.a.run.app` (`https://godview.ak-demos.com/api/*`) | **Deployed & Serving (v5 Real Core)** |
+| `god-view-sre-web` | Cloud Run (`us-central1`, port 8080) | `cockpit` | `verifier-edge` PASS | `us-central1-docker.pkg.dev/general-ak/god-view-containers/god-view-sre-web@sha256:f93d5644e84c13951b1c670979c6fc4b6be4ab6c0d4830723681b332390598d4` | `god-view-sre-web-00004-64s` | `https://god-view-sre-web-mcj3w7ujpq-uc.a.run.app` (`https://godview.ak-demos.com`) | **Deployed & Serving (v5 3D Globe + D1-D8 Fixes)** |
+| `god-view-sovereign` | Cloud Run (`us-central1`, port 8080) | `runtime-core` + `discovery` + `sentinels` + `remediation` | `verifier-core` PASS | `us-central1-docker.pkg.dev/general-ak/god-view-containers/god-view-sovereign@sha256:39f887a38e27505369382739b3ecd829f59c5b4be6049cafa014b799882055be` | `god-view-sovereign-00014-78l` | `https://god-view-sovereign-mcj3w7ujpq-uc.a.run.app` (`https://godview.ak-demos.com/api/*`) | **Deployed & Serving (v5 Real Core + D1-D9 Fixes)** |
 | `kyc-model-armor-svc` | GKE Autopilot (`cymbal`, port 8080) | `tenant-gke-utilities` | `agents-verifier` PASS | `us-central1-docker.pkg.dev/general-ak/god-view-containers/kyc-model-armor-svc@sha256:b0c15dd124dd80ddba5ebad4229744941c48812d7b2c74d3d30f97802d1c5dfa` | `pod/kyc-model-armor-svc-59cc4cb697-7972w` (`1/1 Running`) | `http://10.10.0.3:8080` (`god-view-kyc-ilb-ip`) | **Deployed & Running (Tenant Frozen)** |
 | `underwriting-los-svc` | GKE Autopilot (`cymbal`, port 8080) | `tenant-gke-utilities` | `agents-verifier` PASS | `us-central1-docker.pkg.dev/general-ak/god-view-containers/underwriting-los-svc@sha256:5eaa5d1d2a737880ebb101ce6328e5b48f134698d6cbf864d9fbf86a45cbe45c` | `pod/underwriting-los-svc-7f87d55f7f-nnxvv` (`1/1 Running`) | `http://10.10.0.2:8080` (`god-view-los-ilb-ip`) | **Deployed & Running (Tenant Frozen)** |
 
@@ -76,11 +76,12 @@
 
 | Agent Archetype | Target Role | Reasoning Engine Deployment | Model | In-Process Fallback | Status |
 | :-- | :-- | :-- | :-- | :-- | :-- |
-| `application__<svc>` | Service runtime specialist | Vertex AI Reasoning Engine (`min_instances=0`) | `gemini-4-argon` @ global | Yes | Pending slice PASS & deploy |
-| `data__<store>` | Data and state specialist | Vertex AI Reasoning Engine (`min_instances=0`) | `gemini-4-argon` @ global | Yes | Pending slice PASS & deploy |
-| `business_line__<journey>` | Business journey specialist | Vertex AI Reasoning Engine (`min_instances=0`) | `gemini-4-argon` @ global | Yes | Pending slice PASS & deploy |
-| `change__<repo>` | Software change specialist | Vertex AI Reasoning Engine (`min_instances=0`) | `gemini-4-argon` @ global | Yes | Pending slice PASS & deploy |
-| `platform__<env>` | Cloud platform specialist | Vertex AI Reasoning Engine (`min_instances=0`) | `gemini-4-argon` @ global | Yes | Pending slice PASS & deploy |
+| `application__god-view-sre-web` | Service runtime specialist | `projects/769002985772/locations/us-central1/reasoningEngines/3177452539708702720` (`min_instances=0`) | `gemini-4-argon` @ global | Yes | **Deployed & Verified (`:query` 200 OK)** |
+| `application__god-view-sovereign` | Service runtime specialist | `projects/769002985772/locations/us-central1/reasoningEngines/7325267796516929536` (`min_instances=0`) | `gemini-4-argon` @ global | Yes | **Deployed & Verified (`:query` 200 OK)** |
+| `data__cloudsql-god-view-pg` | Data and state specialist | `projects/769002985772/locations/us-central1/reasoningEngines/6636217053529243648` (`min_instances=0`) | `gemini-4-argon` @ global | Yes | **Deployed & Verified (`:query` 200 OK)** |
+| `business_line__journey-main` | Business journey specialist | `projects/769002985772/locations/us-central1/reasoningEngines/2646027783678984192` (`min_instances=0`) | `gemini-4-argon` @ global | Yes | **Deployed & Verified (`:query` 200 OK)** |
+| `change__repo-default` | Software change specialist | `projects/769002985772/locations/us-central1/reasoningEngines/918897326582398976` (`min_instances=0`) | `gemini-4-argon` @ global | Yes | **Deployed & Verified (`:query` 200 OK)** |
+| `platform__gcp-general-ak` | Cloud platform specialist | `projects/769002985772/locations/us-central1/reasoningEngines/1240904699939389440` (`min_instances=0`) | `gemini-4-argon` @ global | Yes | **Deployed & Verified (`:query` 200 OK)** |
 
 ---
 
@@ -324,45 +325,24 @@ gcloud scheduler jobs run godview-tenant-resume --location=us-central1 --project
   - **Result**: 0 added, 1 changed, 0 destroyed. In-place additive schema update adding nullable `parent_span_id` (STRING) to BigQuery table `godview_ledger.events`. Deletion protection preserved. Verified live via BigQuery client API.
   - **Rollback**: Schema cannot drop columns in BigQuery once added; no destructive action needed as column is nullable.
 
-### Pending Commands (Blocked on gcloud / ADC Session Reauthentication)
+- **2026-10-19T06:00:00Z – 06:38:00Z**
+  - **Command**: `./infra/deploy/build_image.sh god-view-sovereign --pin && ./infra/deploy/deploy_run.sh god-view-sovereign us-central1-docker.pkg.dev/general-ak/god-view-containers/god-view-sovereign@sha256:39f887a38e27505369382739b3ecd829f59c5b4be6049cafa014b799882055be`
+  - **Result**: Deployed v5 Sovereign image (Cloud Build `6e12d47b-0572-4d4a-ba2a-cfbe2d82de7f`, commit `555cb43`) with all D1–D9 fixes (Gemini 4 Argon `thought_signature` preservation, universal probe asset integrity check on `/v1/vehicles`, journey_linked workload inference prioritization, hash-suffixed `sentinel_id` on `build_probe_sentinel`, and calibrated confidence floor). Cloud Run deployed revision `god-view-sovereign-00014-78l` (Ready, serving 100%) and updated `god-view-hibernate-job`. `/public/healthz` verified 200 OK.
+  - **Rollback**: `gcloud run services update-traffic god-view-sovereign --to-revisions=god-view-sovereign-00012-2r2=100 --project=general-ak --region=us-central1`
 
-The gcloud / ADC auth session lapsed at ~09:09Z (`Reauthentication required. Please enter your password:`).
-Operator must run `gcloud auth login` or reauthenticate the session in the shell.
+- **2026-10-19T06:02:00Z**
+  - **Command**: `./infra/deploy/build_image.sh god-view-sre-web --pin && ./infra/deploy/deploy_run.sh god-view-sre-web us-central1-docker.pkg.dev/general-ak/god-view-containers/god-view-sre-web@sha256:f93d5644e84c13951b1c670979c6fc4b6be4ab6c0d4830723681b332390598d4`
+  - **Result**: Deployed v5 Cockpit image (Cloud Build `04488556-2404-47f7-aaa8-37bff23e1d35`) with D2/D4/D5/D7/D8 UI & proxy fixes and synced `dist/` to `~/.gemini/config/plugins/godview_cockpit/sidecars/globe/dist/`. Cloud Run deployed revision `god-view-sre-web-00004-64s` (Ready, serving 100%).
+  - **Rollback**: `gcloud run services update-traffic god-view-sre-web --to-revisions=god-view-sre-web-00003-r98=100 --project=general-ak --region=us-central1`
 
-Once reauthenticated, run the following exact pending commands:
+- **2026-10-19T06:28:00Z**
+  - **Command**: `PYTHONPATH=. uv run --with "google-cloud-aiplatform[agent_engines,adk]" --with a2a-sdk --with google-cloud-firestore --with google-cloud-pubsub --with google-cloud-bigquery --with google-cloud-logging --with google-cloud-monitoring --with google-cloud-compute --with google-cloud-run --with google-cloud-asset --with google-cloud-storage --with google-cloud-secret-manager python infra/deploy/deploy_agent_engine.py --from-perceive --sovereign-url https://god-view-sovereign-mcj3w7ujpq-uc.a.run.app --project-id general-ak --location us-central1 --staging-bucket gs://general-ak-god-view-agent-staging --service-account godview-sense-sa@general-ak.iam.gserviceaccount.com`
+  - **Result**: Updated all 6 `godview_managed=true` Vertex AI Reasoning Engines (`3177452539708702720`, `7325267796516929536`, `6636217053529243648`, `2646027783678984192`, `918897326582398976`, `1240904699939389440`) in-place with D3 (`thought_signature`) and D9 (relative `extra_packages`, `a2a-sdk`, `AuthService`, numeric `card.url`) fixes, and synced to Firestore `court_agents`. Verified live `:query` (`card` + `diagnose`) returning 200 OK with `gemini-4-argon` Diagnosis & ProposedAction.
+  - **Rollback**: Re-run `deploy_agent_engine.py` from previous git revision.
 
-#### 1. Build and Deploy Sovereign v5 (Commit `61524f6` — incorporates discovery rev 11, sentinels rev 7, neutrality rev 6, runtime-core 9202363, and BigQuery parent_span_id):
-```bash
-./infra/deploy/build_image.sh god-view-sovereign --pin
-SOV_DIGEST="$(./infra/deploy/build_image.sh god-view-sovereign --pin)"
-./infra/deploy/pin_image.py --root platform --service god-view-hibernate-job --image "${SOV_DIGEST}"
-./infra/deploy/deploy_run.sh god-view-sovereign "${SOV_DIGEST}"
-curl -s -H "Authorization: Bearer $(gcloud auth print-identity-token)" "https://god-view-sovereign-mcj3w7ujpq-uc.a.run.app/public/healthz"
-```
-
-#### 2. Build and Deploy Cockpit (Commit `062bc4d` — Cockpit Rev 5 PASS #249):
-```bash
-./infra/deploy/build_image.sh god-view-sre-web --pin
-COCKPIT_DIGEST="$(./infra/deploy/build_image.sh god-view-sre-web --pin)"
-./infra/deploy/deploy_run.sh god-view-sre-web "${COCKPIT_DIGEST}"
-```
-
-#### 3. Deploy Vertex AI Agent Engine Court (Agents Rev 5 `0f5d0e2` PASS #186):
-```bash
-SOV_URL="$(gcloud run services describe god-view-sovereign --project=general-ak --region=us-central1 --format='value(status.url)')"
-PYTHONPATH=. uv run --with "google-cloud-aiplatform[agent_engines,adk]" python infra/deploy/deploy_agent_engine.py \
-  --from-perceive \
-  --sovereign-url "${SOV_URL}" \
-  --project-id general-ak \
-  --location us-central1 \
-  --staging-bucket gs://general-ak-god-view-agent-staging \
-  --service-account godview-sense-sa@general-ak.iam.gserviceaccount.com
-```
-
-#### 4. Replay Nervous System DLQ (from `2026-10-17T08:00:00Z`):
-```bash
-gcloud pubsub subscriptions seek godview-nervous-system-dlq-sub --time="2026-10-17T08:00:00Z" --project=general-ak
-```
+- **2026-10-19T06:35:00Z**
+  - **Command**: `gcloud pubsub subscriptions seek godview-nervous-system-dlq-sub --time="2026-10-17T08:00:00Z" --project=general-ak && gcloud scheduler jobs run godview-tenant-resume --location=us-central1 --project=general-ak`
+  - **Result**: DLQ replayed, tenant traffic resumed, core workload `BusinessContext` records re-inferred (`confidence = 0.79..0.88`, `inferred_by = "gemini-4-argon"`), and T1 + T2 incidents diagnosed with L2 `ApprovalCard`s in Firestore `approvals`.
 
 
 

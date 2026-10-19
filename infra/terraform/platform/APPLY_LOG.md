@@ -224,6 +224,11 @@
 - **2026-10-18T09:09:24Z**
   - **Status**: gcloud/ADC session lapsed (`Reauthentication required. Please enter your password:`). Cloud mutations paused per protocol. Exact pending commands recorded in `DEPLOY_RUNBOOK.md`.
 
+- **2026-10-19T06:00:00Z – 06:38:00Z**
+  - **Command**: `./infra/deploy/deploy_run.sh god-view-sovereign us-central1-docker.pkg.dev/general-ak/god-view-containers/god-view-sovereign@sha256:39f887a38e27505369382739b3ecd829f59c5b4be6049cafa014b799882055be` and `./infra/deploy/deploy_run.sh god-view-sre-web us-central1-docker.pkg.dev/general-ak/god-view-containers/god-view-sre-web@sha256:f93d5644e84c13951b1c670979c6fc4b6be4ab6c0d4830723681b332390598d4`
+  - **Result**: Deployed `god-view-sovereign-00014-78l`, `god-view-hibernate-job`, and `god-view-sre-web-00004-64s` with all D1–D9 fixes; updated `images.auto.tfvars`; updated all 6 `godview_managed=true` Vertex AI Reasoning Engines in `us-central1` in-place (`3177452539708702720`, `7325267796516929536`, `6636217053529243648`, `2646027783678984192`, `918897326582398976`, `1240904699939389440`); replayed `godview-nervous-system-dlq-sub`; verified `/public/healthz` 200 OK and Reasoning Engine `:query` 200 OK.
+  - **Rollback**: `gcloud run services update-traffic god-view-sovereign --to-revisions=god-view-sovereign-00012-2r2=100 --project=general-ak --region=us-central1` and `gcloud run services update-traffic god-view-sre-web --to-revisions=god-view-sre-web-00003-r98=100 --project=general-ak --region=us-central1`.
+
 
 
 
