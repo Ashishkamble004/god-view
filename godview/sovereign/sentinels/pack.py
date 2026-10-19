@@ -142,8 +142,17 @@ def build_probe_sentinel(
     compiled_by: str = "sentinels_pack",
 ) -> SentinelDefinition:
     """Build a synthetic `probe` sentinel for an endpoint or asset URL."""
-    name = probe_name or re.sub(r"[^a-zA-Z0-9_-]", "_", target_url)
-    sentinel_id = f"snt-probe-{name[:50]}"
+    if probe_name:
+        sentinel_id = f"snt-probe-{probe_name[:50]}"
+    else:
+        name = re.sub(r"[^a-zA-Z0-9_-]", "_", target_url)
+        if len(name) > 50:
+            import hashlib
+
+            url_hash = hashlib.sha1(target_url.encode("utf-8")).hexdigest()[:8]
+            sentinel_id = f"snt-probe-{name[:41]}-{url_hash}"
+        else:
+            sentinel_id = f"snt-probe-{name}"
     now_iso = datetime.now(tz=UTC).isoformat()
 
     return SentinelDefinition.model_validate(
@@ -595,9 +604,9 @@ def compile_universal_sentinels(
             r_host = r.get("host") if isinstance(r, dict) else getattr(r, "host", None)
             path = r.get("path") if isinstance(r, dict) else getattr(r, "path", None)
 
-            if not r_url and r_host and path and not str(r_host).startswith("*"):
+            if not r_url and r_host and path and not str(r_host).startswith("*") and "*" not in str(path) and "{" not in str(path):
                 r_url = f"https://{r_host}/{str(path).lstrip('/')}"
-            if not r_url and path and is_public_entrypoint:
+            if not r_url and path and is_public_entrypoint and "*" not in str(path) and "{" not in str(path):
                 base_ep = str(raw_ep or locator or "").strip()
                 if not base_ep and fe_hosts:
                     base_ep = f"https://{sorted(fe_hosts)[0]}"

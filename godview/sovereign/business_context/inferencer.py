@@ -545,6 +545,17 @@ class BusinessContextInferencer:
                 res_bc.confidence = min(res_bc.confidence, 0.3)
                 _attach_metadata(res_bc, "inference_status", "uncited")
             else:
+                if (
+                    len(res_bc.evidence) >= 3
+                    and (
+                        routes
+                        or evidence_bundle.get("env_var_names")
+                        or upstreams
+                        or downstreams
+                    )
+                    and res_bc.confidence < 0.65
+                ):
+                    res_bc.confidence = round(min(0.85, 0.55 + 0.04 * len(res_bc.evidence)), 2)
                 _attach_metadata(res_bc, "inference_status", "inferred")
 
             # Same check for KPIs/invariants/journeys: their evidence must also resolve to bundle items, or the item is dropped

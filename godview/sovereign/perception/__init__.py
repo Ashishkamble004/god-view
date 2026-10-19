@@ -494,10 +494,18 @@ class PerceptionOrgan:
         if self._inferencer is not None:
             from godview.sovereign.business_context.inferencer import is_business_context_stale
 
-            services_needing_inference = [
-                s for s in services_to_persist
-                if reset or is_business_context_stale(s.business_context)
-            ]
+            services_needing_inference = sorted(
+                [
+                    s for s in services_to_persist
+                    if reset or is_business_context_stale(s.business_context)
+                ],
+                key=lambda s: (
+                    0 if s.classification == "journey_linked" else 1,
+                    0 if s.routes else 1,
+                    0 if s.kind in ("cloud_run", "gke_workload", "gce_instance", "api_gateway", "cloud_sql") else 1,
+                    s.name,
+                ),
+            )
             if services_needing_inference:
                 sem = asyncio.Semaphore(5)
 

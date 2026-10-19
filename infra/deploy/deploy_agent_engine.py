@@ -389,7 +389,7 @@ class VertexAgentEngineBackend:
 
                 auth = None
                 try:
-                    from godview_shared.auth import TokenProvider
+                    from godview_shared.auth import AuthService
                     from godview_shared.config import GodViewSettings
                     from godview_shared.llm import LlmClient
 
@@ -397,8 +397,8 @@ class VertexAgentEngineBackend:
                         env_mode="gcp",
                         sovereign_url=self.sovereign_url,
                     )
-                    auth = TokenProvider(settings=settings)
-                    self._llm = LlmClient(settings=settings)
+                    auth = AuthService(settings=settings)
+                    self._llm = LlmClient(settings=settings, auth=auth)
                 except Exception as exc:
                     logger.warning("Could not initialize LlmClient in set_up: %s", exc)
                     self._llm = None
@@ -494,17 +494,20 @@ class VertexAgentEngineBackend:
         )
 
         os.chdir(REPO_ROOT)
-        extra_packages = [
-            "godview/__init__.py",
-            "godview/agents",
-            "godview/adapters",
-            "shared",
-        ]
+        extra_packages = ["godview/__init__.py", "shared"]
+        for item in sorted((REPO_ROOT / "godview").iterdir()):
+            if item.is_dir() and item.name not in ("god-view-sre-web", "__pycache__"):
+                extra_packages.append(f"godview/{item.name}")
         requirements = [
             "google-cloud-aiplatform[agent_engines,adk]>=1.88.0",
             "google-adk>=0.1.0",
+            "a2a-sdk>=0.1.0",
             "google-genai>=0.1.0",
             "google-auth>=2.30.0",
+            "google-cloud-firestore>=2.16.0",
+            "google-cloud-bigquery>=3.25.0",
+            "google-cloud-pubsub>=2.21.0",
+            "fastapi>=0.115.0",
             "pydantic>=2.7.0",
             "httpx>=0.27.0",
             "pyyaml>=6.0.1",
