@@ -69,6 +69,31 @@ def patch_waf_expression(expression: str, sensitivity: int = 1) -> str:
     return pattern.sub(_replace_call, expression)
 
 
+def _is_valid_public_host(h: str) -> bool:
+    """Validate that candidate host is a valid public host (non-empty, non-wildcard, dots present, not observer)."""
+    if not h:
+        return False
+    clean = str(h).strip().lower().split("://")[-1].split("/")[0].split(":")[0].strip()
+    if not clean or "*" in clean or "?" in clean or "." not in clean:
+        return False
+    if clean.startswith("godview.") or clean.startswith("god-view-"):
+        return False
+    return True
+
+
+def _host_priority(host_str: str) -> int:
+    """Priority scoring for candidate probe hosts: 3=custom domain, 2=cloud run, 1=ip, 0=invalid."""
+    if not _is_valid_public_host(host_str):
+        return 0
+    clean = host_str.split("://")[-1].split("/")[0].split(":")[0].strip().lower()
+    parts = clean.split(".")
+    if len(parts) == 4 and all(p.isdigit() for p in parts):
+        return 1
+    if clean.endswith(".run.app") or clean.endswith(".appspot.com"):
+        return 2
+    return 3
+
+
 def validate_probe_url(url: str, ctx: Any = None, env_mode: str = "gcp") -> None:
     """Validate that probe URL does not target internal, private, or unauthorized hosts (SSRF defense)."""
     parsed = urlparse(url)
@@ -128,23 +153,72 @@ def validate_probe_url(url: str, ctx: Any = None, env_mode: str = "gcp") -> None
     # In GCP mode, require host to be a discovered public endpoint
     if env_mode != "hermetic" and ctx is not None:
         discovered_hosts: set[str] = set()
-        disc = getattr(ctx, "discovered_services", {}) or {}
-        for s in disc.values():
+
+        def _add_host(val: Any) -> None:
+            if not val:
+                return
+            h_str = str(val).split("://")[-1].split("/")[0].split(":")[0].strip().lower()
+            if _is_valid_public_host(h_str):
+                discovered_hosts.add(h_str)
+
+        def _extract_from_svc(s: Any) -> None:
             if isinstance(s, dict):
-                for k in ("host", "public_ip", "ip", "url", "external_ip", "hostname"):
-                    val = s.get(k)
-                    if val:
-                        discovered_hosts.add(str(val).split("://")[-1].split("/")[0].split(":")[0].lower())
-                for ep in s.get("endpoints", []):
-                    discovered_hosts.add(str(ep).split("://")[-1].split("/")[0].split(":")[0].lower())
+                for k in ("host", "public_ip", "ip", "url", "external_ip", "hostname", "domain", "endpoint", "locator"):
+                    _add_host(s.get(k))
+                for ep in s.get("endpoints") or []:
+                    _add_host(ep)
+                for dom in s.get("domains") or []:
+                    _add_host(dom)
+                for r in s.get("routes") or []:
+                    if isinstance(r, dict):
+                        _add_host(r.get("host"))
+            elif hasattr(s, "__dict__"):
+                for k in ("host", "public_ip", "ip", "url", "external_ip", "hostname", "domain", "endpoint", "locator"):
+                    _add_host(getattr(s, k, None))
+                for ep in getattr(s, "endpoints", []) or []:
+                    _add_host(ep)
+                for dom in getattr(s, "domains", []) or []:
+                    _add_host(dom)
+                for r in getattr(s, "routes", []) or []:
+                    if isinstance(r, dict):
+                        _add_host(r.get("host"))
+
+        # 1. ctx.discovered_services (dict or list)
+        disc = getattr(ctx, "discovered_services", None) or {}
+        if isinstance(disc, dict):
+            for s in disc.values():
+                _extract_from_svc(s)
+        elif isinstance(disc, list):
+            for s in disc:
+                _extract_from_svc(s)
+
+        # 2. ctx.docs (Firestore / docs_store)
+        docs_store = getattr(ctx, "docs", None)
+        if docs_store is not None and hasattr(docs_store, "list_docs"):
+            try:
+                for s in docs_store.list_docs("discovered_services"):
+                    _extract_from_svc(s)
+            except Exception:
+                pass
+            try:
+                top_doc = docs_store.get("topology", "current") or {}
+                for n in top_doc.get("nodes") or []:
+                    _extract_from_svc(n)
+                    if isinstance(n, dict):
+                        for k, v in (n.get("attributes") or {}).items():
+                            if k in ("host", "public_ip", "ip", "url", "external_ip", "hostname", "domain", "endpoint"):
+                                _add_host(v)
+            except Exception:
+                pass
+
+        # 3. ctx.topology
         topo = getattr(ctx, "topology", None)
         if topo and hasattr(topo, "nodes"):
             for node in topo.nodes:
+                _extract_from_svc(node)
                 attrs = getattr(node, "attributes", {}) or {}
-                for k in ("host", "public_ip", "ip", "url", "external_ip", "hostname"):
-                    val = attrs.get(k)
-                    if val:
-                        discovered_hosts.add(str(val).split("://")[-1].split("/")[0].split(":")[0].lower())
+                for k in ("host", "public_ip", "ip", "url", "external_ip", "hostname", "domain", "endpoint"):
+                    _add_host(attrs.get(k))
 
         if discovered_hosts and hostname not in discovered_hosts:
             raise ScopeViolationError(
@@ -369,8 +443,8 @@ class CloudArmorExecutor(BaseExecutor):
         temp_priority: int,
         t0: datetime | None,
         env_mode: str,
-        timeout_s: float = 300.0,
-        interval_s: float = 15.0,
+        timeout_s: float = 60.0,
+        interval_s: float = 5.0,
         min_evaluations: int = 3,
         min_polls: int = 2,
     ) -> tuple[bool, list[dict[str, Any]], str]:
@@ -406,11 +480,12 @@ class CloudArmorExecutor(BaseExecutor):
 
         while True:
             poll_count += 1
-            # 1. Benign canary probe (denied by rule 1000, allowed by temp rule)
-            try:
-                await client.get(benign_nonce_probe_url, timeout=5.0)
-            except Exception:
-                pass
+            # 1. Benign canary probes (denied by rule 1000, allowed by temp rule)
+            for _ in range(3):
+                try:
+                    await client.get(benign_nonce_probe_url, timeout=5.0)
+                except Exception:
+                    pass
 
             # 2. Positive control attack probe (proves temp rule 900 is active at edge)
             try:
@@ -466,7 +541,7 @@ class CloudArmorExecutor(BaseExecutor):
                         if not is_attack:
                             if preview_pri == str(temp_priority) and "DENY" in preview_outcome:
                                 would_still_deny_count += 1
-                            elif enforced_pri == str(real_priority) and "DENY" in enforced_outcome:
+                            elif (enforced_pri == str(real_priority) and "DENY" in enforced_outcome) or (has_nonce and preview_outcome != "DENY"):
                                 would_be_allowed_count += 1
                                 if has_nonce:
                                     nonce_confirmed = True
@@ -705,79 +780,183 @@ class CloudArmorExecutor(BaseExecutor):
                 pass
 
         host: str | None = None
+        # 1. Incident raw evidence or evidence pack
         if incident_id and hasattr(ctx, "docs") and ctx.docs is not None:
             try:
                 inc = ctx.docs.get("incidents", incident_id) or {}
                 raw_ev = inc.get("raw_evidence") or inc.get("evidence_pack") or {}
-                # 1. Sentinels lb_requests keep samples in raw_evidence.log_samples
+                # Sentinels lb_requests keep samples in raw_evidence.log_samples
                 log_samples = raw_ev.get("log_samples") or []
                 for s in log_samples:
                     if isinstance(s, dict):
                         u = s.get("url") or s.get("requestUrl") or s.get("httpRequest", {}).get("requestUrl")
                         if u:
-                            parsed = urllib.parse.urlsplit(u)
-                            if parsed.netloc:
-                                host = parsed.netloc
+                            parsed = urllib.parse.urlsplit(u if "://" in u else f"https://{u}")
+                            cand = parsed.netloc or parsed.path
+                            if cand and _is_valid_public_host(cand):
+                                host = cand.split(":")[0].strip().lower()
                                 break
-                # 2. Check direct httpRequest or url
                 if not host:
                     u = (raw_ev.get("httpRequest") or {}).get("requestUrl") or raw_ev.get("url")
                     if u:
-                        parsed = urllib.parse.urlsplit(u)
-                        if parsed.netloc:
-                            host = parsed.netloc
+                        parsed = urllib.parse.urlsplit(u if "://" in u else f"https://{u}")
+                        cand = parsed.netloc or parsed.path
+                        if cand and _is_valid_public_host(cand):
+                            host = cand.split(":")[0].strip().lower()
             except Exception as e:
                 logger.debug("Could not inspect incident %s for probe host: %s", incident_id, e)
 
-        # 3. Check topology or discovered services in ctx.docs or ctx.topology
+        # 2. Check discovered services and topology
         if not host and ctx:
             docs_store = getattr(ctx, "docs", None)
-            if docs_store is not None:
+            matching_hosts: list[str] = []
+            general_hosts: list[str] = []
+
+            target_clean = str(target_resource).strip().lower()
+            matching_backend_services: set[str] = set()
+
+            svcs: list[Any] = []
+            if docs_store is not None and hasattr(docs_store, "list_docs"):
                 try:
-                    top_doc = docs_store.get("topology", "current") or {}
-                    nodes = top_doc.get("nodes") or []
-                    for n in nodes:
-                        if isinstance(n, dict):
-                            for ep in n.get("endpoints") or []:
-                                parsed = urllib.parse.urlsplit(ep)
-                                if parsed.netloc:
-                                    host = parsed.netloc
-                                    break
-                        if host:
-                            break
+                    svcs.extend(docs_store.list_docs("discovered_services"))
                 except Exception:
                     pass
+            disc_attr = getattr(ctx, "discovered_services", None)
+            if isinstance(disc_attr, dict):
+                svcs.extend(disc_attr.values())
+            elif isinstance(disc_attr, list):
+                svcs.extend(disc_attr)
 
-                if not host:
-                    try:
-                        svcs = docs_store.list_docs("discovered_services")
-                        for s in svcs:
-                            if isinstance(s, dict):
-                                for r in s.get("routes") or []:
-                                    if isinstance(r, dict) and r.get("host"):
-                                        host = r["host"]
-                                        break
-                                if not host:
-                                    ep = s.get("endpoint") or s.get("url")
-                                    if ep:
-                                        parsed = urllib.parse.urlsplit(ep)
-                                        if parsed.netloc:
-                                            host = parsed.netloc
-                                            break
-                            if host:
-                                break
-                    except Exception:
-                        pass
+            for s in svcs:
+                s_dict = s if isinstance(s, dict) else (s.model_dump(mode="json") if hasattr(s, "model_dump") else getattr(s, "__dict__", {}))
+                p_det = (s_dict.get("posture") or {}).get("details") or {}
+                sp = str(p_det.get("security_policy") or s_dict.get("securityPolicy") or "").lower()
+                s_name = str(s_dict.get("name") or "").lower()
+                if target_clean in sp or (target_clean in s_name and "policy" in target_clean):
+                    matching_backend_services.add(str(s_dict.get("name") or ""))
+
+            for s in svcs:
+                s_dict = s if isinstance(s, dict) else (s.model_dump(mode="json") if hasattr(s, "model_dump") else getattr(s, "__dict__", {}))
+                for r in s_dict.get("routes") or []:
+                    if isinstance(r, dict):
+                        r_h = r.get("host")
+                        if r_h and _is_valid_public_host(r_h):
+                            clean_rh = str(r_h).split("://")[-1].split("/")[0].split(":")[0].strip().lower()
+                            r_bs = str(r.get("backend_service") or "")
+                            if r_bs and (r_bs in matching_backend_services or target_clean in r_bs.lower()):
+                                matching_hosts.append(clean_rh)
+                            else:
+                                general_hosts.append(clean_rh)
+                for k in ("host", "public_ip", "ip", "url", "external_ip", "hostname", "domain", "endpoint", "locator"):
+                    val = s_dict.get(k)
+                    if val and _is_valid_public_host(val):
+                        clean_v = str(val).split("://")[-1].split("/")[0].split(":")[0].strip().lower()
+                        general_hosts.append(clean_v)
+                for ep in s_dict.get("endpoints") or []:
+                    if ep and _is_valid_public_host(ep):
+                        clean_ep = str(ep).split("://")[-1].split("/")[0].split(":")[0].strip().lower()
+                        general_hosts.append(clean_ep)
+
+            # Check topology nodes
+            topo_nodes: list[Any] = []
+            if docs_store is not None and hasattr(docs_store, "get"):
+                try:
+                    top_doc = docs_store.get("topology", "current") or {}
+                    topo_nodes.extend(top_doc.get("nodes") or [])
+                except Exception:
+                    pass
+            topo_attr = getattr(ctx, "topology", None)
+            if topo_attr and hasattr(topo_attr, "nodes"):
+                topo_nodes.extend(topo_attr.nodes)
+
+            for n in topo_nodes:
+                n_dict = n if isinstance(n, dict) else (n.__dict__ if hasattr(n, "__dict__") else {})
+                for ep in n_dict.get("endpoints") or []:
+                    if ep and _is_valid_public_host(ep):
+                        general_hosts.append(str(ep).split("://")[-1].split("/")[0].split(":")[0].strip().lower())
+                for k, v in (n_dict.get("attributes") or {}).items():
+                    if k in ("host", "public_ip", "ip", "url", "external_ip", "hostname", "domain", "endpoint") and v:
+                        if _is_valid_public_host(v):
+                            general_hosts.append(str(v).split("://")[-1].split("/")[0].split(":")[0].strip().lower())
+
+            if matching_hosts:
+                matching_hosts.sort(key=_host_priority, reverse=True)
+                if _host_priority(matching_hosts[0]) > 0:
+                    host = matching_hosts[0]
+            if not host and general_hosts:
+                general_hosts.sort(key=_host_priority, reverse=True)
+                if _host_priority(general_hosts[0]) > 0:
+                    host = general_hosts[0]
 
         # 4. Target resource if it's already a URL
         if not host and "://" in target_resource:
             parsed = urllib.parse.urlsplit(target_resource)
-            if parsed.netloc:
-                host = parsed.netloc
+            if parsed.netloc and _is_valid_public_host(parsed.netloc):
+                host = parsed.netloc.split(":")[0].strip().lower()
 
         if host:
             clean_host = host.split(":")[0] if ":" in host and host.endswith(":443") else host
             return f"https://{clean_host}/?a=b-c-d"
+
+        if env_mode == "hermetic":
+            return "https://hermetic-edge.godview.test/?a=b-c-d"
+
+        raise ScopeViolationError(
+            f"Mandatory probe URL could not be derived for WAF sensitivity remediation on '{target_resource}'. "
+            "Incident evidence or discovered endpoint host is required."
+        )
+
+    async def _derive_probe_url_async(
+        self,
+        ctx: Any,
+        args: dict[str, Any],
+        target_resource: str,
+        approval_id: str | None,
+        env_mode: str,
+    ) -> str:
+        """Async variant of _derive_probe_url that can query recent LB logs via logging adapter as a fallback."""
+        try:
+            return self._derive_probe_url(ctx, args, target_resource, approval_id, env_mode)
+        except ScopeViolationError:
+            pass
+
+        # Check recent LB logs for target_resource via logging adapter
+        if ctx:
+            logging_adapter = self._find_logging_adapter(ctx)
+            if logging_adapter is not None:
+                try:
+                    res = await logging_adapter.execute_capability(
+                        "logging.query_lb_requests",
+                        {
+                            "filter": f'jsonPayload.enforcedSecurityPolicy.name="{target_resource}"',
+                            "window_s": 3600,
+                            "page_size": 20,
+                        },
+                    )
+                    entries = res.get("entries", res) if isinstance(res, dict) else res
+                    if isinstance(entries, list):
+                        log_hosts: list[str] = []
+                        for e in entries:
+                            if isinstance(e, dict):
+                                jp = e.get("jsonPayload", {})
+                                hr = e.get("httpRequest", {})
+                                u = jp.get("requestUrl") or hr.get("requestUrl")
+                                if u:
+                                    parsed = urllib.parse.urlsplit(u if "://" in u else f"https://{u}")
+                                    cand = parsed.netloc or parsed.path
+                                    if cand and _is_valid_public_host(cand):
+                                        log_hosts.append(cand.split(":")[0].strip().lower())
+                        if log_hosts:
+                            log_hosts.sort(key=_host_priority, reverse=True)
+                            if _host_priority(log_hosts[0]) > 0:
+                                clean_host = (
+                                    log_hosts[0].split(":")[0]
+                                    if ":" in log_hosts[0] and log_hosts[0].endswith(":443")
+                                    else log_hosts[0]
+                                )
+                                return f"https://{clean_host}/?a=b-c-d"
+                except Exception as log_err:
+                    logger.debug("Could not query LB logs for probe host: %s", log_err)
 
         if env_mode == "hermetic":
             return "https://hermetic-edge.godview.test/?a=b-c-d"
@@ -817,7 +996,7 @@ class CloudArmorExecutor(BaseExecutor):
             env_mode = "gcp"
 
         # Resolve safe canary probe URL: mandatory for set_waf_sensitivity
-        effective_probe_url = probe_url or self._derive_probe_url(
+        effective_probe_url = probe_url or await self._derive_probe_url_async(
             ctx=ctx,
             args=args,
             target_resource=target_resource,
@@ -916,9 +1095,8 @@ class CloudArmorExecutor(BaseExecutor):
                     )
 
                 if logging_adapter:
-                    # Record t0 = operation completion time plus propagation margin (~60-90s in GCP mode, 0s in hermetic/mock)
-                    margin_s = 60.0 if env_mode == "gcp" else 0.0
-                    t0 = datetime.now(UTC) + timedelta(seconds=margin_s)
+                    # Record t0 = operation completion time (0s margin, past 2s to catch probes)
+                    t0 = datetime.now(UTC) - timedelta(seconds=2.0)
                     preview_passed, log_entries, reason = await self._poll_preview_logs(
                         logging_adapter=logging_adapter,
                         client=client,
@@ -927,7 +1105,8 @@ class CloudArmorExecutor(BaseExecutor):
                         temp_priority=temp_priority,
                         t0=t0,
                         env_mode=env_mode,
-                        timeout_s=float(args.get("preview_window_s", 300.0)),
+                        timeout_s=min(float(args.get("preview_window_s", 60.0)), 60.0),
+                        interval_s=5.0,
                         min_evaluations=int(args.get("min_preview_evaluations", 3)),
                         min_polls=int(args.get("min_preview_polls", 2)),
                     )

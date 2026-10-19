@@ -742,7 +742,8 @@ def register_in_process_court(ctx: Any) -> CourtOrchestrator:
                 or "unknown"
             )
             evp_id = str(
-                (ep.get("pack_id") if isinstance(ep, dict) else getattr(ep, "pack_id", None))
+                (ep.get("evidence_pack_id") if isinstance(ep, dict) else getattr(ep, "evidence_pack_id", None))
+                or (ep.get("pack_id") if isinstance(ep, dict) else getattr(ep, "pack_id", None))
                 or f"evp-{inc_id}"
             )
             for act in diagnosis.proposed_actions:
@@ -784,7 +785,13 @@ def register_in_process_court(ctx: Any) -> CourtOrchestrator:
                 already_open = any(
                     a.get("incident_id") == inc_id
                     and (a.get("capability") == cap_id or a.get("action_type") == cap_id)
-                    and a.get("decision", a.get("status", "pending")) == "pending"
+                    and (
+                        a.get("decision", a.get("status", "pending")) == "pending"
+                        or (
+                            a.get("decision", a.get("status", "pending")) == "approved"
+                            and (a.get("execution_result") or {}).get("ok") is True
+                        )
+                    )
                     for a in existing_approvals
                 )
                 if not already_open:

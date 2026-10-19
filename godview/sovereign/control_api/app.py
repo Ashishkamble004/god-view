@@ -241,6 +241,24 @@ def create_app(
                             inc_mgr = ctx.incident_manager
                             from godview.sovereign.incidents.manager import _has_real_diagnosis, _is_placeholder
                             active_incs = list(getattr(inc_mgr, "_active_incidents", {}).values())
+                            docs_store = getattr(ctx, "docs", None)
+                            if docs_store is not None and hasattr(docs_store, "list_docs"):
+                                try:
+                                    stored_incs = docs_store.list_docs("incidents")
+                                    seen_ids = {getattr(i, "doc_id", None) or getattr(i, "incident_id", None) for i in active_incs}
+                                    from godview_shared.contracts import IncidentDoc
+                                    for s_inc in stored_incs:
+                                        if isinstance(s_inc, dict) and s_inc.get("outcome") == "open":
+                                            s_id = s_inc.get("doc_id") or s_inc.get("incident_id")
+                                            if s_id and s_id not in seen_ids:
+                                                try:
+                                                    inc_obj = IncidentDoc(**s_inc)
+                                                    active_incs.append(inc_obj)
+                                                    seen_ids.add(s_id)
+                                                except Exception:
+                                                    pass
+                                except Exception:
+                                    pass
                             active_incs.sort(
                                 key=lambda inc: (
                                     0 if any(k in str(getattr(inc, "dedupe_key", "")).lower() for k in ("waf", "policy", "probe", "posture")) else 1,

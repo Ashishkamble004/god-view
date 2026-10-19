@@ -803,3 +803,54 @@ def test_derive_probe_url_from_incident_log_samples() -> None:
     )
     # Side-effect-free GET canary
     assert probe_url == "https://service.tenant.example.com/?a=b-c-d"
+
+
+@pytest.mark.unit
+def test_derive_probe_url_skips_wildcard_routes_and_prefers_matching_policy() -> None:
+    from godview_shared.fakes import InMemoryFirestore
+
+    class MockCtx:
+        def __init__(self) -> None:
+            self.docs = InMemoryFirestore()
+
+    ctx = MockCtx()
+    # Populate discovered_services with a wildcard route, an unrelated route, and a matching policy route
+    ctx.docs.set(
+        "discovered_services",
+        "doc-bs-portal",
+        {
+            "name": "bs-portal-main",
+            "kind": "backend_service",
+            "posture": {"details": {"security_policy": "sec-policy-prod"}},
+            "routes": [
+                {"host": "*", "path": "/*", "backend_service": "bs-portal-main"},
+                {"host": "portal.tenant.example.com", "path": "/*", "backend_service": "bs-portal-main"},
+            ],
+        },
+    )
+    ctx.docs.set(
+        "discovered_services",
+        "doc-run-other",
+        {
+            "name": "svc-other",
+            "kind": "cloud_run",
+            "routes": [
+                {"host": "svc-other-xyz-uc.a.run.app", "path": "/*", "backend_service": "other-bs"},
+            ],
+        },
+    )
+
+    executor = CloudArmorExecutor()
+    probe_url = executor._derive_probe_url(
+        ctx=ctx,
+        args={},
+        target_resource="sec-policy-prod",
+        approval_id=None,
+        env_mode="gcp",
+    )
+    # Must skip '*' and pick portal.tenant.example.com
+    assert probe_url == "https://portal.tenant.example.com/?a=b-c-d"
+    # validate_probe_url must accept it without error
+    from godview.sovereign.remediation.executors.armor import validate_probe_url
+    validate_probe_url(probe_url, ctx=ctx, env_mode="hermetic")
+

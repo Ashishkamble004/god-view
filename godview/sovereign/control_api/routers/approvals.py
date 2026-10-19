@@ -146,11 +146,17 @@ def ensure_open_incident_approvals(ctx: Any) -> list[dict[str, Any]]:
                 if not cap_id or not is_mutating_capability(cap_id):
                     continue
 
-                # Check if there is already a pending or approved card for this incident and capability
+                # Check if there is already an active pending or successfully executed approved card
                 has_active_card = any(
                     a.get("incident_id") == inc_id
                     and (a.get("capability") == cap_id or a.get("action_type") == cap_id)
-                    and a.get("decision", a.get("status")) in ("pending", "approved")
+                    and (
+                        a.get("decision", a.get("status")) == "pending"
+                        or (
+                            a.get("decision", a.get("status")) == "approved"
+                            and (a.get("execution_result") or {}).get("ok") is True
+                        )
+                    )
                     for a in all_approvals
                 )
 
@@ -166,6 +172,12 @@ def ensure_open_incident_approvals(ctx: Any) -> list[dict[str, Any]]:
                         "Autonomously renewing approval card for incident %s capability %s target %s",
                         inc_id, cap_id, act_target
                     )
+                    real_evp_id = str(
+                        (inc.get("evidence_pack") or {}).get("evidence_pack_id")
+                        or (inc.get("evidence_pack") or {}).get("pack_id")
+                        or (inc.get("raw_evidence") or {}).get("evidence_pack_id")
+                        or f"evp-{inc_id}"
+                    )
                     try:
                         new_card = trust_gate.create_approval_request(
                             incident_id=inc_id,
@@ -174,6 +186,7 @@ def ensure_open_incident_approvals(ctx: Any) -> list[dict[str, Any]]:
                             target_resource=act_target,
                             trust_level_required=2,
                             narrative=act.get("rationale") or f"Remediate incident {inc_id} via {cap_id}",
+                            evidence_pack_id=real_evp_id,
                             args=act_args,
                             reversal_recipe={
                                 "capability": cap_id,
@@ -439,12 +452,32 @@ def build_router(ctx: Any) -> APIRouter:
                 except Exception as e:
                     logger.warning("Failed to record recommendation correct in TrustGate: %s", e)
 
-            # Write ExecutionResult onto the card in docs store
+            # Update Audit Record with real execution result and verification checks
             docs_store = getattr(ctx, "docs", None)
+            audit_dict = audit.model_dump(mode="json") if hasattr(audit, "model_dump") else dict(audit)
+            audit_id = getattr(audit, "audit_id", None) or getattr(audit, "doc_id", None) or audit_dict.get("audit_id") or "aud-approved"
+            audit_dict["result"] = "success" if exec_result.ok else "failed"
+            audit_dict["verification"] = {
+                "ok": exec_result.ok,
+                "checks": [
+                    v.model_dump(mode="json") if hasattr(v, "model_dump") else v
+                    for v in (exec_result.verification or [])
+                ],
+                "before": exec_result.before,
+                "after": exec_result.after,
+                "error": exec_result.error,
+            }
+            if docs_store is not None and audit_id:
+                try:
+                    docs_store.set("audit_records", audit_id, audit_dict, merge=True)
+                except Exception as audit_err:
+                    logger.warning("Failed to update audit_records %s: %s", audit_id, audit_err)
+
+            # Write ExecutionResult onto the card in docs store
             card_dict = updated_card.model_dump(mode="json")
             card_dict["execution_result"] = exec_result.model_dump(mode="json")
             card_dict["executed_at"] = datetime.now(tz=UTC).isoformat()
-            card_dict["audit_id"] = getattr(audit, "audit_id", None) or getattr(audit, "doc_id", "aud-approved")
+            card_dict["audit_id"] = audit_id
             if docs_store is not None:
                 docs_store.set("approvals", approval_id, card_dict, merge=True)
 
@@ -470,10 +503,10 @@ def build_router(ctx: Any) -> APIRouter:
                 "ok": exec_result.ok,
                 "decision": "approved",
                 "decided_by": actor,
-                "audit_id": getattr(audit, "audit_id", None) or getattr(audit, "doc_id", "aud-approved"),
+                "audit_id": audit_id,
                 "approval": card_dict,
                 "execution_result": exec_result.model_dump(mode="json"),
-                "audit": audit.model_dump(mode="json"),
+                "audit": audit_dict,
             }
         except KeyError:
             raise HTTPException(status_code=404, detail=f"Approval '{approval_id}' not found") from None
