@@ -177,7 +177,14 @@ def evolve_specialist(
             bucket_name = (
                 getattr(getattr(ctx, "settings", None), "agent_skills_bucket", None)
                 or os.environ.get("AGENT_SKILLS_BUCKET")
+                or os.environ.get("GODVIEW_SKILLS_BUCKET")
             )
+            if not bucket_name:
+                project_id = (
+                    os.environ.get("GCP_PROJECT_ID", "").strip()
+                    or os.environ.get("GOOGLE_CLOUD_PROJECT", "").strip()
+                )
+                bucket_name = f"{project_id}-god-view-agent-skills" if project_id else "god-view-agent-skills"
             if bucket_name:
                 try:
                     from godview.invariants.skills import GcsSkillsStorageClient
@@ -236,6 +243,21 @@ def evolve_specialist(
             )
 
         winner = final_res.winner
+        adopted_path = final_res.adopted_path
+        if adopted_path is None and winner.passed:
+            from godview.harness.core.recursion import Ledger
+
+            adopted_path = reflect_adoption(
+                library=library,
+                domain=domain,
+                task_id=t_id,
+                task_md=adapter.task_description(t_id),
+                winner=winner,
+                all_candidates=final_res.candidates,
+                proposer=proposer,
+                ledger=getattr(final_res, "ledger", None) or Ledger(),
+                work_dir=root_dir / "reflect",
+            )
 
         # 5. Hot-load winning tree and bump version in Firestore court_agents
         new_version = 1
@@ -258,7 +280,7 @@ def evolve_specialist(
             "passed": winner.passed,
             "notes": winner.notes,
             "living_model_version": new_version,
-            "adopted_path": str(final_res.adopted_path) if final_res.adopted_path else None,
+            "adopted_path": str(adopted_path) if adopted_path else None,
             "created_at_epoch": time.time(),
             "updated_at_epoch": time.time(),
         }
@@ -321,8 +343,8 @@ def evolve_specialist(
         orchestrator = getattr(ctx, "court_orchestrator", None)
         if orchestrator is not None and hasattr(orchestrator, "_in_process_specialists"):
             in_proc = orchestrator._in_process_specialists.get(domain)
-            if in_proc is not None and final_res.adopted_path is not None:
-                new_harness_dir = final_res.adopted_path / "harness"
+            if in_proc is not None and adopted_path is not None:
+                new_harness_dir = adopted_path / "harness"
                 if new_harness_dir.is_dir():
                     in_proc.tree = HarnessTree(new_harness_dir, GODVIEW_SURFACE)
                     logger.info(
@@ -341,7 +363,7 @@ def evolve_specialist(
             living_model_version=new_version,
             winning_tag=winner.tag,
             notes=winner.notes,
-            adopted_path=str(final_res.adopted_path) if final_res.adopted_path else None,
+            adopted_path=str(adopted_path) if adopted_path else None,
             synced_gcs_objects=list(library.synced_objects),
         )
     finally:
