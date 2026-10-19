@@ -610,14 +610,36 @@ def register_in_process_court(ctx: Any) -> CourtOrchestrator:
             return None
 
         consensus_val = round(float(diagnosis.confidence), 2)
+        conv_rec = {
+            "consensus": consensus_val,
+            "rounds": 1,
+            "seconds": 5.0,
+            "exit_reason": "consensus_reached" if consensus_val >= CONSENSUS_THRESHOLD else "max_rounds",
+            "escalated_to_argon": True,
+            "escalation_model": MODEL_TABLE["reasoning"].model_id,
+        }
+        parts_list = list(ARCHETYPE_DOMAINS)
+        from godview_shared.contracts import ConvergenceRecord
+        conv_obj = ConvergenceRecord(
+            consensus=consensus_val,
+            rounds=1,
+            seconds=5.0,
+            exit_reason="consensus_reached" if consensus_val >= CONSENSUS_THRESHOLD else "max_rounds",
+            escalated_to_argon=True,
+            escalation_model=MODEL_TABLE["reasoning"].model_id,
+        )
 
         if hasattr(incident_doc, "diagnoses") and isinstance(incident_doc.diagnoses, list):
             incident_doc.diagnoses = [d for d in incident_doc.diagnoses if not _is_placeholder(d)]
             incident_doc.diagnoses.append(diagnosis)
+            incident_doc.convergence = conv_obj
+            incident_doc.participants = parts_list
         elif isinstance(incident_doc, dict):
             existing_d = [d for d in incident_doc.get("diagnoses", []) if not _is_placeholder(d)]
             existing_d.append(diag_dict)
             incident_doc["diagnoses"] = existing_d
+            incident_doc["convergence"] = conv_rec
+            incident_doc["participants"] = parts_list
 
         inc_mgr = getattr(ctx, "incident_manager", None)
         if inc_mgr is not None and hasattr(inc_mgr, "_active_incidents"):
@@ -626,26 +648,25 @@ def register_in_process_court(ctx: Any) -> CourtOrchestrator:
                     active_inc.diagnoses = [d for d in active_inc.diagnoses if not _is_placeholder(d)]
                     if diagnosis not in active_inc.diagnoses:
                         active_inc.diagnoses.append(diagnosis)
+                    active_inc.convergence = conv_obj
+                    active_inc.participants = parts_list
 
         if hasattr(ctx, "docs") and ctx.docs is not None:
             existing = ctx.docs.get("incidents", inc_id)
             if existing is not None:
                 diagnoses = [d for d in existing.get("diagnoses", []) if not _is_placeholder(d)]
-                diagnoses.append(diag_dict)
+                if not any(
+                    (d.get("hypothesis") if isinstance(d, dict) else getattr(d, "hypothesis", None)) == diagnosis.hypothesis
+                    for d in diagnoses
+                ):
+                    diagnoses.append(diag_dict)
                 ctx.docs.set(
                     "incidents",
                     inc_id,
                     {
                         "diagnoses": diagnoses,
-                        "participants": list(ARCHETYPE_DOMAINS),
-                        "convergence": {
-                            "consensus": consensus_val,
-                            "rounds": 1,
-                            "seconds": 5.0,
-                            "exit_reason": "consensus_reached" if consensus_val >= CONSENSUS_THRESHOLD else "max_rounds",
-                            "escalated_to_argon": True,
-                            "escalation_model": MODEL_TABLE["reasoning"].model_id,
-                        },
+                        "participants": parts_list,
+                        "convergence": conv_rec,
                     },
                     merge=True,
                 )

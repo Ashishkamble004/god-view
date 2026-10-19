@@ -49,17 +49,25 @@ def _has_real_diagnosis(diagnoses: Sequence[Any] | None) -> bool:
     if not diagnoses:
         return False
     for d in diagnoses:
-        conf = getattr(d, "confidence", None)
-        if conf is None and isinstance(d, dict):
-            conf = d.get("confidence")
-        conf_val = float(conf or 0.0)
-        hyp = getattr(d, "hypothesis", None)
-        if hyp is None and isinstance(d, dict):
-            hyp = d.get("hypothesis")
-        hyp_str = str(hyp or "").lower()
-        if conf_val > 0.0 and "pending swarm consensus" not in hyp_str:
+        if not _is_placeholder(d):
             return True
     return False
+
+
+def _is_placeholder(d: Any) -> bool:
+    """Return True if diagnosis is a placeholder or has 0.0 confidence."""
+    conf = getattr(d, "confidence", None)
+    if conf is None and isinstance(d, dict):
+        conf = d.get("confidence")
+    try:
+        conf_val = float(conf or 0.0)
+    except (ValueError, TypeError):
+        conf_val = 0.0
+    hyp = getattr(d, "hypothesis", None)
+    if hyp is None and isinstance(d, dict):
+        hyp = d.get("hypothesis")
+    hyp_str = str(hyp or "").lower()
+    return conf_val == 0.0 or "pending swarm consensus" in hyp_str
 
 
 class IncidentManager:
@@ -152,6 +160,8 @@ class IncidentManager:
                             if len(parts) >= 2:
                                 inc.target_resource = parts[1]
                                 inc.resource_id = parts[1]
+                        if inc.diagnoses:
+                            inc.diagnoses = [d for d in inc.diagnoses if not _is_placeholder(d)]
                         if inc.dedupe_key:
                             self._active_incidents[inc.dedupe_key] = inc
                     except Exception:
@@ -410,7 +420,15 @@ class IncidentManager:
         """Persist incident to both `incidents` and `episodic_incidents` collections."""
         if self._firestore is None:
             return
+        # Ensure placeholders are stripped from diagnoses before persisting
+        incident.diagnoses = [d for d in incident.diagnoses if not _is_placeholder(d)]
         payload = incident.model_dump(mode="json", by_alias=True)
+        if incident.convergence is None:
+            payload.pop("convergence", None)
+        if not incident.participants:
+            payload.pop("participants", None)
+        if not payload.get("diagnoses"):
+            payload.pop("diagnoses", None)
         if hasattr(self._firestore, "set"):
             try:
                 self._firestore.set("incidents", incident.doc_id, payload, merge=True)
@@ -538,23 +556,51 @@ class IncidentManager:
                     eval_result.evidence_samples + existing_samples
                 )[:10]
 
-            # Sync diagnoses from Firestore if populated by async court callback
-            if not _has_real_diagnosis(incident.diagnoses) and self._firestore is not None and incident.doc_id:
+            # Sync diagnoses, convergence, and participants from Firestore if populated by async court callback
+            if self._firestore is not None and incident.doc_id:
                 try:
                     stored_inc = self._firestore.get("incidents", incident.doc_id)
-                    if stored_inc and stored_inc.get("diagnoses") and _has_real_diagnosis(stored_inc["diagnoses"]):
-                        from godview_shared.contracts import Diagnosis
+                    if stored_inc:
+                        if not _has_real_diagnosis(incident.diagnoses) and stored_inc.get("diagnoses") and _has_real_diagnosis(stored_inc["diagnoses"]):
+                            from godview_shared.contracts import Diagnosis
 
-                        incident.diagnoses = [
-                            d if isinstance(d, Diagnosis) else Diagnosis.model_validate(d)
-                            for d in stored_inc["diagnoses"]
-                        ]
+                            incident.diagnoses = [
+                                d if isinstance(d, Diagnosis) else Diagnosis.model_validate(d)
+                                for d in stored_inc["diagnoses"]
+                                if not _is_placeholder(d)
+                            ]
+                        if stored_inc.get("convergence") and incident.convergence is None:
+                            from godview_shared.contracts import ConvergenceRecord
+                            incident.convergence = ConvergenceRecord.model_validate(stored_inc["convergence"])
+                        if stored_inc.get("participants") and not incident.participants:
+                            incident.participants = list(stored_inc["participants"])
                 except Exception:
                     pass
 
             self._persist_incident(incident)
-            if not _has_real_diagnosis(incident.diagnoses) and incident.evidence_pack is not None:
+            if not _has_real_diagnosis(incident.diagnoses):
+                if incident.evidence_pack is None:
+                    incident.evidence_pack = await self._build_evidence_pack(
+                        incident.doc_id or "inc-auto", sentinel, eval_result, now
+                    )
                 await self._notify_court(incident, incident.evidence_pack)
+            elif _has_real_diagnosis(incident.diagnoses) and self._firestore is not None and incident.doc_id:
+                # If real diagnosis exists but all approvals are expired, renew via court notification
+                try:
+                    existing_approvals = self._firestore.list_docs("approvals") or []
+                    inc_approvals = [
+                        a for a in existing_approvals
+                        if a.get("incident_id") == incident.doc_id
+                    ]
+                    if inc_approvals and all(a.get("decision", a.get("status")) in ("expired", "rejected") for a in inc_approvals):
+                        logger.info("All approvals for incident %s expired/rejected; renewing via court notification", incident.doc_id)
+                        if incident.evidence_pack is None:
+                            incident.evidence_pack = await self._build_evidence_pack(
+                                incident.doc_id, sentinel, eval_result, now
+                            )
+                        await self._notify_court(incident, incident.evidence_pack)
+                except Exception as e:
+                    logger.debug("Failed checking approval renewal for incident %s: %s", incident.doc_id, e)
             await self._emit_incident_event("incident.updated", incident)
             return incident, False
 

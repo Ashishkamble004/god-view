@@ -215,6 +215,11 @@ def decode_cloud_run_stripped_jwt(raw_tok: str, request: Any = None) -> dict[str
         claims = json.loads(payload_bytes.decode("utf-8"))
         if not isinstance(claims, dict):
             return None
+        # Enforce audience: Cloud Run only strips signatures for the Google Cloud SDK client ID
+        aud = str(claims.get("aud") or "")
+        if aud != "32555940559.apps.googleusercontent.com":
+            logger.warning("Rejected Cloud Run stripped token with non-gcloud audience: %s", aud)
+            return None
         exp = claims.get("exp")
         if exp is not None and float(exp) < time.time():
             logger.warning("Cloud Run stripped token has expired (exp=%s)", exp)

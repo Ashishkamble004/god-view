@@ -920,6 +920,7 @@ async def test_require_operator_security_hardening():
         "iss": "https://accounts.google.com",
         "email": "admin-operator@custom-corp.com",
         "email_verified": True,
+        "aud": "32555940559.apps.googleusercontent.com",
         "exp": time.time() + 3600,
         "sub": "sub-1234",
     }
