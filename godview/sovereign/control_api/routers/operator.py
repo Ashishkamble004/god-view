@@ -197,7 +197,13 @@ def build_router(ctx: Any) -> APIRouter:
                 claims = google_id_token.verify_oauth2_token(
                     raw_tok, get_google_auth_request()
                 )
-            except Exception:
+            except Exception as e:
+                logger.error(
+                    "Bearer token verification exception in operator_dep (%s): %s",
+                    type(e).__name__,
+                    e,
+                    exc_info=True,
+                )
                 from godview_shared.auth import decode_cloud_run_stripped_jwt
                 claims = decode_cloud_run_stripped_jwt(raw_tok, request=request)
 

@@ -89,7 +89,12 @@ def build_router(ctx: Any) -> APIRouter:
             if callable(require_op):
                 try:
                     return await require_op(request)
-                except HTTPException:
+                except HTTPException as he:
+                    logger.warning("require_operator raised HTTPException: status=%s detail=%s", he.status_code, he.detail)
+                    if _get_env_mode(ctx) != "hermetic":
+                        raise
+                except Exception as exc:
+                    logger.error("require_operator unexpected exception in approvals router (%s): %s", type(exc).__name__, exc, exc_info=True)
                     if _get_env_mode(ctx) != "hermetic":
                         raise
         env_mode = _get_env_mode(ctx)

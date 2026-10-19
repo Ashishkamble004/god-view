@@ -525,10 +525,16 @@ def create_app(
                         raw_tok, get_google_auth_request()
                     )
                 except Exception as exc:
+                    logger.error(
+                        "Bearer token verification exception in /me (%s): %s",
+                        type(exc).__name__,
+                        exc,
+                        exc_info=True,
+                    )
                     from godview_shared.auth import decode_cloud_run_stripped_jwt
                     claims = decode_cloud_run_stripped_jwt(raw_tok, request=request)
                     if claims is None:
-                        logger.warning("Bearer token verification failed in /me: %s", exc)
+                        logger.error("Fallback decode_cloud_run_stripped_jwt also returned None in /me")
 
                 if claims and claims.get("iss") in (
                     "https://accounts.google.com",

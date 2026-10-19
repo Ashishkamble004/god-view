@@ -119,6 +119,12 @@ def _resolve_sa_unique_id(sa_email: str) -> str | None:
     return None
 
 
+_BUNDLED_GOOGLE_CERTS_BYTES = b"""{
+  "f10f87405a979c1df36df26606734f33cd85c271": "-----BEGIN CERTIFICATE-----\\nMIIDJjCCAg6gAwIBAgIIdM/oBOCyKewwDQYJKoZIhvcNAQEFBQAwNjE0MDIGA1UE\\nAwwrZmVkZXJhdGVkLXNpZ25vbi5zeXN0ZW0uZ3NlcnZpY2VhY2NvdW50LmNvbTAe\\nFw0yNjAzMzEyMjQ5MTBaFw0yNzAzMzEyMjQ5MTBaMDYxNDAyBgNVBAMMK2ZlZGVy\\nYXRlZC1zaWdub24uc3lzdGVtLmdzZXJ2aWNlYWNjb3VudC5jb20wggEiMA0GCSqG\\nSIb3DQEBAQUAA4IBDwAwggEKAoIBAQDitjm7BkrV1D5RWAHmzg0vIL67ksLYxPtv\\nwZZnO2I2AyynQ2erHSkzs5/HTCzfY3ZplzHXT4nzJ1DGc1v24Bx/7svKHI4hy/9Y\\nTLNpJtQAw6CgX6dCYl61yTE2Dp6SE19oVxNBLRP7b2qXb8IEsgwvoK9KH6vR+BZG\\nyo3ZrIHvAKXvga/o45Vu9qBRaGPnPYvqj+mWaw8PAtW68DujdYMQOOir4hdp9FCj\\nCP3aRBR6es4oPhgKim4sgGF6XpUfx2gVE1noohJCExw6K9ZotT9S0ooAyWgYmJ5N\\n//ev7+cSuzaHnAHtPsWswJJyY7ua8VBcqHz/g/4yVt+BL0JS9CSzAgMBAAGjODA2\\nMAwGA1UdEwEB/wQCMAAwDgYDVR0PAQH/BAQDAgeAMBYGA1UdJQEB/wQMMAoGCCsG\\nAQUFBwMCMA0GCSqGSIb3DQEBBQUAA4IBAQAhBvKdlNwFJdLgScW1v2DbnG2wreu1\\nGaHHQAIjq03fb5kJpFreqsavYsCRpFq27jV33O+GB+r4rvi8iB5uHAtmfxAxE1xv\\nbYYkg/LOgYH/BJS8mYS3aFgUp817e4qFuXBNReJ/yAbKuXQiZVyaeV0WQeokzIz9\\n0HSoPigQp0oMjDxqMWs97ILS3hbrvIAkPWl6CujVRdxRV6w0jbowdZjwoZ2byB7O\\nfuNo/dTKQ7G8aqNdVwy6WT2kX5AE/XKim4ITGzlc5xNkHkSijZBXm7fV2QU85Mtd\\nmWW1mBGwD3uFSk/7OlxFr1EPtmAzs2W1H1N5S6Ev/7gBhB+/UwF+ptDa\\n-----END CERTIFICATE-----\\n",
+  "943a3a5d7d919625a454e489b75c29adab57acba": "-----BEGIN CERTIFICATE-----\\nMIIDJzCCAg+gAwIBAgIJAJv8YZctwxPMMA0GCSqGSIb3DQEBBQUAMDYxNDAyBgNV\\nBAMMK2ZlZGVyYXRlZC1zaWdub24uc3lzdGVtLmdzZXJ2aWNlYWNjb3VudC5jb20w\\nHhcNMjYwMzMxMjI0OTEwWhcNMjcwMzMxMjI0OTEwWjA2MTQwMgYDVQQDDCtmZWRl\\ncmF0ZWQtc2lnbm9uLnN5c3RlbS5nc2VydmljZWFjY291bnQuY29tMIIBIjANBgkq\\nhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEApIpnzA2ezyEERJSxiqpLBmMeIqATH+V6\\niuBtKIibXEyYovujrx8niqTeO6RIyXT6uDUUv0V2kJ8V/iWYFxzXY1BqK9IfcAmj\\ng0XUDoyTVkoyLsF0gj299LH+zw5vCvy8jmamFIZKAbKcQ5hpHvSittM1vl+6vVL+\\ni2GxyGbMA9aY6Hq15NylS1t7ELTYfQimlnvxcb7/DM0cuS5U1SfbCZMCpKhh0nrS\\nlYds240oxpCJOV2rBahs/Ea5c7tezS1nwVC9W/E+bR9TF6BHkC/fv+E8DcWfkI/6\\ngeaJzBhINNxBfjx+w1+WUp2Jz3YYFWEfeQjxMqu+Fg6cGxwk7V16uQIDAQABozgw\\nNjAMBgNVHRMBAf8EAjAAMA4GA1UdDwEB/wQEAwIHgDAWBgNVHSUBAf8EDDAKBggr\\nBgEFBQcDAjANBgkqhkiG9w0BAQUFAAOCAQEAM775NpEtQ5iTVgLNZmzkwy1fgi9d\\nCAkZdJs0K14rR+4VBGhrua0HOSS7dZv+3MBkLIP/2B6s+enQgW26nuNx3xlJKQmk\\nD82sGZ0eGmXSS0U6Lzwr31zRKVm0wFbJU7Q/0LDpQ9gfnheZ7K9hrkuHOlr+EQtG\\njFJRHidxK7m+e/ogbEWgqzLNSAv60USs8mcZmBNLRWTKuAfisVm3v6FKALCv3bSC\\nNc1d1kzytBRaDsgZgy5IxOpbvy79vD9FbMjB6ZcjRrIKaU8TFAkLY1D14EZSB5oQ\\nGVqAoYmgQ6xs6Im9HRFfLPTyL54D/narTMqIGR6G6jcV4/Y0MQqJP1M7yQ==\\n-----END CERTIFICATE-----\\n"
+}"""
+
+
 class _HttpxAuthResponse:
     def __init__(self, r: Any) -> None:
         self.status = r.status_code
@@ -127,11 +133,11 @@ class _HttpxAuthResponse:
 
 
 class _HttpxAuthRequest:
-    """Fallback transport request using httpx for Google ID token verification."""
+    """Robust transport request supporting both network and offline fallback Google cert validation."""
 
     def __init__(self) -> None:
         import httpx
-        self._client = httpx.Client(timeout=10.0)
+        self._client = httpx.Client(timeout=3.0)
 
     def __call__(
         self,
@@ -142,23 +148,49 @@ class _HttpxAuthRequest:
         timeout: float | None = None,
         **kwargs: Any,
     ) -> Any:
+        if "certs" in url:
+            try:
+                resp = self._client.request(
+                    method=method,
+                    url=url,
+                    content=body,
+                    headers=headers,
+                    timeout=timeout or 2.0,
+                )
+                if resp.status_code == 200 and resp.content:
+                    return _HttpxAuthResponse(resp)
+                logger.warning(
+                    "Network certs fetch to %s returned %s; using bundled Google certs",
+                    url,
+                    resp.status_code,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Network certs fetch to %s failed (%s); using bundled Google certs",
+                    url,
+                    exc,
+                )
+
+            class _CertsResp:
+                status = 200
+                headers = {"content-type": "application/json"}
+                data = _BUNDLED_GOOGLE_CERTS_BYTES
+
+            return _CertsResp()
+
         resp = self._client.request(
             method=method,
             url=url,
             content=body,
             headers=headers,
-            timeout=timeout or 10.0,
+            timeout=timeout or 5.0,
         )
         return _HttpxAuthResponse(resp)
 
 
 def get_google_auth_request() -> Any:
-    """Return a google.auth.transport.Request compatible object, using requests or httpx."""
-    try:
-        from google.auth.transport import requests as google_requests
-        return google_requests.Request()
-    except Exception:
-        return _HttpxAuthRequest()
+    """Return a google.auth.transport.Request compatible object."""
+    return _HttpxAuthRequest()
 
 
 def decode_cloud_run_stripped_jwt(raw_tok: str, request: Any = None) -> dict[str, Any] | None:
@@ -608,9 +640,17 @@ class AuthService:
                     raw_tok, get_google_auth_request()
                 )
             except Exception as e:
+                logger.error(
+                    "Bearer token verification exception in require_operator (%s): %s",
+                    type(e).__name__,
+                    e,
+                    exc_info=True,
+                )
                 claims = decode_cloud_run_stripped_jwt(raw_tok, request=request)
                 if claims is None:
-                    logger.warning("Bearer token verification failed in require_operator: %s", e)
+                    logger.error(
+                        "Fallback decode_cloud_run_stripped_jwt also returned None in require_operator"
+                    )
 
             try:
                 if claims and claims.get("iss") in (
