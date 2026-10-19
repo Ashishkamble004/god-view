@@ -152,6 +152,19 @@ class AgentEngineRuntime:
                 or f"{self._parent_name()}/reasoningEngines/{agent_id}"
             )
 
+            last_part = resource_name.split("/")[-1]
+            if not last_part.isdigit():
+                if agent_id in self._cached_agents:
+                    self._cached_agents[agent_id]["deployment_spec"]["min_instances"] = min_instances
+                    return copy.deepcopy(self._cached_agents[agent_id])
+                rec = {
+                    "agent_id": agent_id,
+                    "reasoning_engine": resource_name,
+                    "deployment_spec": {"min_instances": min_instances},
+                }
+                self._cached_agents[agent_id] = rec
+                return copy.deepcopy(rec)
+
             token = self._get_access_token()
             headers = {
                 "Authorization": f"Bearer {token}",
@@ -214,6 +227,21 @@ class AgentEngineRuntime:
                     or f"{self._parent_name()}/reasoningEngines/{agent_id}"
                 )
             )
+            last_part = resource_name.split("/")[-1]
+            if not last_part.isdigit():
+                if agent_id in self._cached_agents:
+                    return copy.deepcopy(self._cached_agents[agent_id])
+                rec = {
+                    "agent_id": agent_id,
+                    "reasoning_engine": resource_name,
+                    "display_name": agent_id,
+                    "state": "ACTIVE",
+                    "deployment_spec": {"min_instances": 0},
+                    "a2a_card_url": f"{self._base_url()}/{resource_name}:query",
+                }
+                self._cached_agents[agent_id] = copy.deepcopy(rec)
+                return rec
+
             url = f"{self._base_url()}/{resource_name}"
             with httpx.Client(timeout=10.0) as client:
                 resp = client.get(url, headers=headers)

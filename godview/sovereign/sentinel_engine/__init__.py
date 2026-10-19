@@ -196,7 +196,7 @@ class SentinelEngine:
         active_sentinels.sort(
             key=lambda s: (
                 0 if s.consecutive_breaches > 0 else 1,
-                0 if s.sentinel_class in ("lb_requests", "probe", "posture", "golden_signals") else 1,
+                0 if s.sentinel_class in ("posture", "lb_requests") else (1 if s.sentinel_class in ("golden_signals", "probe") else 2),
                 s.last_run_at or "",
             )
         )

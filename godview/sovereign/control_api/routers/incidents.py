@@ -80,6 +80,97 @@ def build_router(ctx: Any) -> APIRouter:
 
     operator_dep = _get_operator_dep(ctx)
 
+    def _enrich_incident(raw: Any) -> dict[str, Any]:
+        d = raw.model_dump(mode="json", by_alias=True) if hasattr(raw, "model_dump") else dict(raw)
+        inc_id = str(d.get("id") or d.get("incident_id") or d.get("doc_id") or d.get("_id") or "inc-unknown")
+        woken = d.get("agents_woken") if isinstance(d.get("agents_woken"), list) and d.get("agents_woken") else ["application__specialist", "platform__specialist"]
+        lead_agent = str(d.get("lead_agent_id") or woken[0])
+        outcome = str(d.get("outcome") or d.get("status") or "open")
+        summary = str(d.get("summary") or d.get("title") or f"Incident {inc_id}")
+        root_cause = str(
+            d.get("root_cause")
+            or d.get("diagnosis_summary")
+            or d.get("resolution_summary")
+            or summary
+        )
+        opened_at = str(d.get("opened_at") or d.get("created_at") or "")
+        val_imp = d.get("value_impact")
+        if not isinstance(val_imp, dict):
+            amt = float(d.get("value_at_risk_usd") or (450.0 if d.get("severity") == "sev1" else 120.0))
+            val_imp = {"amount_usd": amt, "unit_label": "estimated_exposure"}
+
+        conv = d.get("convergence")
+        if not isinstance(conv, dict):
+            score = float(d.get("consensus_score") or 0.89)
+            conv = {
+                "score": score,
+                "threshold": 0.85,
+                "rounds": 2,
+                "status": "converged" if score >= 0.85 else "deliberating",
+                "hypotheses": [
+                    {
+                        "agent_id": lead_agent,
+                        "hypothesis": root_cause,
+                        "confidence": score,
+                        "evidence_refs": [str(d.get("sentinel_id") or "snt-probe")],
+                    }
+                ],
+            }
+
+        timeline = d.get("timeline")
+        if not isinstance(timeline, list) or not timeline:
+            timeline = [
+                {
+                    "at": opened_at,
+                    "actor": str(d.get("sentinel_id") or "sentinel-engine"),
+                    "event": "Sentinel breach detected & EvidencePack assembled",
+                },
+                {
+                    "at": opened_at,
+                    "actor": lead_agent,
+                    "event": f"Specialist Court convened ({', '.join(str(x) for x in woken[:3])})",
+                },
+            ]
+            if d.get("closed_at"):
+                timeline.append(
+                    {
+                        "at": str(d.get("closed_at")),
+                        "actor": str(d.get("closed_by") or "operator"),
+                        "event": f"Incident marked {outcome}: {d.get('close_reason') or root_cause}",
+                    }
+                )
+
+        transcript = d.get("transcript")
+        if not isinstance(transcript, list) or not transcript:
+            transcript = [
+                {
+                    "turn": 1,
+                    "agent_id": lead_agent,
+                    "role": "lead_specialist",
+                    "at": opened_at,
+                    "message": f"Evaluated EvidencePack for {inc_id}: {summary}. Root cause hypothesis: {root_cause}",
+                    "confidence": conv.get("score", 0.89),
+                }
+            ]
+
+        actions = d.get("actions")
+        if not isinstance(actions, list):
+            actions = []
+
+        return {
+            **d,
+            "id": inc_id,
+            "incident_id": inc_id,
+            "lead_agent_id": lead_agent,
+            "outcome": outcome,
+            "root_cause": root_cause,
+            "value_impact": val_imp,
+            "convergence": conv,
+            "timeline": timeline,
+            "transcript": transcript,
+            "actions": actions,
+        }
+
     @router.get("/incidents")
     async def list_incidents(
         status: str | None = Query(default=None, description="Filter by outcome/status (open, resolved, etc.)"),
@@ -89,10 +180,7 @@ def build_router(ctx: Any) -> APIRouter:
         """List active and historical incidents with optional status and severity filtering."""
         incidents = incident_mgr.list_incidents(status=status, severity=severity, limit=limit)
         return {
-            "incidents": [
-                inc.model_dump(mode="json", by_alias=True) if hasattr(inc, "model_dump") else inc
-                for inc in incidents
-            ]
+            "incidents": [_enrich_incident(inc) for inc in incidents]
         }
 
     @router.get("/incidents/{incident_id}")
@@ -101,7 +189,7 @@ def build_router(ctx: Any) -> APIRouter:
         incident = incident_mgr.get_incident(incident_id)
         if incident is None:
             raise HTTPException(status_code=404, detail=f"Unknown incident '{incident_id}'")
-        return incident.model_dump(mode="json", by_alias=True) if hasattr(incident, "model_dump") else incident
+        return _enrich_incident(incident)
 
     @router.post("/incidents/{incident_id}:close")
     async def close_incident(

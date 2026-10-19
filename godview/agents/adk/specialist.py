@@ -196,12 +196,15 @@ class CtxLlm(BaseLlm):
                 yield AdkLlmResponse(content=types.Content(parts=parts, role="model"))
                 return
 
-            if hasattr(res, "model_dump_json"):
-                text = res.model_dump_json()
-            elif isinstance(res, dict):
-                text = json.dumps(res)
+            if isinstance(res, (dict, list)):
+                text = json.dumps(_sanitize_for_json(res), default=str)
+            elif hasattr(res, "model_dump_json"):
+                try:
+                    text = res.model_dump_json()
+                except Exception:
+                    text = json.dumps(_sanitize_for_json(res.model_dump(mode="json")), default=str)
             elif hasattr(res, "text") and res.text:
-                text = res.text
+                text = str(res.text)
             else:
                 text = str(res)
 
@@ -212,6 +215,24 @@ class CtxLlm(BaseLlm):
                 text='{"hypothesis": "not diagnosed: model unavailable", "confidence": 0.0, "root_cause_category": "model_unavailable"}'
             )
             yield AdkLlmResponse(content=types.Content(parts=[part], role="model"))
+
+
+def _sanitize_for_json(obj: Any) -> Any:
+    """Recursively convert Decimal -> float, datetime/date -> isoformat, bytes -> str."""
+    from datetime import date, datetime
+    from decimal import Decimal
+
+    if isinstance(obj, Decimal):
+        return float(obj)
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    if isinstance(obj, bytes):
+        return obj.decode("utf-8", "replace")
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [_sanitize_for_json(v) for v in obj]
+    return obj
 
 
 class SpecialistTools:
@@ -297,13 +318,13 @@ class SpecialistTools:
                 executor = self.ctx.executors.get(capability_id)
                 if executor is not None:
                     res = executor(**arg_dict)
-                    return res if isinstance(res, dict) else {"status": "ok", "result": res}
+                    return _sanitize_for_json(res if isinstance(res, dict) else {"status": "ok", "result": res})
 
             if self.ctx is not None and hasattr(self.ctx, "remediation_dispatcher") and self.ctx.remediation_dispatcher is not None:
                 dispatcher = self.ctx.remediation_dispatcher
                 if hasattr(dispatcher, "invoke_read"):
                     res = dispatcher.invoke_read(capability_id, arg_dict)
-                    return res if isinstance(res, dict) else {"status": "ok", "result": res}
+                    return _sanitize_for_json(res if isinstance(res, dict) else {"status": "ok", "result": res})
 
             # 2. Remote Sovereign dispatch over HTTP with ID token
             if self.sovereign_url:
@@ -315,7 +336,7 @@ class SpecialistTools:
                     with httpx.Client(timeout=15.0) as client:
                         resp = client.post(url, json={"args": arg_dict}, headers=headers)
                         if resp.status_code == 200:
-                            return resp.json()
+                            return _sanitize_for_json(resp.json())
                         return {
                             "status": "error",
                             "error": f"HTTP {resp.status_code}: {resp.text[:200]}",
@@ -367,7 +388,7 @@ class SpecialistTools:
                     res = executor(**arg_dict)
                     if inspect.isawaitable(res):
                         res = await res
-                    return res if isinstance(res, dict) else {"status": "ok", "result": res}
+                    return _sanitize_for_json(res if isinstance(res, dict) else {"status": "ok", "result": res})
 
             if self.ctx is not None and hasattr(self.ctx, "remediation_dispatcher") and self.ctx.remediation_dispatcher is not None:
                 dispatcher = self.ctx.remediation_dispatcher
@@ -375,7 +396,7 @@ class SpecialistTools:
                     res = dispatcher.invoke_read(capability_id, arg_dict)
                     if inspect.isawaitable(res):
                         res = await res
-                    return res if isinstance(res, dict) else {"status": "ok", "result": res}
+                    return _sanitize_for_json(res if isinstance(res, dict) else {"status": "ok", "result": res})
 
             if self.sovereign_url:
                 try:
@@ -386,7 +407,7 @@ class SpecialistTools:
                     async with httpx.AsyncClient(timeout=15.0) as client:
                         resp = await client.post(url, json={"args": arg_dict}, headers=headers)
                         if resp.status_code == 200:
-                            return resp.json()
+                            return _sanitize_for_json(resp.json())
                         return {
                             "status": "error",
                             "error": f"HTTP {resp.status_code}: {resp.text[:200]}",
@@ -418,9 +439,9 @@ class SpecialistTools:
         if self.ctx is not None and hasattr(self.ctx, "docs") and self.ctx.docs is not None:
             doc = self.ctx.docs.get("discovered_services", target_id)
             if doc and "business_context" in doc:
-                return doc["business_context"]
+                return _sanitize_for_json(doc["business_context"])
             if doc:
-                return doc
+                return _sanitize_for_json(doc)
         if self.sovereign_url:
             try:
                 import httpx
@@ -430,7 +451,7 @@ class SpecialistTools:
                 with httpx.Client(timeout=15.0) as client:
                     resp = client.get(url, headers=headers)
                     if resp.status_code == 200:
-                        return resp.json()
+                        return _sanitize_for_json(resp.json())
             except Exception as exc:
                 logger.warning("Remote fetch get_business_context failed for %s: %s", target_id, exc)
         return {"service_id": target_id, "status": "no_business_context_found"}
@@ -441,9 +462,9 @@ class SpecialistTools:
         if self.ctx is not None and hasattr(self.ctx, "docs") and self.ctx.docs is not None:
             doc = self.ctx.docs.get("discovered_services", target_id)
             if doc and "business_context" in doc:
-                return doc["business_context"]
+                return _sanitize_for_json(doc["business_context"])
             if doc:
-                return doc
+                return _sanitize_for_json(doc)
         if self.sovereign_url:
             try:
                 import httpx
@@ -453,7 +474,7 @@ class SpecialistTools:
                 async with httpx.AsyncClient(timeout=15.0) as client:
                     resp = await client.get(url, headers=headers)
                     if resp.status_code == 200:
-                        return resp.json()
+                        return _sanitize_for_json(resp.json())
             except Exception as exc:
                 logger.warning("Remote async get_business_context failed for %s: %s", target_id, exc)
         return {"service_id": target_id, "status": "no_business_context_found"}
@@ -466,13 +487,13 @@ class SpecialistTools:
             if self.ctx is not None and hasattr(self.ctx, "docs") and self.ctx.docs is not None:
                 col = "incidents" if "incident" in (query or "").lower() else "changes"
                 try:
-                    return self.ctx.docs.list_docs(col, limit=20)
+                    return _sanitize_for_json(self.ctx.docs.list_docs(col, limit=20))
                 except Exception:
                     return []
             return []
         if self.ctx is not None and hasattr(self.ctx, "ledger") and self.ctx.ledger is not None:
             try:
-                return self.ctx.ledger.query(query, params)
+                return _sanitize_for_json(self.ctx.ledger.query(query, params))
             except Exception as exc:
                 logger.debug("query_ledger suppressed error: %s", exc)
                 return [{"error": str(exc)}]
@@ -482,14 +503,14 @@ class SpecialistTools:
         self, query: str, params: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:
         """Asynchronously query event ledger."""
-        return self.query_ledger(query, params)
+        return _sanitize_for_json(self.query_ledger(query, params))
 
     def get_incident(self, incident_id: str) -> dict[str, Any]:
         """Fetch incident details including the full evidence pack."""
         if self.ctx is not None and hasattr(self.ctx, "docs") and self.ctx.docs is not None:
             doc = self.ctx.docs.get("incidents", incident_id)
             if doc:
-                return doc
+                return _sanitize_for_json(doc)
         if self.sovereign_url:
             try:
                 import httpx
@@ -499,7 +520,7 @@ class SpecialistTools:
                 with httpx.Client(timeout=15.0) as client:
                     resp = client.get(url, headers=headers)
                     if resp.status_code == 200:
-                        return resp.json()
+                        return _sanitize_for_json(resp.json())
             except Exception as exc:
                 logger.warning("Remote fetch get_incident failed for %s: %s", incident_id, exc)
         return {"incident_id": incident_id, "status": "incident_not_found"}
@@ -509,7 +530,7 @@ class SpecialistTools:
         if self.ctx is not None and hasattr(self.ctx, "docs") and self.ctx.docs is not None:
             doc = self.ctx.docs.get("incidents", incident_id)
             if doc:
-                return doc
+                return _sanitize_for_json(doc)
         if self.sovereign_url:
             try:
                 import httpx
@@ -519,7 +540,7 @@ class SpecialistTools:
                 async with httpx.AsyncClient(timeout=15.0) as client:
                     resp = await client.get(url, headers=headers)
                     if resp.status_code == 200:
-                        return resp.json()
+                        return _sanitize_for_json(resp.json())
             except Exception as exc:
                 logger.warning("Remote async get_incident failed for %s: %s", incident_id, exc)
         return {"incident_id": incident_id, "status": "incident_not_found"}
@@ -540,11 +561,11 @@ class SpecialistTools:
             confidence=confidence,
         )
         self.proposed_actions.append(action)
-        return {
+        return _sanitize_for_json({
             "status": "proposed",
             "action": action.model_dump(mode="json"),
             "approval_required": is_mutating_capability(capability_id),
-        }
+        })
 
     def build_tool_callables(self) -> list[Callable[..., Any]]:
         """Return the list of tool functions."""

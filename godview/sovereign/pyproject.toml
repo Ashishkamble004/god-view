@@ -28,6 +28,9 @@ dependencies = [
     "cryptography>=42.0.0",
 ]
 
+[project.scripts]
+godview = "godview.cli:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.2.0",

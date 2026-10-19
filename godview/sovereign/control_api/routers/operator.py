@@ -657,10 +657,138 @@ def build_router(ctx: Any) -> APIRouter:
             "job_name": job_name,
         }
 
+    def _build_default_drills(docs_store: Any) -> list[dict[str, Any]]:
+        state_doc = _get_operator_state_doc(docs_store, "current") or {}
+        active_ids = set(state_doc.get("active_drills") or [])
+        svcs = docs_store.list_docs("discovered_services") if docs_store and hasattr(docs_store, "list_docs") else []
+        managed_names = [
+            str(s.get("name"))
+            for s in svcs
+            if isinstance(s.get("labels"), dict) and s["labels"].get("godview_managed") == "true"
+        ]
+        t_primary = managed_names[0] if len(managed_names) > 0 else "managed-service-primary"
+        t_secondary = managed_names[1] if len(managed_names) > 1 else t_primary
+        t_worker = managed_names[2] if len(managed_names) > 2 else t_primary
+
+        catalog = [
+            {
+                "drill_id": "drill-biz-01",
+                "title": "Silent State Transition Stall (HTTP 200 OK)",
+                "fault_class": "BUSINESS",
+                "target_service": t_primary,
+                "expected_detection": "Sentinel invariant_sql detects state transition lag while HTTP 200 & P95 stay green",
+                "mttd_target": "< 20s",
+                "infra_golden_signals": "green",
+            },
+            {
+                "drill_id": "drill-biz-02",
+                "title": "Silent Calculation Formula Drift",
+                "fault_class": "BUSINESS",
+                "target_service": t_secondary,
+                "expected_detection": "Business-line specialist detects output ratio deviation from ledger invariant",
+                "mttd_target": "< 30s",
+                "infra_golden_signals": "green",
+            },
+            {
+                "drill_id": "drill-biz-03",
+                "title": "Downstream Partner Contract Schema Mismatch",
+                "fault_class": "BUSINESS",
+                "target_service": t_secondary,
+                "expected_detection": "Application & Data specialists correlate silent payload drop across trace spans",
+                "mttd_target": "< 25s",
+                "infra_golden_signals": "green",
+            },
+            {
+                "drill_id": "drill-biz-04",
+                "title": "Idempotency Key Collision / Duplicate Ledger Write",
+                "fault_class": "BUSINESS",
+                "target_service": t_primary,
+                "expected_detection": "Data specialist SQL sentinel flags duplicate correlation_key in BigQuery ledger",
+                "mttd_target": "< 20s",
+                "infra_golden_signals": "green",
+            },
+            {
+                "drill_id": "drill-biz-05",
+                "title": "Funnel Conversion Drop on Canary Revision",
+                "fault_class": "BUSINESS",
+                "target_service": t_primary,
+                "expected_detection": "Change specialist correlates conversion drop to recent deploy & proposes L2 traffic split",
+                "mttd_target": "< 30s",
+                "infra_golden_signals": "green",
+            },
+            {
+                "drill_id": "drill-infra-01",
+                "title": "Compute Pod Memory Pressure & OOM Restart Loop",
+                "fault_class": "INFRA",
+                "target_service": t_worker,
+                "expected_detection": "Platform specialist detects container restart spike & invokes k8s.rollout_restart",
+                "mttd_target": "< 15s",
+                "infra_golden_signals": "red",
+            },
+            {
+                "drill_id": "drill-infra-02",
+                "title": "Database Connection Pool Saturation",
+                "fault_class": "INFRA",
+                "target_service": t_secondary,
+                "expected_detection": "Data & Application specialists isolate pool exhaustion and propose safe connection reset",
+                "mttd_target": "< 20s",
+                "infra_golden_signals": "red",
+            },
+            {
+                "drill_id": "drill-infra-03",
+                "title": "Pub/Sub Consumer Backpressure & Ack Deadline Spike",
+                "fault_class": "INFRA",
+                "target_service": t_worker,
+                "expected_detection": "Platform specialist scales consumer instances within TrustGate L2 ceiling",
+                "mttd_target": "< 20s",
+                "infra_golden_signals": "red",
+            },
+        ]
+        return [{**d, "is_active": d["drill_id"] in active_ids} for d in catalog]
+
     @router.get("/chaos/drills")
     async def list_chaos_drills() -> dict[str, Any]:
-        """Return registered chaos drills (empty in production unless drills are configured)."""
-        return {"drills": []}
+        """Return registered proving-ground chaos drills."""
+        docs_store = getattr(ctx, "docs", None)
+        return {"drills": _build_default_drills(docs_store)}
+
+    @router.post("/chaos/drills/{drill_id}:start")
+    @router.post("/chaos/drills/{drill_id}/start")
+    async def start_chaos_drill(
+        drill_id: str,
+        operator: Any = Depends(operator_dep),  # noqa: B008
+    ) -> dict[str, Any]:
+        actor = _get_operator_email(operator)
+        docs_store = getattr(ctx, "docs", None)
+        state_doc = _get_operator_state_doc(docs_store, "current") or {}
+        active = list(set(state_doc.get("active_drills") or []) | {drill_id})
+        state_doc["active_drills"] = active
+        _set_operator_state(docs_store, "current", state_doc)
+        await _emit_event(
+            event_type="godview.operator.drill_start",
+            subject=drill_id,
+            data={"drill_id": drill_id, "operator": actor, "action": "start"},
+        )
+        return {"ok": True, "drill_id": drill_id, "is_active": True, "operator": actor}
+
+    @router.post("/chaos/drills/{drill_id}:stop")
+    @router.post("/chaos/drills/{drill_id}/stop")
+    async def stop_chaos_drill(
+        drill_id: str,
+        operator: Any = Depends(operator_dep),  # noqa: B008
+    ) -> dict[str, Any]:
+        actor = _get_operator_email(operator)
+        docs_store = getattr(ctx, "docs", None)
+        state_doc = _get_operator_state_doc(docs_store, "current") or {}
+        active = [d for d in (state_doc.get("active_drills") or []) if d != drill_id]
+        state_doc["active_drills"] = active
+        _set_operator_state(docs_store, "current", state_doc)
+        await _emit_event(
+            event_type="godview.operator.drill_stop",
+            subject=drill_id,
+            data={"drill_id": drill_id, "operator": actor, "action": "stop"},
+        )
+        return {"ok": True, "drill_id": drill_id, "is_active": False, "operator": actor}
 
     return router
 

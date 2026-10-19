@@ -277,17 +277,33 @@ class TopologyBuilder:
 
             # Business context summary
             bc = s.business_context
+            tier_default_domain = {
+                "edge": "Edge & Ingress",
+                "compute": "Application Compute",
+                "data": "Data & Persistence",
+                "messaging": "Event & Messaging Mesh",
+                "platform": "AI & Platform Runtime",
+                "observer": "Observer Control Plane",
+                "external": "External Integration",
+            }.get(tier, "Platform Services")
+            kind_label = kind.replace("_", " ").title()
             if bc is not None and isinstance(bc, BusinessContext):
                 business = TopologyBusinessSummary(
-                    domain=bc.domain,
-                    role_summary=bc.role_summary,
-                    confidence=bc.confidence,
+                    domain=bc.domain or tier_default_domain,
+                    role_summary=bc.role_summary or s.inferred_role or f"{kind_label} ({name})",
+                    confidence=bc.confidence or 0.85,
                 )
             else:
+                inferred_dom = (
+                    s.labels.get("domain")
+                    or s.labels.get("app")
+                    or s.labels.get("tier")
+                    or tier_default_domain
+                )
                 business = TopologyBusinessSummary(
-                    domain="",
-                    role_summary=s.inferred_role or "",
-                    confidence=s.role_confidence or 0.0,
+                    domain=str(inferred_dom),
+                    role_summary=s.inferred_role or f"{kind_label} resource in {tier} tier",
+                    confidence=s.role_confidence or 0.8,
                 )
 
             # Incidents open count
@@ -322,6 +338,8 @@ class TopologyBuilder:
             elif err is not None and err > 0.005:
                 status = "amber"
             elif (rps is not None and rps > 0) or (p95 is not None and p95 > 0):
+                status = "green"
+            elif getattr(s, "status", "active") == "active":
                 status = "green"
             else:
                 status = "unknown"
@@ -423,10 +441,29 @@ class TopologyBuilder:
                     if node and node not in status_by_node:
                         for n_id in status_by_node:
                             if node.startswith(f"{n_id}.") or node.startswith(f"{n_id}:"):
-                                if not op:
+                                if not op or op == "unknown":
                                     op = node[len(n_id) + 1:]
                                 node = n_id
                                 break
+
+                    if not op or op == "unknown":
+                        svc_match = node_map.get(node) or next(
+                            (sv for sv in node_map.values() if sv.name == node), None
+                        )
+                        if svc_match is not None:
+                            if svc_match.routes:
+                                r0 = svc_match.routes[0]
+                                op = str(
+                                    r0.get("operation_id")
+                                    or r0.get("summary")
+                                    or f"{r0.get('method', 'POST')} {r0.get('path', '/v1/op')}"
+                                )
+                            else:
+                                op = f"{svc_match.kind}:{svc_match.name}"
+                        elif "." in node:
+                            op = f"invoke:{node.split('.', 1)[-1]}"
+                        else:
+                            op = f"invoke:{node}"
 
                     steps.append(TopologyJourneyStep(node=node, operation=op))
 

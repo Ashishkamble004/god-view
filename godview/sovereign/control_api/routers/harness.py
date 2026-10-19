@@ -105,6 +105,11 @@ def _serialize_tree(agent_id: str, domain: str, tree: HarnessTree, version: int 
     c3_path = root / "guardrails.md"
     c4_path = root / "LongTermMEMORY.md"
 
+    c1_text = c1_path.read_text(encoding="utf-8") if c1_path.is_file() else ""
+    c2_text = c2_path.read_text(encoding="utf-8") if c2_path.is_file() else ""
+    c3_text = c3_path.read_text(encoding="utf-8") if c3_path.is_file() else ""
+    c4_text = c4_path.read_text(encoding="utf-8") if c4_path.is_file() else ""
+
     hooks_path = root / "hooks.json"
     hooks_dict: dict[str, Any] = {}
     if hooks_path.is_file():
@@ -112,6 +117,36 @@ def _serialize_tree(agent_id: str, domain: str, tree: HarnessTree, version: int 
             hooks_dict = json.loads(hooks_path.read_text(encoding="utf-8"))
         except Exception:
             hooks_dict = {}
+
+    sub_agents_detail = []
+    for p in tree.sub_agents():
+        sub_agents_detail.append(
+            {
+                "name": p.parent.name,
+                "path": str(p.relative_to(root)),
+                "content": p.read_text(encoding="utf-8") if p.is_file() else "",
+            }
+        )
+
+    skills_detail = []
+    for p in tree.skills():
+        skills_detail.append(
+            {
+                "name": p.parent.name,
+                "path": str(p.relative_to(root)),
+                "content": p.read_text(encoding="utf-8") if p.is_file() else "",
+            }
+        )
+
+    scripts_detail = []
+    for p in tree.scripts():
+        scripts_detail.append(
+            {
+                "name": p.name,
+                "path": str(p.relative_to(root)),
+                "content": p.read_text(encoding="utf-8") if p.is_file() else "",
+            }
+        )
 
     return {
         "agent_id": agent_id,
@@ -128,14 +163,170 @@ def _serialize_tree(agent_id: str, domain: str, tree: HarnessTree, version: int 
         "tree_root": str(root),
         "model_id": DEFAULT_AGENT_MODEL_ID,
         "categories": {
-            "c1_identity": c1_path.read_text(encoding="utf-8") if c1_path.is_file() else "",
-            "c2_tool_descriptions": c2_path.read_text(encoding="utf-8") if c2_path.is_file() else "",
-            "c3_guardrails": c3_path.read_text(encoding="utf-8") if c3_path.is_file() else "",
-            "c4_long_term_memory": c4_path.read_text(encoding="utf-8") if c4_path.is_file() else "",
+            "c1_identity": c1_text,
+            "c2_tool_descriptions": c2_text,
+            "c3_guardrails": c3_text,
+            "c4_long_term_memory": c4_text,
             "c5_sub_agents": [p.parent.name for p in tree.sub_agents()],
             "c6_skills": [p.parent.name for p in tree.skills()],
             "c7_scripts": [p.name for p in tree.scripts()],
             "c8_hooks": hooks_dict,
+        },
+        "categories_detail": {
+            "c5_sub_agents": sub_agents_detail,
+            "c6_skills": skills_detail,
+            "c7_scripts": scripts_detail,
+            "token_breakdown": {
+                "c1_identity_tokens": max(1, len(c1_text) // 4),
+                "c2_tool_descriptions_tokens": max(1, len(c2_text) // 4),
+                "c3_guardrails_tokens": max(1, len(c3_text) // 4),
+                "c4_long_term_memory_tokens": max(1, len(c4_text) // 4),
+                "always_on_total": report.always_on_tokens,
+                "always_on_max": tree.surface.always_on_max,
+            },
+        },
+    }
+
+
+def _build_harness_overview(ctx: Any | None = None) -> dict[str, Any]:
+    archetypes: list[dict[str, Any]] = []
+    for dom in ("application", "data", "business_line", "change", "platform"):
+        aid = f"{dom}__specialist"
+        d_name, tree, ver = _get_agent_tree(aid, ctx=ctx)
+        archetypes.append(_serialize_tree(aid, d_name, tree, version=ver))
+
+    return {
+        "surface": {
+            "name": GODVIEW_SURFACE.name,
+            "always_on_max": GODVIEW_SURFACE.always_on_max,
+            "categories": list(GODVIEW_SURFACE.categories),
+            "forbidden_imports": sorted(GODVIEW_SURFACE.forbidden_script_imports),
+            "allowed_hook_events": sorted(GODVIEW_SURFACE.allowed_hook_events),
+        },
+        "recursion_architecture": {
+            "title": "Harness² Two-Level Recursive Self-Improvement (RSI)",
+            "reference": "google-research/harness2",
+            "inner_loop": {
+                "name": "Level 1 — Specialist Court Execution Loop",
+                "parameter": "P = 3,000 tokens",
+                "budget_tokens": 3000,
+                "model": DEFAULT_AGENT_MODEL_ID,
+                "description": (
+                    "Executes specialist court diagnosis, evidence pack analysis, and TrustGate-governed "
+                    "tool invocations under C1-C4 always-on context (<=12,000 tokens) and C3 autotrigger guardrails."
+                ),
+            },
+            "outer_loop": {
+                "name": "Level 2 — Harness Proposer & Hill-Climbing Loop",
+                "parameter": "R = 4,000 tokens",
+                "budget_tokens": 4000,
+                "model": DEFAULT_AGENT_MODEL_ID,
+                "description": (
+                    "Diagnoses EXPERIENCE.md failure modes after incident resolution or scheduled reflection, "
+                    "proposes bounded file mutations across C1-C8 (parallel k=4 or sequential hill-climbing), "
+                    "validates via AST sandbox + 12k token cap, and promotes winning HarnessTrees to Cloud Storage & Firestore."
+                ),
+            },
+        },
+        "archetypes": archetypes,
+        "blueprint": {
+            "version": "4.0.0",
+            "package_name": "god-view",
+            "cli_entrypoint": "godview",
+            "organs": [
+                {
+                    "id": "perception",
+                    "name": "PerceptionOrgan",
+                    "module": "godview.sovereign.perception",
+                    "role": "6-Step Self-Awareness Protocol: discovers identity, fingerprints environment, probes 15+ SenseAdapters, builds Topology & BusinessContext, and computes Court Spawn Plan.",
+                },
+                {
+                    "id": "sentinel_engine",
+                    "name": "SentinelEngine",
+                    "module": "godview.sovereign.sentinel_engine",
+                    "role": "Zero-LLM deterministic SQL, metric, and synthetic probe evaluator running on a 10s cadence (60s in hibernate). Tokens at rest = 0.",
+                },
+                {
+                    "id": "nervous_system",
+                    "name": "NervousSystemRouter",
+                    "module": "godview.sovereign.nervous_system",
+                    "role": "CloudEvents 1.0 event bus over Pub/Sub & Cloud Audit Logs with DLQ watchdog and push ingestion.",
+                },
+                {
+                    "id": "court_manager",
+                    "name": "CourtManager & CourtOrchestrator",
+                    "module": "godview.sovereign.court_manager",
+                    "role": "Manages specialist agents across 5 archetypes (application, data, business_line, change, platform) via A2A JSON-RPC 2.0 and TokenGovernor daily ceilings.",
+                },
+                {
+                    "id": "trust_gate",
+                    "name": "TrustGate (L0-L4)",
+                    "module": "godview.sovereign.trust_ladder",
+                    "role": "Deterministic capability gate enforcing L0 Read-Only, L1 Low-Risk, L2 Medium-Risk, L3 High-Risk, and L4 Critical human-in-the-loop approvals with mandatory reversal recipes.",
+                },
+                {
+                    "id": "harness_rsi",
+                    "name": "Harness² Recursive Engine",
+                    "module": "godview.harness.rsi",
+                    "role": "Evolves specialist agent C1-C8 HarnessTrees from incident outcomes and reflection runs with AST-sandboxed C7 scripts and 12k always-on token verification.",
+                },
+            ],
+            "senses": [
+                {"id": "INFRASTRUCTURE", "name": "Infrastructure Sense", "adapters": ["cloud-run", "gke", "gce", "load-balancing", "cloud-armor", "serverless-neg", "iam"]},
+                {"id": "SCOPED_OBSERVABILITY", "name": "Scoped Observability Sense", "adapters": ["cloud-monitoring", "cloud-logging", "cloud-trace", "otlp-ingest"]},
+                {"id": "CODE", "name": "Code & Runtime Sense", "adapters": ["source-repos", "container-images", "vertex-agent-engine"]},
+                {"id": "CONTRACTS", "name": "API & Schema Contracts Sense", "adapters": ["openapi-discovery", "grpc-reflection", "pubsub-schemas"]},
+                {"id": "DATA_LINEAGE", "name": "Data & Storage Lineage Sense", "adapters": ["cloud-sql", "firestore", "bigquery", "gcs", "pubsub"]},
+                {"id": "CHANGE_PLANE", "name": "Change & Deployment Plane Sense", "adapters": ["cloud-audit-logs", "github-webhooks", "terraform-drift"]},
+            ],
+            "invariants": [
+                {"id": "I-01", "title": "Zero Tokens at Rest", "rule": "Sentinel evaluation, health checks, and steady-state polling consume 0 LLM tokens."},
+                {"id": "I-02", "title": "Identity-Only Boot & Autonomous Perception", "rule": "Boots with zero hardcoded service lists; discovers the entire estate autonomously via SenseAdapters."},
+                {"id": "I-03", "title": "Strict Environment Neutrality", "rule": "Core organs and shared contracts contain zero hardcoded tenant names, IPs, or domain stems."},
+                {"id": "I-04", "title": "Single TrustGate Mutation Chokepoint", "rule": "Every mutating capability invocation passes through TrustGate with an explicit ReversalRecipe."},
+                {"id": "I-05", "title": "Observer Self-Exclusion", "rule": "God-View classifies its own control-plane resources as observer tier and never mutates itself via remediation."},
+                {"id": "I-06", "title": "Bounded Token Governor", "rule": "Daily USD ceilings and 20% Sev-1 escalation reserve are enforced before every LLM call."},
+                {"id": "I-07", "title": "Harness² 12k Always-On Cap & AST Sandbox", "rule": "C1-C4 context is capped at 12,000 tokens; C7 scripts forbid network/subprocess/cloud SDK imports."},
+            ],
+            "portable_deployments": [
+                {
+                    "target": "cli",
+                    "title": "Portable Python Package & CLI Utility",
+                    "install": "uv pip install -e .  # or: pip install god-view",
+                    "commands": [
+                        "godview doctor --env gcp",
+                        "godview perceive --project $GOOGLE_CLOUD_PROJECT",
+                        "godview harness inspect --agent application__specialist",
+                        "godview serve --port 8080",
+                    ],
+                },
+                {
+                    "target": "docker",
+                    "title": "Local Docker Compose / Container Utility",
+                    "install": "docker compose up --build -d",
+                    "commands": [
+                        "godview deploy --target docker --env local",
+                        "docker run -p 8080:8080 -e GODVIEW_ENV=gcp -e GOOGLE_CLOUD_PROJECT=$PROJECT_ID godview-sovereign:latest",
+                    ],
+                },
+                {
+                    "target": "cloud_run",
+                    "title": "Google Cloud Run + Terraform Module",
+                    "install": "terraform -chdir=infra/terraform/platform apply",
+                    "commands": [
+                        "godview deploy --target cloud-run --project $PROJECT_ID --region us-central1",
+                        "gcloud run deploy god-view-sovereign --source . --region us-central1",
+                    ],
+                },
+                {
+                    "target": "kubernetes",
+                    "title": "Kubernetes / GKE Cluster Utility",
+                    "install": "kubectl apply -f infra/k8s/godview-sovereign.yaml",
+                    "commands": [
+                        "godview deploy --target k8s --namespace godview-system",
+                    ],
+                },
+            ],
         },
     }
 
@@ -146,6 +337,10 @@ def build_router(ctx: Any) -> APIRouter:
 
     async def auth_dependency(request: Request) -> Any:
         return await _require_auth(request, ctx)
+
+    @router.get("/harness/overview")
+    async def get_harness_overview() -> dict[str, Any]:
+        return _build_harness_overview(ctx=ctx)
 
     @router.get("/harness/{agent_id}/tree")
     async def get_harness_tree(agent_id: str) -> dict[str, Any]:

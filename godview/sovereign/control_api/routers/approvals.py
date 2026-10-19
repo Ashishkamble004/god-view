@@ -77,6 +77,132 @@ def _get_env_mode(ctx: Any) -> str:
     return os.environ.get("GODVIEW_ENV", "gcp")
 
 
+def ensure_open_incident_approvals(ctx: Any) -> list[dict[str, Any]]:
+    """Ensure every open incident with a real diagnosis has an active pending approval card."""
+    if not ctx or not hasattr(ctx, "docs") or ctx.docs is None:
+        return []
+    docs_store = ctx.docs
+    trust_gate = getattr(ctx, "trust_gate", None)
+    if not trust_gate or not hasattr(trust_gate, "create_approval_request"):
+        return []
+
+    from godview.agents.adk.court import _filter_actions_by_relevance
+    from godview.agents.adk.specialist import is_mutating_capability
+    from godview.sovereign.incidents.manager import _has_real_diagnosis, _is_placeholder
+    from godview_shared.contracts import ProposedAction
+
+    created_cards: list[dict[str, Any]] = []
+    try:
+        open_incidents = [
+            d for d in docs_store.list_docs("incidents")
+            if d.get("outcome") == "open"
+        ]
+        all_approvals = docs_store.list_docs("approvals") or []
+
+        for inc in open_incidents:
+            inc_id = str(inc.get("incident_id") or inc.get("doc_id") or "")
+            if not inc_id:
+                continue
+            diagnoses = inc.get("diagnoses") or []
+            if not _has_real_diagnosis(diagnoses):
+                continue
+
+            target_res = str(inc.get("target_resource") or inc.get("resource_id") or "")
+            dedupe_k = str(inc.get("dedupe_key") or "")
+            lead_agent_id = str(inc.get("lead_agent_id") or "platform__default")
+
+            real_diags = [d for d in diagnoses if not _is_placeholder(d)]
+
+            is_waf_incident = (
+                "edge-policy" in target_res
+                or "edge-policy" in dedupe_k
+                or "waf_sensitivity" in dedupe_k
+                or "security-policy" in dedupe_k
+            )
+
+            actions_to_check: list[dict[str, Any]] = []
+            for d in real_diags:
+                diag_dict = d if isinstance(d, dict) else d.model_dump(mode="json")
+                acts = diag_dict.get("proposed_actions") or []
+                act_objs = [
+                    a if isinstance(a, ProposedAction) else ProposedAction.model_validate(a)
+                    for a in acts
+                    if isinstance(a, (dict, ProposedAction))
+                ]
+                filtered_acts = _filter_actions_by_relevance(act_objs, inc)
+                for fa in filtered_acts:
+                    actions_to_check.append(fa.model_dump(mode="json"))
+
+            # If WAF incident has no armor.set_waf_sensitivity in actions, ensure it is proposed
+            if is_waf_incident:
+                has_waf_action = any(
+                    a.get("capability_id") == "armor.set_waf_sensitivity"
+                    for a in actions_to_check
+                )
+                if not has_waf_action:
+                    pol_name = target_res if "policy" in target_res else "edge-policy"
+                    actions_to_check.append({
+                        "capability_id": "armor.set_waf_sensitivity",
+                        "args": {
+                            "policy_name": pol_name,
+                            "rule_priority": 1000,
+                            "sensitivity": 1,
+                            "preview_first": True,
+                        },
+                        "rationale": f"Set sensitivity=1 with preview_first=True on Cloud Armor policy '{pol_name}' rule 1000",
+                        "confidence": 0.96,
+                    })
+
+            for act in actions_to_check:
+                cap_id = act.get("capability_id") or ""
+                if not cap_id or not is_mutating_capability(cap_id):
+                    continue
+
+                # Check if there is already a pending or approved card for this incident and capability
+                has_active_card = any(
+                    a.get("incident_id") == inc_id
+                    and (a.get("capability") == cap_id or a.get("action_type") == cap_id)
+                    and a.get("decision", a.get("status")) in ("pending", "approved")
+                    for a in all_approvals
+                )
+
+                if not has_active_card:
+                    act_args = dict(act.get("args") or {})
+                    act_target = str(
+                        act_args.get("policy_name")
+                        or act_args.get("service_name")
+                        or act_args.get("deployment")
+                        or target_res
+                    )
+                    logger.info(
+                        "Autonomously renewing approval card for incident %s capability %s target %s",
+                        inc_id, cap_id, act_target
+                    )
+                    try:
+                        new_card = trust_gate.create_approval_request(
+                            incident_id=inc_id,
+                            agent_id=lead_agent_id,
+                            capability_id=cap_id,
+                            target_resource=act_target,
+                            trust_level_required=2,
+                            narrative=act.get("rationale") or f"Remediate incident {inc_id} via {cap_id}",
+                            args=act_args,
+                            reversal_recipe={
+                                "capability": cap_id,
+                                "args": {**act_args, "sensitivity": 0} if cap_id == "armor.set_waf_sensitivity" else act_args,
+                            },
+                        )
+                        card_dict = new_card.model_dump(mode="json") if hasattr(new_card, "model_dump") else dict(new_card)
+                        all_approvals.append(card_dict)
+                        created_cards.append(card_dict)
+                    except Exception as exc:
+                        logger.error("Failed to create renewed approval card for %s: %s", inc_id, exc)
+    except Exception as exc:
+        logger.error("Error in ensure_open_incident_approvals: %s", exc)
+
+    return created_cards
+
+
 def build_router(ctx: Any) -> APIRouter:
     """Construct and return the FastAPI APIRouter for approvals."""
     router = APIRouter(tags=["Approvals"])
@@ -213,7 +339,34 @@ def build_router(ctx: Any) -> APIRouter:
                             docs_store.set("approvals", item["approval_id"], item, merge=True)
                     except Exception:
                         pass
-            cards.append(item)
+
+        # Autonomously renew approval cards for open diagnosed incidents
+        ensure_open_incident_approvals(ctx)
+        raw_docs = docs_store.list_docs("approvals", where=where_filter if where_filter else None)
+
+        for item in raw_docs:
+            aid = str(item.get("id") or item.get("approval_id") or item.get("doc_id") or item.get("_id") or "")
+            rev = item.get("reversal_recipe")
+            if not isinstance(rev, dict) or not rev.get("capability"):
+                rev = {
+                    "capability": str(item.get("capability") or "cloudrun.set_traffic_split"),
+                    "args": item.get("args") if isinstance(item.get("args"), dict) else {},
+                }
+            val_imp = item.get("value_impact")
+            if not isinstance(val_imp, dict):
+                val_imp = {
+                    "amount_usd": float(item.get("financial_impact") or 0.0),
+                    "unit_label": "remediation_impact",
+                }
+            cards.append(
+                {
+                    **item,
+                    "id": aid,
+                    "approval_id": aid,
+                    "reversal_recipe": rev,
+                    "value_impact": val_imp,
+                }
+            )
 
         cards.sort(key=lambda c: str(c.get("requested_at", "")), reverse=True)
         return cards
