@@ -398,26 +398,21 @@ class AuthService:
                 and os.environ.get("GODVIEW_IAP_DISABLED", "").strip().lower() in ("1", "true", "yes")
                 and not test_principal_hdr
                 and not request_or_token.headers.get("authorization")
+                and not request_or_token.headers.get("x-serverless-authorization")
+                and request_or_token.method in ("GET", "HEAD", "OPTIONS")
             ):
-                is_cockpit_or_read = (
-                    request_or_token.method in ("GET", "HEAD", "OPTIONS")
-                    or request_or_token.url.path.startswith("/api/v1")
-                    or bool(request_or_token.headers.get("origin"))
-                    or bool(request_or_token.headers.get("referer"))
+                default_op = (
+                    next(iter(sorted(self._allowed_operator_emails)), None)
+                    or os.environ.get("GODVIEW_OPERATOR_EMAIL", "").strip()
+                    or "operator@local.dev"
                 )
-                if is_cockpit_or_read:
-                    default_op = (
-                        next(iter(sorted(self._allowed_operator_emails)), None)
-                        or os.environ.get("GODVIEW_OPERATOR_EMAIL", "").strip()
-                        or "operator@local.dev"
-                    )
-                    return Principal(
-                        email=default_op,
-                        subject=f"sub-{default_op}",
-                        issuer="iap-disabled",
-                        audience="godview-direct",
-                        is_operator=True,
-                    )
+                return Principal(
+                    email=default_op,
+                    subject=f"sub-{default_op}",
+                    issuer="iap-disabled",
+                    audience="godview-direct",
+                    is_operator=True,
+                )
             return None
 
         if not self._iap_backend_service_ids:
