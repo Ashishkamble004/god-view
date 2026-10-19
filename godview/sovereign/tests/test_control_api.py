@@ -910,4 +910,29 @@ async def test_require_operator_security_hardening():
         assert iap_op.email == "admin-operator@custom-corp.com"
         assert iap_op.is_operator is True
 
+    # 6. Cloud Run stripped signature JWT (.SIGNATURE_REMOVED_BY_GOOGLE)
+    import base64
+    import json
+    import os
+    import time
+
+    payload = {
+        "iss": "https://accounts.google.com",
+        "email": "admin-operator@custom-corp.com",
+        "email_verified": True,
+        "exp": time.time() + 3600,
+        "sub": "sub-1234",
+    }
+    hdr_b64 = base64.urlsafe_b64encode(b'{"alg":"RS256"}').decode("utf-8").rstrip("=")
+    pay_b64 = base64.urlsafe_b64encode(json.dumps(payload).encode("utf-8")).decode("utf-8").rstrip("=")
+    cloud_run_tok = f"{hdr_b64}.{pay_b64}.SIGNATURE_REMOVED_BY_GOOGLE"
+
+    with patch.dict(os.environ, {"K_SERVICE": "god-view-sovereign"}):
+        # verify_oauth2_token raises ValueError on stripped tokens
+        with patch("google.oauth2.id_token.verify_oauth2_token", side_effect=ValueError("Invalid signature")):
+            cr_op = await auth_with_allowlist.require_operator(_make_req(cloud_run_tok))
+            assert cr_op is not None
+            assert cr_op.email == "admin-operator@custom-corp.com"
+            assert cr_op.is_operator is True
+
 

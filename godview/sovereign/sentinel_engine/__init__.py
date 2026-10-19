@@ -189,8 +189,17 @@ class SentinelEngine:
             self._eval_context.invoker.clear_tick_cache()
 
         active_sentinels = [s for s in self.list_sentinels() if s.state not in ("paused", "retired")]
-        # Rotate / sort to evaluate least recently run sentinels first to avoid starving tail sentinels
-        active_sentinels.sort(key=lambda s: s.last_run_at or "")
+        # Sort priority:
+        # 1) Sentinels currently mid-breach (consecutive_breaches > 0) to ensure quick consensus / incident opening
+        # 2) Core infrastructure / critical sentinels (lb_requests, probe, posture, golden_signals)
+        # 3) Least recently run first (last_run_at or "")
+        active_sentinels.sort(
+            key=lambda s: (
+                0 if s.consecutive_breaches > 0 else 1,
+                0 if s.sentinel_class in ("lb_requests", "probe", "posture", "golden_signals") else 1,
+                s.last_run_at or "",
+            )
+        )
 
         universal_classes = {
             "lb_requests",
@@ -327,9 +336,11 @@ class SentinelEngine:
 
             # Wake condition satisfied
             if new_consecutive >= snt.wake_condition.consecutive:
+                t0_breach = time.monotonic()
                 incident, was_opened = await self.incident_manager.record_breach(
                     updated_snt, eval_res, now
                 )
+                start_time += (time.monotonic() - t0_breach)
 
                 evp = incident.evidence_pack
                 if isinstance(evp, dict):
@@ -351,6 +362,7 @@ class SentinelEngine:
 
                 # Maintain backward compatibility with A2A / router / agent records
                 if self._router is not None:
+                    t0_router = time.monotonic()
                     await self._router.emit(
                         "godview.sentinel.breach",
                         source="//sovereign/sentinel-engine",
@@ -363,6 +375,7 @@ class SentinelEngine:
                             "evidence_pack_id": evp.evidence_pack_id,
                         },
                     )
+                    start_time += (time.monotonic() - t0_router)
 
 
                 if was_opened:

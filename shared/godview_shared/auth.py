@@ -119,6 +119,34 @@ def _resolve_sa_unique_id(sa_email: str) -> str | None:
     return None
 
 
+def decode_cloud_run_stripped_jwt(raw_tok: str) -> dict[str, Any] | None:
+    """If running in Cloud Run (K_SERVICE set) and token signature was stripped by GFE, decode payload."""
+    if not (os.environ.get("K_SERVICE") and raw_tok.endswith(".SIGNATURE_REMOVED_BY_GOOGLE")):
+        return None
+    try:
+        import base64
+        import json
+        import time
+
+        parts = raw_tok.split(".")
+        if len(parts) != 3:
+            return None
+        payload_b64 = parts[1]
+        payload_b64 += "=" * (-len(payload_b64) % 4)
+        payload_bytes = base64.urlsafe_b64decode(payload_b64.encode("utf-8"))
+        claims = json.loads(payload_bytes.decode("utf-8"))
+        if not isinstance(claims, dict):
+            return None
+        exp = claims.get("exp")
+        if exp is not None and float(exp) < time.time():
+            logger.warning("Cloud Run stripped token has expired (exp=%s)", exp)
+            return None
+        return claims
+    except Exception as exc:
+        logger.warning("Failed to decode Cloud Run stripped JWT: %s", exc)
+        return None
+
+
 class AuthService:
     """Authentication and identity verification service."""
 
@@ -528,6 +556,7 @@ class AuthService:
         auth_header = request.headers.get("authorization", "")
         if auth_header.startswith("Bearer "):
             raw_tok = auth_header.split(" ", 1)[1].strip()
+            claims = None
             try:
                 from google.auth.transport import requests as google_requests
                 from google.oauth2 import id_token as google_id_token
@@ -535,6 +564,12 @@ class AuthService:
                 claims = google_id_token.verify_oauth2_token(
                     raw_tok, google_requests.Request()
                 )
+            except Exception as e:
+                claims = decode_cloud_run_stripped_jwt(raw_tok)
+                if claims is None:
+                    logger.warning("Bearer token verification failed in require_operator: %s", e)
+
+            try:
                 if claims and claims.get("iss") in (
                     "https://accounts.google.com",
                     "accounts.google.com",
@@ -573,8 +608,6 @@ class AuthService:
                         )
             except HTTPException:
                 raise
-            except Exception as e:
-                logger.warning("Bearer token verification failed in require_operator: %s", e)
 
         if self.settings.env_mode in ("hermetic", "local"):
             email = _clean_iap_email(request.headers.get("x-goog-authenticated-user-email")) or "operator@local.dev"

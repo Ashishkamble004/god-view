@@ -516,6 +516,7 @@ def create_app(
             auth_header = request.headers.get("authorization", "")
             if auth_header.startswith("Bearer "):
                 raw_tok = auth_header.split(" ", 1)[1].strip()
+                claims = None
                 try:
                     from google.auth.transport import requests as google_requests
                     from google.oauth2 import id_token as _google_id_token
@@ -523,27 +524,31 @@ def create_app(
                     claims = _google_id_token.verify_oauth2_token(
                         raw_tok, google_requests.Request()
                     )
-                    if claims and claims.get("iss") in (
-                        "https://accounts.google.com",
-                        "accounts.google.com",
-                    ):
-                        tok_email = str(
-                            claims.get("email")
-                            or os.environ.get("GODVIEW_OPERATOR_EMAIL")
-                            or "operator@google.com"
-                        )
-                        from godview_shared.auth import Principal
-
-                        principal = Principal(
-                            email=tok_email,
-                            subject=str(claims.get("sub") or ""),
-                            issuer=str(claims.get("iss") or ""),
-                            audience=str(claims.get("aud") or ""),
-                            claims=claims,
-                        )
-                        auth_via = "oidc"
                 except Exception as exc:
-                    logger.warning("Bearer token verification failed in /me: %s", exc)
+                    from godview_shared.auth import decode_cloud_run_stripped_jwt
+                    claims = decode_cloud_run_stripped_jwt(raw_tok)
+                    if claims is None:
+                        logger.warning("Bearer token verification failed in /me: %s", exc)
+
+                if claims and claims.get("iss") in (
+                    "https://accounts.google.com",
+                    "accounts.google.com",
+                ):
+                    tok_email = str(
+                        claims.get("email")
+                        or os.environ.get("GODVIEW_OPERATOR_EMAIL")
+                        or "operator@google.com"
+                    )
+                    from godview_shared.auth import Principal
+
+                    principal = Principal(
+                        email=tok_email,
+                        subject=str(claims.get("sub") or ""),
+                        issuer=str(claims.get("iss") or ""),
+                        audience=str(claims.get("aud") or ""),
+                        claims=claims,
+                    )
+                    auth_via = "oidc"
 
             if (principal is None or not principal.email) and hasattr(ctx, "auth") and ctx.auth:
                 oidc_p = ctx.auth.verify_google_oidc(request)
