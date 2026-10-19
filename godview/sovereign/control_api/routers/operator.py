@@ -186,8 +186,11 @@ def build_router(ctx: Any) -> APIRouter:
                         raise
 
         # Check Bearer ID token directly
-        auth_header = request.headers.get("authorization", "")
-        if auth_header.startswith("Bearer "):
+        auth_header = (
+            request.headers.get("authorization", "")
+            or request.headers.get("x-serverless-authorization", "")
+        )
+        if auth_header.lower().startswith("bearer "):
             raw_tok = auth_header.split(" ", 1)[1].strip()
             claims = None
             try:

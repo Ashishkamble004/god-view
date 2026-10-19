@@ -513,8 +513,11 @@ def create_app(
         principal = ctx.auth.verify_iap_jwt(request) if hasattr(ctx, "auth") and ctx.auth else None
         auth_via = "iap"
         if principal is None or not principal.email:
-            auth_header = request.headers.get("authorization", "")
-            if auth_header.startswith("Bearer "):
+            auth_header = (
+                request.headers.get("authorization", "")
+                or request.headers.get("x-serverless-authorization", "")
+            )
+            if auth_header.lower().startswith("bearer "):
                 raw_tok = auth_header.split(" ", 1)[1].strip()
                 claims = None
                 try:

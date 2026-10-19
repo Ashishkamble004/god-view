@@ -197,11 +197,8 @@ def decode_cloud_run_stripped_jwt(raw_tok: str, request: Any = None) -> dict[str
     """If running in Cloud Run (K_SERVICE set) and token signature was stripped by GFE, decode payload."""
     if not os.environ.get("K_SERVICE"):
         return None
-    # Reject if request arrived with X-Serverless-Authorization (where Authorization is untrusted pass-through)
-    if request is not None and hasattr(request, "headers"):
-        if request.headers.get("x-serverless-authorization"):
-            logger.warning("Rejected unverified Bearer token because X-Serverless-Authorization is present")
-            return None
+    if raw_tok.lower().startswith("bearer "):
+        raw_tok = raw_tok.split(" ", 1)[1].strip()
 
     parts = raw_tok.split(".")
     if len(parts) != 3 or parts[2] != "SIGNATURE_REMOVED_BY_GOOGLE":
@@ -468,8 +465,11 @@ class AuthService:
         test_principal_hdr: str | None = None
 
         if isinstance(request_or_token, Request):
-            auth_header = request_or_token.headers.get("authorization", "")
-            if auth_header.startswith("Bearer "):
+            auth_header = (
+                request_or_token.headers.get("authorization", "")
+                or request_or_token.headers.get("x-serverless-authorization", "")
+            )
+            if auth_header.lower().startswith("bearer "):
                 token = auth_header.split(" ", 1)[1].strip()
             test_principal_hdr = request_or_token.headers.get("x-godview-test-principal")
         else:
@@ -537,6 +537,12 @@ class AuthService:
                     break
                 except Exception:
                     continue
+
+            if not claims and token:
+                claims = decode_cloud_run_stripped_jwt(
+                    token,
+                    request=request_or_token if isinstance(request_or_token, Request) else None,
+                )
 
             if not claims:
                 return None
@@ -629,8 +635,11 @@ class AuthService:
             return principal
 
         # If IAP header is absent, check Bearer ID token (e.g. gcloud auth print-identity-token)
-        auth_header = request.headers.get("authorization", "")
-        if auth_header.startswith("Bearer "):
+        auth_header = (
+            request.headers.get("authorization", "")
+            or request.headers.get("x-serverless-authorization", "")
+        )
+        if auth_header.lower().startswith("bearer "):
             raw_tok = auth_header.split(" ", 1)[1].strip()
             claims = None
             try:
