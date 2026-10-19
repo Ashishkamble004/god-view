@@ -525,7 +525,12 @@ class IncidentManager:
                 try:
                     stored_inc = self._firestore.get("incidents", incident.doc_id)
                     if stored_inc and stored_inc.get("diagnoses"):
-                        incident.diagnoses = list(stored_inc["diagnoses"])
+                        from godview_shared.contracts import Diagnosis
+
+                        incident.diagnoses = [
+                            d if isinstance(d, Diagnosis) else Diagnosis.model_validate(d)
+                            for d in stored_inc["diagnoses"]
+                        ]
                 except Exception:
                     pass
 

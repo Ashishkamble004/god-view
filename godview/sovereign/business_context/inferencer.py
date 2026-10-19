@@ -34,9 +34,9 @@ Your task is to infer the business role, capabilities, domain, KPIs, and invaria
 Strict Rules:
 1. Ground every statement exclusively on the provided technical evidence (routes, operation summaries, env var names, schema names, caller graph, sanitized log excerpts).
 2. DO NOT GUESS, ASSUME, OR INVENT business terms or functionality that are not directly supported by the evidence. If evidence is limited, state that honestly and assign a low confidence score.
-3. Every `evidence` item's `ref` AND every `kpis`, `invariants`, and `journeys` item's `evidence` field MUST use exact strings from the `valid_evidence_refs` list provided in the evidence payload (e.g. 'openapi:GET /v1/items', 'env:CONFIG_KEY', 'kind:cloud_run', 'service:my-svc', 'upstream:...', 'downstream:...'). Do NOT invent refs outside `valid_evidence_refs`.
+3. Every inferred capability, KPI, invariant, and journey MUST cite the specific evidence reference (e.g. 'openapi:GET /v1/items', 'env:CONFIG_KEY'). Every capability string MUST include an inline citation of the exact OpenAPI route path or operation_id when routes exist, and every `evidence` item's `ref` and every `kpis`, `invariants`, and `journeys` item's `evidence` field MUST use exact strings from `valid_evidence_refs`.
 4. The 'domain' field must be a concise, free-text description of the business domain directly indicated by the evidence.
-5. Always include at least 1 grounded KPI in `kpis` and at least 1 grounded invariant in `invariants` when `valid_evidence_refs` is non-empty, each citing an exact string from `valid_evidence_refs` in its `evidence` field. Invariants must represent verifiable technical or logical assertions derivable from the service's contract and operations.
+5. Invariants must represent verifiable technical or logical assertions derivable from the service's contract and operations. Include grounded `kpis` and `invariants` when supported by `valid_evidence_refs`, citing exact strings from `valid_evidence_refs` in their `evidence` field.
 6. Provide a realistic overall confidence score between 0.0 and 1.0 reflecting the completeness and specificity of the evidence.
 7. Return a valid JSON matching the BusinessContext schema.
 """
@@ -581,6 +581,36 @@ class BusinessContextInferencer:
                     valid_refs,
                 )
             ]
+
+            # Post-validate capabilities against OpenAPI routes when operation_id is present
+            route_paths = {
+                str(r.get("path") or "").strip()
+                for r in routes
+                if isinstance(r, dict) and r.get("path")
+            }
+            route_ops = {
+                str(r.get("operation_id") or "").strip()
+                for r in routes
+                if isinstance(r, dict) and r.get("operation_id")
+            }
+            if route_ops:
+                grounded_caps = [
+                    c
+                    for c in res_bc.capabilities
+                    if isinstance(c, str)
+                    and (
+                        any(p in c for p in route_paths if p)
+                        or any(op in c for op in route_ops if op)
+                    )
+                ]
+                if grounded_caps:
+                    res_bc.capabilities = grounded_caps
+                else:
+                    res_bc.capabilities = [
+                        f"{r.get('summary') or r.get('operation_id')} (openapi:{r.get('method', 'GET')} {r.get('path')} {r.get('operation_id')})"
+                        for r in routes
+                        if isinstance(r, dict) and (r.get("path") or r.get("operation_id"))
+                    ]
 
             res_bc.inferred_by = model_name
             res_bc.inferred_at = now_iso

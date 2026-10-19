@@ -539,7 +539,7 @@ def register_in_process_court(ctx: Any) -> CourtOrchestrator:
 
         diag_dict = diagnosis.model_dump(mode="json")
         if hasattr(incident_doc, "diagnoses") and isinstance(incident_doc.diagnoses, list):
-            incident_doc.diagnoses.append(diag_dict)
+            incident_doc.diagnoses.append(diagnosis)
         elif isinstance(incident_doc, dict):
             incident_doc.setdefault("diagnoses", []).append(diag_dict)
 
@@ -547,8 +547,8 @@ def register_in_process_court(ctx: Any) -> CourtOrchestrator:
         if inc_mgr is not None and hasattr(inc_mgr, "_active_incidents"):
             for active_inc in inc_mgr._active_incidents.values():
                 if getattr(active_inc, "doc_id", None) == inc_id:
-                    if diag_dict not in active_inc.diagnoses:
-                        active_inc.diagnoses.append(diag_dict)
+                    if diagnosis not in active_inc.diagnoses:
+                        active_inc.diagnoses.append(diagnosis)
 
         if hasattr(ctx, "docs") and ctx.docs is not None:
             existing = ctx.docs.get("incidents", inc_id)
