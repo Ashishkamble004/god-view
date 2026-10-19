@@ -111,6 +111,19 @@ class ProbeEvaluator(BaseSentinelEvaluator):
             else:
                 # T2 static asset discovery from API response bodies
                 discovered_asset_urls: list[str] = []
+
+                def _add_asset_url(u: str, base_url: str, found: list[str]) -> None:
+                    joined = urllib.parse.urljoin(base_url, u)
+                    if joined not in found:
+                        found.append(joined)
+                    if u.startswith("/"):
+                        parsed_base = urllib.parse.urlsplit(base_url)
+                        b_host = parsed_base.hostname or ""
+                        if b_host.startswith("api.") and len(b_host) > 4:
+                            sibling = f"{parsed_base.scheme}://{b_host[4:]}{u}"
+                            if sibling not in found:
+                                found.append(sibling)
+
                 resp_body = probe_result.get("json") or probe_result.get("body")
                 if isinstance(resp_body, str):
                     raw_str = resp_body.strip()
@@ -124,14 +137,14 @@ class ProbeEvaluator(BaseSentinelEvaluator):
                         )
                         urls_found += re.findall(r'["\'](/assets/[^"\']+)["\']', raw_str)
                         for u in urls_found:
-                            discovered_asset_urls.append(urllib.parse.urljoin(target_url, u))
+                            _add_asset_url(u, target_url, discovered_asset_urls)
 
                 def _extract_asset_urls(data: Any, found: list[str], base_url: str) -> None:
                     if isinstance(data, dict):
                         for k, v in data.items():
                             if isinstance(v, str):
                                 if str(k).endswith(("_url", "image_url", "asset_url")) or v.startswith("/assets/"):
-                                    found.append(urllib.parse.urljoin(base_url, v))
+                                    _add_asset_url(v, base_url, found)
                             elif isinstance(v, (dict, list)):
                                 _extract_asset_urls(v, found, base_url)
                     elif isinstance(data, list):

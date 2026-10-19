@@ -596,6 +596,11 @@ def build_router(ctx: Any) -> APIRouter:
             "job_name": job_name,
         }
 
+    @router.get("/chaos/drills")
+    async def list_chaos_drills() -> dict[str, Any]:
+        """Return registered chaos drills (empty in production unless drills are configured)."""
+        return {"drills": []}
+
     return router
 
 

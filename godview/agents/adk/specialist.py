@@ -87,7 +87,10 @@ ARCHETYPE_GENERIC_INSTRUCTIONS: dict[str, str] = {
         "compute resource limits, edge load balancer routing, and WAF security policies. "
         "Rely strictly on provided runtime evidence and discovered BusinessContext; "
         "never assume tenant domain vocabulary. Formulate a precise hypothesis, "
-        "grounded citations, confidence score (0.0 to 1.0), and proposed remediation actions."
+        "grounded citations, confidence score (0.0 to 1.0), and proposed remediation actions. "
+        "When recommending mutating remediations in `proposed_actions`, use canonical capability IDs: "
+        "`armor.set_waf_sensitivity` (args: `{\"policy_name\": \"<policy>\", \"rule_priority\": <int>, \"sensitivity\": 1, \"preview_first\": true}`), "
+        "`run.restore_revision_config`, `gke.patch_probe`, or `pubsub.replay_dlq`."
     ),
 }
 
@@ -179,6 +182,9 @@ class CtxLlm(BaseLlm):
                 if res.candidates and res.candidates[0].content:
                     yield AdkLlmResponse(content=res.candidates[0].content)
                     return
+            if getattr(res, "raw_content", None) is not None:
+                yield AdkLlmResponse(content=res.raw_content)
+                return
 
             func_calls = getattr(res, "function_calls", []) or []
             if func_calls:
@@ -392,9 +398,21 @@ class SpecialistTools:
     def query_ledger(
         self, query: str, params: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:
-        """Query the event ledger for historical state transitions or KPIs."""
+        """Query the BigQuery event ledger (tables: events, state_transitions, journeys, kpi_rollups; incidents/changes live in Firestore)."""
+        if re.search(r"\b(?:godview_ledger\.)?(?:incidents|changes)\b", query or "", re.IGNORECASE):
+            if self.ctx is not None and hasattr(self.ctx, "docs") and self.ctx.docs is not None:
+                col = "incidents" if "incident" in (query or "").lower() else "changes"
+                try:
+                    return self.ctx.docs.list_docs(col, limit=20)
+                except Exception:
+                    return []
+            return []
         if self.ctx is not None and hasattr(self.ctx, "ledger") and self.ctx.ledger is not None:
-            return self.ctx.ledger.query(query, params)
+            try:
+                return self.ctx.ledger.query(query, params)
+            except Exception as exc:
+                logger.debug("query_ledger suppressed error: %s", exc)
+                return [{"error": str(exc)}]
         return []
 
     async def query_ledger_async(
@@ -603,7 +621,9 @@ class SpecialistAgent:
             "- hypothesis: precise root-cause hypothesis\n"
             "- confidence: float from 0.0 to 1.0\n"
             "- citations: list of evidence strings\n"
-            "- proposed_actions: list of remediation actions\n"
+            "- proposed_actions: list of remediation actions (each with capability_id, args, rationale, confidence; "
+            "for WAF sensitivity false positives use capability_id='armor.set_waf_sensitivity' with args={'policy_name': '<policy>', 'rule_priority': <int>, 'sensitivity': 1, 'preview_first': true}; "
+            "for Cloud Run config drift use 'run.restore_revision_config'; for GKE probes use 'gke.patch_probe'; for Pub/Sub DLQ use 'pubsub.replay_dlq')\n"
             "- root_cause_category: category identifier\n"
         )
 

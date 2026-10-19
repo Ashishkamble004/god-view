@@ -34,9 +34,9 @@ Your task is to infer the business role, capabilities, domain, KPIs, and invaria
 Strict Rules:
 1. Ground every statement exclusively on the provided technical evidence (routes, operation summaries, env var names, schema names, caller graph, sanitized log excerpts).
 2. DO NOT GUESS, ASSUME, OR INVENT business terms or functionality that are not directly supported by the evidence. If evidence is limited, state that honestly and assign a low confidence score.
-3. Every inferred capability, KPI, invariant, and journey MUST cite the specific evidence reference (e.g. 'openapi:GET /v1/items', 'env:CONFIG_KEY').
+3. Every `evidence` item's `ref` AND every `kpis`, `invariants`, and `journeys` item's `evidence` field MUST use exact strings from the `valid_evidence_refs` list provided in the evidence payload (e.g. 'openapi:GET /v1/items', 'env:CONFIG_KEY', 'kind:cloud_run', 'service:my-svc', 'upstream:...', 'downstream:...'). Do NOT invent refs outside `valid_evidence_refs`.
 4. The 'domain' field must be a concise, free-text description of the business domain directly indicated by the evidence.
-5. Invariants must represent verifiable technical or logical assertions derivable from the service's contract and operations.
+5. Always include at least 1 grounded KPI in `kpis` and at least 1 grounded invariant in `invariants` when `valid_evidence_refs` is non-empty, each citing an exact string from `valid_evidence_refs` in its `evidence` field. Invariants must represent verifiable technical or logical assertions derivable from the service's contract and operations.
 6. Provide a realistic overall confidence score between 0.0 and 1.0 reflecting the completeness and specificity of the evidence.
 7. Return a valid JSON matching the BusinessContext schema.
 """
@@ -123,20 +123,27 @@ def extract_bundle_valid_refs(evidence_bundle: dict[str, Any]) -> set[str]:
         if up_str:
             valid_refs.add(f"trace:{up_str}")
             valid_refs.add(f"edge:{up_str}")
+            valid_refs.add(f"upstream:{up_str}")
             valid_refs.add(up_str)
     for down in evidence_bundle.get("downstreams", []):
         down_str = str(down).strip()
         if down_str:
             valid_refs.add(f"trace:{down_str}")
             valid_refs.add(f"edge:{down_str}")
+            valid_refs.add(f"downstream:{down_str}")
             valid_refs.add(down_str)
 
-    # 4. Service name / locator
+    # 4. Service name / kind / locator
     svc_name = str(evidence_bundle.get("service_name") or "").strip()
     if svc_name:
         valid_refs.add(f"service:{svc_name}")
+        valid_refs.add(f"service_name:{svc_name}")
         valid_refs.add(svc_name)
         valid_refs.add(f"log:{svc_name}")
+    kind = str(evidence_bundle.get("kind") or "").strip()
+    if kind:
+        valid_refs.add(f"kind:{kind}")
+        valid_refs.add(kind)
     locator = str(evidence_bundle.get("locator") or "").strip()
     if locator:
         valid_refs.add(f"locator:{locator}")
@@ -194,6 +201,26 @@ def check_item_evidence_resolves(evidence_val: Any, valid_refs: set[str]) -> boo
         return True
     parts = [p.strip() for p in re.split(r"[,;\n]+", s) if p.strip()]
     if parts and all(check_ref_resolves(p, valid_refs) for p in parts):
+        return True
+    return False
+
+
+def is_business_context_stale(bc: BusinessContext | None) -> bool:
+    """Return True if a stored BusinessContext is missing, uncited, low-confidence, or has placeholder inferred_by."""
+    if bc is None:
+        return True
+    if getattr(bc, "confidence", 0.0) < 0.5:
+        return True
+    inferred_by = str(getattr(bc, "inferred_by", "") or "").strip()
+    if inferred_by in ("", "none", "llm-reasoner"):
+        return True
+    evidence = getattr(bc, "evidence", None) or []
+    if not evidence:
+        return True
+    if not any(
+        getattr(e, "ref", None) or (isinstance(e, dict) and e.get("ref"))
+        for e in evidence
+    ):
         return True
     return False
 
@@ -292,7 +319,7 @@ class BusinessContextInferencer:
 
         # Check existing stored business context on service doc or Firestore
         existing_good: BusinessContext | None = None
-        if service.business_context is not None and getattr(service.business_context, "confidence", 0.0) > 0.0:
+        if service.business_context is not None and not is_business_context_stale(service.business_context):
             existing_good = service.business_context
         elif self.firestore is not None:
             node_id = service.doc_id or f"{service.env_id}__{service.kind}.{service.name}"
@@ -300,7 +327,7 @@ class BusinessContextInferencer:
                 stored = self.firestore.get("discovered_services", node_id)
                 if stored and stored.get("business_context"):
                     candidate = BusinessContext(**stored["business_context"])
-                    if candidate.confidence > 0.0:
+                    if not is_business_context_stale(candidate):
                         existing_good = candidate
             except Exception:
                 pass
@@ -419,10 +446,12 @@ class BusinessContextInferencer:
 
         # If real LLM client is available, invoke it
         if self.llm is not None and hasattr(self.llm, "generate"):
+            prompt_bundle = dict(evidence_bundle)
+            prompt_bundle["valid_evidence_refs"] = sorted(extract_bundle_valid_refs(evidence_bundle))
             prompt = (
                 f"{INFERENCE_SYSTEM_PROMPT}\n\n"
                 f"Evidence for service '{service_name}':\n"
-                f"{json.dumps(evidence_bundle, indent=2)}\n"
+                f"{json.dumps(prompt_bundle, indent=2)}\n"
             )
             self.total_llm_calls += 1
             if hasattr(self.llm, "generate_structured"):
@@ -444,9 +473,18 @@ class BusinessContextInferencer:
                     contents=prompt,
                     response_schema=BusinessContext,
                 )
+            from godview_shared.config import MODEL_TABLE
+
+            res_inferred_by = getattr(res, "inferred_by", None)
+            if res_inferred_by in ("", "none", "llm-reasoner"):
+                res_inferred_by = None
             model_name = (
                 getattr(res, "model_id", None)
-                or getattr(self.llm, "model_name", getattr(self.llm, "model", "llm-reasoner"))
+                or getattr(self.llm, "last_model_id", None)
+                or getattr(self.llm, "model_name", None)
+                or getattr(self.llm, "model", None)
+                or res_inferred_by
+                or MODEL_TABLE["reasoning"].model_id
             )
             if isinstance(res, BusinessContext):
                 res_bc = res

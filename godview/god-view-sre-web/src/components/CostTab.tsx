@@ -44,9 +44,9 @@ export const CostTab: React.FC<CostTabProps> = ({
     );
   }
 
-  const totalSavingsMonthly = cost.cost_findings
+  const totalSavingsMonthly = (cost.cost_findings ?? [])
     .filter((f) => f.status === 'open')
-    .reduce((acc, f) => acc + f.monthly_usd_estimate, 0);
+    .reduce((acc, f) => acc + (f.monthly_usd_estimate ?? 0), 0);
 
   return (
     <div className="space-y-6">
@@ -117,7 +117,7 @@ export const CostTab: React.FC<CostTabProps> = ({
           />
 
           <div className="mt-3 space-y-3">
-            {cost.cost_findings.map((finding) => (
+            {(cost.cost_findings ?? []).map((finding) => (
               <div
                 key={finding.id}
                 className="rounded border border-slate-200 bg-slate-50 p-3.5 text-xs"
@@ -240,7 +240,7 @@ export const CostTab: React.FC<CostTabProps> = ({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-200 num-tabular">
-              {cost.drift_diffs.map((item) => (
+              {(cost.drift_diffs ?? []).map((item) => (
                 <tr key={item.id} className="hover:bg-slate-50">
                   <td className="px-3 py-2.5">
                     <div className="font-mono font-semibold text-slate-900">

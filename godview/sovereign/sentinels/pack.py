@@ -597,6 +597,12 @@ def compile_universal_sentinels(
 
             if not r_url and r_host and path and not str(r_host).startswith("*"):
                 r_url = f"https://{r_host}/{str(path).lstrip('/')}"
+            if not r_url and path and is_public_entrypoint:
+                base_ep = str(raw_ep or locator or "").strip()
+                if not base_ep and fe_hosts:
+                    base_ep = f"https://{sorted(fe_hosts)[0]}"
+                if base_ep.startswith("http"):
+                    r_url = f"{base_ep.rstrip('/')}/{str(path).lstrip('/')}"
 
             is_probe_safe = (
                 is_probe_safe_flag

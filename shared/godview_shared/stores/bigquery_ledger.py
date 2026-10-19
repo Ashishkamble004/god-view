@@ -149,6 +149,12 @@ class BigQueryLedger:
         if not (stmt_upper.startswith("SELECT") or stmt_upper.startswith("WITH")):
             raise ValueError("Only read queries (SELECT / WITH) are permitted on BigQueryLedger")
 
+        # Guard against querying Firestore-only collections (incidents, changes) on BigQuery
+        import re as _re
+        if _re.search(r"\b(?:godview_ledger\.)?(?:incidents|changes)\b", statement, _re.IGNORECASE):
+            logger.debug("Skipping BigQuery query targeting Firestore collection (incidents/changes): %s", statement)
+            return []
+
         client = self._get_client()
         from google.cloud import bigquery
 

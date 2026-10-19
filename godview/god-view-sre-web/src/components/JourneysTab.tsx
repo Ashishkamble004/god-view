@@ -66,8 +66,22 @@ export const JourneysTab: React.FC<JourneysTabProps> = ({
 
   const NODE_WIDTH = 228;
   const stepPositions: Record<string, { x: number; y: number }> = {};
-  journey.steps.forEach((step, idx) => {
-    stepPositions[step.id] = {
+  const stepsList = journey.steps ?? [];
+  const kpiRollups = journey.kpi_rollups ?? [];
+  const conformanceRules = journey.conformance_rules ?? [];
+  const funnelKpis = journey.funnel_kpis ?? [];
+  const recentInstances = journey.recent_instances ?? [];
+  const directlyFollows = journey.directly_follows ?? {};
+  const impactModel = journey.impact_model ?? {
+    total_value_at_risk: 0,
+    avg_ticket_value: 0,
+    violated_journeys_count: 0,
+    stuck_journeys_count: 0,
+  };
+
+  stepsList.forEach((step, idx) => {
+    const sid = step.id || (step as any).node || `step-${idx}`;
+    stepPositions[sid] = {
       x: 24 + idx * 272,
       y: 95,
     };
@@ -87,11 +101,11 @@ export const JourneysTab: React.FC<JourneysTabProps> = ({
             </Badge>
           </div>
           <p className="mt-2 text-2xl font-semibold text-slate-900 num-tabular">
-            {formatCurrency(journey.impact_model.total_value_at_risk)}
+            {formatCurrency(impactModel.total_value_at_risk ?? 0)}
           </p>
           <p className="mt-1 text-xs text-slate-600 num-tabular">
-            Avg ticket {formatCurrency(journey.impact_model.avg_ticket_value)} ·{' '}
-            {journey.impact_model.violated_journeys_count} affected cohorts
+            Avg ticket {formatCurrency(impactModel.avg_ticket_value ?? 0)} ·{' '}
+            {impactModel.violated_journeys_count ?? 0} affected cohorts
           </p>
         </Card>
 
@@ -100,16 +114,16 @@ export const JourneysTab: React.FC<JourneysTabProps> = ({
             Mined Workflow &amp; Owner Agent
           </span>
           <p className="mt-2 font-mono text-sm font-semibold text-slate-900">
-            {journey.journey_key}
+            {journey.journey_key || journey.name}
           </p>
           <p className="mt-1 text-xs text-slate-600">
             Owner:{' '}
             <button
               type="button"
-              onClick={() => onSelectAgent(journey.owner_agent_id)}
+              onClick={() => onSelectAgent(journey.owner_agent_id || 'business_line__default')}
               className="rounded font-mono font-semibold text-blue-700 hover:underline focus:outline-none focus:ring-2 focus:ring-blue-600"
             >
-              {journey.owner_agent_id}
+              {journey.owner_agent_id || 'business_line__default'}
             </button>
           </p>
         </Card>
@@ -119,14 +133,14 @@ export const JourneysTab: React.FC<JourneysTabProps> = ({
             Conformance Violations (24h)
           </span>
           <p className="mt-2 text-xl font-semibold text-slate-900 num-tabular">
-            {journey.conformance_rules.reduce(
-              (acc, r) => acc + r.violations_24h,
+            {conformanceRules.reduce(
+              (acc, r) => acc + (r.violations_24h ?? 0),
               0
             )}{' '}
             Violations
           </p>
           <p className="mt-1 text-xs text-slate-600 num-tabular">
-            {journey.impact_model.stuck_journeys_count} stuck journeys in
+            {impactModel.stuck_journeys_count ?? 0} stuck journeys in
             replay queue
           </p>
         </Card>
@@ -139,8 +153,8 @@ export const JourneysTab: React.FC<JourneysTabProps> = ({
             <Badge variant="outline">Observed P95</Badge>
           </div>
           <p className="mt-2 text-xl font-semibold text-slate-900 num-tabular">
-            {journey.kpi_rollups.find((k) => k.kpi === 'journey_p95_latency_ms')?.value != null
-              ? `${formatNumber(journey.kpi_rollups.find((k) => k.kpi === 'journey_p95_latency_ms')!.value)} ms`
+            {kpiRollups.find((k) => k.kpi === 'journey_p95_latency_ms')?.value != null
+              ? `${formatNumber(kpiRollups.find((k) => k.kpi === 'journey_p95_latency_ms')!.value)} ms`
               : 'Not measured yet'}
           </p>
           <p className="mt-1 text-xs text-slate-600">
@@ -153,13 +167,13 @@ export const JourneysTab: React.FC<JourneysTabProps> = ({
       <Card className="p-5">
         <SectionHeader
           title="Process Map — Directly-Follows Graph (DFG) & Conformance Overlay"
-          subtitle={`Intended order mined from ${journey.intended_order_source}. Solid blue/slate edges show conformant transitions; dashed arcs highlight Skipped and Reordered conformance anomalies.`}
+          subtitle={`Intended order mined from ${journey.intended_order_source || 'trace telemetry'}. Solid blue/slate edges show conformant transitions; dashed arcs highlight Skipped and Reordered conformance anomalies.`}
           right={
             <Button
               variant="secondary"
               size="sm"
               onClick={() => {
-                window.location.hash = `#globe/journey/${encodeURIComponent(journey.name || journey.journey_key)}`;
+                window.location.hash = `#globe/journey/${encodeURIComponent(journey.name || journey.journey_key || 'default')}`;
               }}
               className="flex items-center gap-1.5"
             >
@@ -204,7 +218,7 @@ export const JourneysTab: React.FC<JourneysTabProps> = ({
               </defs>
 
               {/* Edges from directly_follows */}
-              {Object.entries(journey.directly_follows).map(([edgeKey, edge]) => {
+              {Object.entries(directlyFollows).map(([edgeKey, edge]) => {
                 const src = stepPositions[edge.from];
                 const dst = stepPositions[edge.to];
                 if (!src || !dst) return null;
@@ -291,11 +305,15 @@ export const JourneysTab: React.FC<JourneysTabProps> = ({
               })}
 
               {/* Step Nodes */}
-              {journey.steps.map((step) => {
-                const pos = stepPositions[step.id];
+              {stepsList.map((step, idx) => {
+                const sid = step.id || (step as any).node || `step-${idx}`;
+                const pos = stepPositions[sid] ?? { x: 24 + idx * 272, y: 95 };
+                const stepLabel = step.label || step.operation || (step as any).node || sid;
+                const stepSvc = step.service || (step as any).node || '';
+                const stepOp = step.operation || '';
                 return (
-                  <g key={step.id}>
-                    <title>{`${step.label} — ${step.service} (${step.operation})`}</title>
+                  <g key={sid}>
+                    <title>{`${stepLabel} — ${stepSvc} (${stepOp})`}</title>
                     <rect
                       x={pos.x}
                       y={pos.y}
@@ -321,7 +339,7 @@ export const JourneysTab: React.FC<JourneysTabProps> = ({
                       fontSize="11"
                       fontWeight="600"
                     >
-                      {step.label}
+                      {stepLabel}
                     </text>
                     <text
                       x={pos.x + 10}
@@ -330,7 +348,7 @@ export const JourneysTab: React.FC<JourneysTabProps> = ({
                       fontSize="10"
                       fontFamily="monospace"
                     >
-                      {step.service}
+                      {stepSvc}
                     </text>
                     <text
                       x={pos.x + 10}
@@ -339,7 +357,7 @@ export const JourneysTab: React.FC<JourneysTabProps> = ({
                       fontSize="9"
                       fontFamily="monospace"
                     >
-                      {truncateRoute(step.operation, 34)}
+                      {truncateRoute(stepOp, 34)}
                     </text>
                     <text
                       x={pos.x + 10}
@@ -348,7 +366,7 @@ export const JourneysTab: React.FC<JourneysTabProps> = ({
                       fontSize="10"
                       fontWeight="600"
                     >
-                      Conv: {step.completion_rate_pct}% · P95: {step.p95_dwell_ms}ms
+                      Conv: {step.completion_rate_pct ?? 100}% · P95: {step.p95_dwell_ms ?? 0}ms
                     </text>
                   </g>
                 );
@@ -380,19 +398,19 @@ export const JourneysTab: React.FC<JourneysTabProps> = ({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200 num-tabular">
-                {journey.funnel_kpis.map((stage) => (
+                {funnelKpis.map((stage) => (
                   <tr key={stage.step_id} className="hover:bg-slate-50">
                     <td className="px-3 py-2.5 font-semibold text-slate-900">
                       {stage.step_name}
                     </td>
                     <td className="px-3 py-2.5 text-right text-slate-700">
-                      {stage.entered} → {stage.completed}
+                      {stage.entered ?? 0} → {stage.completed ?? 0}
                     </td>
                     <td className="px-3 py-2.5 text-right font-semibold text-slate-900">
-                      {stage.conversion_pct.toFixed(1)}%
+                      {(stage.conversion_pct ?? 0).toFixed(1)}%
                     </td>
                     <td className="px-3 py-2.5 text-right font-semibold text-slate-900">
-                      {formatCurrency(stage.dropoff_value)}
+                      {formatCurrency(stage.dropoff_value ?? 0)}
                     </td>
                   </tr>
                 ))}
@@ -424,13 +442,13 @@ export const JourneysTab: React.FC<JourneysTabProps> = ({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200 num-tabular">
-                {journey.kpi_rollups.map((rollup) => {
+                {kpiRollups.map((rollup) => {
                   const fmtVal = (v: number) =>
                     rollup.unit === 'currency'
-                      ? formatCurrency(v)
+                      ? formatCurrency(v ?? 0)
                       : rollup.unit === 'pct'
-                      ? `${v.toFixed(1)}%`
-                      : `${formatNumber(v)} ms`;
+                      ? `${(v ?? 0).toFixed(1)}%`
+                      : `${formatNumber(v ?? 0)} ms`;
                   return (
                     <tr key={rollup.kpi} className="hover:bg-slate-50">
                       <td className="px-3 py-2.5">
@@ -438,17 +456,17 @@ export const JourneysTab: React.FC<JourneysTabProps> = ({
                           {rollup.label}
                         </div>
                         <div className="font-mono text-slate-500">
-                          {rollup.kpi} (n={rollup.sample_n})
+                          {rollup.kpi} (n={rollup.sample_n ?? 0})
                         </div>
                       </td>
                       <td className="px-3 py-2.5 text-right font-semibold text-slate-900">
-                        {fmtVal(rollup.value)}
+                        {fmtVal(rollup.value ?? 0)}
                       </td>
                       <td className="px-3 py-2.5 text-right text-slate-600">
-                        {fmtVal(rollup.baseline_value)}
+                        {fmtVal(rollup.baseline_value ?? 0)}
                       </td>
                       <td className="px-3 py-2.5 text-right font-mono text-slate-800">
-                        z={rollup.zscore.toFixed(2)} · c={rollup.cusum.toFixed(1)}
+                        z={(rollup.zscore ?? 0).toFixed(2)} · c={(rollup.cusum ?? 0).toFixed(1)}
                       </td>
                       <td className="px-3 py-2.5">
                         {rollup.breach ? (
@@ -492,7 +510,7 @@ export const JourneysTab: React.FC<JourneysTabProps> = ({
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-200 num-tabular">
-              {journey.recent_instances.map((row) => (
+              {recentInstances.map((row) => (
                 <tr key={row.journey_id} className="hover:bg-slate-50">
                   <td className="px-3 py-2.5 font-mono font-semibold text-slate-900">
                     {row.journey_id}

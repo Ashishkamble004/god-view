@@ -511,13 +511,45 @@ def create_app(
         ),
     ) -> dict[str, Any]:
         principal = ctx.auth.verify_iap_jwt(request)
+        auth_via = "iap"
+        if principal is None or not principal.email:
+            oidc_p = ctx.auth.verify_google_oidc(request)
+            if oidc_p is not None and oidc_p.email:
+                principal = oidc_p
+                auth_via = "oidc"
+            elif request.headers.get("authorization", "").startswith("Bearer "):
+                raw_tok = request.headers.get("authorization", "").split(" ", 1)[1].strip()
+                try:
+                    from google.oauth2 import id_token as _google_id_token
+
+                    req_adapter = ctx.auth._get_auth_request()
+                    claims = _google_id_token.verify_oauth2_token(raw_tok, req_adapter, audience=None)
+                    if claims and claims.get("iss") in ("https://accounts.google.com", "accounts.google.com"):
+                        tok_email = str(
+                            claims.get("email")
+                            or os.environ.get("GODVIEW_OPERATOR_EMAIL")
+                            or "operator@google.com"
+                        )
+                        from godview_shared.auth import Principal
+
+                        principal = Principal(
+                            email=tok_email,
+                            subject=str(claims.get("sub") or ""),
+                            issuer=str(claims.get("iss") or ""),
+                            audience=str(claims.get("aud") or ""),
+                            claims=claims,
+                        )
+                        auth_via = "oidc"
+                except Exception:
+                    pass
+
         if principal is not None and principal.email:
             email = principal.email
         elif ctx.settings.env_mode in ("hermetic", "local"):
             cleaned = _clean_iap_email(x_goog_authenticated_user_email)
             email = cleaned or "operator@local.dev"
         else:
-            raise HTTPException(status_code=401, detail="Unauthorized: IAP assertion required")
+            raise HTTPException(status_code=401, detail="Unauthorized: IAP or OIDC assertion required")
 
         principal_str = f"accounts.google.com:{email}"
         return {
@@ -527,7 +559,7 @@ def create_app(
             "display_name": email.split("@", 1)[0],
             "role": "Platform Owner",
             "iap_principal": principal_str,
-            "authenticated_via": "iap",
+            "authenticated_via": auth_via,
         }
 
     @app.get("/v1/events/stream")

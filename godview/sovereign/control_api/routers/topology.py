@@ -101,14 +101,22 @@ def build_router(ctx: Any) -> APIRouter:
     @router.get("/topology")
     async def get_topology() -> dict[str, Any]:
         """Return the canonical topology graph per plan §1.4 (strictly read-only)."""
-        if perception.last_topology is not None:
-            return perception.last_topology.model_dump(mode="json")
+        from godview.sovereign.topology.builder import extract_incidents_by_node
 
         docs = getattr(ctx, "docs", None) or getattr(ctx, "store", None)
         if docs is not None and hasattr(docs, "list_docs"):
             raw_services = docs.list_docs("discovered_services")
             raw_edges = docs.list_docs("discovered_edges")
             raw_journeys = docs.list_docs("journeys")
+            raw_incidents = docs.list_docs("incidents")
+            raw_golden = docs.list_docs("golden_signals")
+
+            golden_by_node: dict[str, dict[str, Any]] = {}
+            for g in raw_golden:
+                node = g.get("node_id") or g.get("service") or g.get("_id")
+                if node:
+                    golden_by_node[str(node)] = g
+
             if raw_services or raw_edges:
                 services = [
                     DiscoveredServiceDoc(**s)
@@ -116,11 +124,24 @@ def build_router(ctx: Any) -> APIRouter:
                     if s.get("status") != "gone"
                 ]
                 edges = [DiscoveredEdgeDoc(**e) for e in raw_edges]
-                journeys = [JourneyDoc(**j) for j in raw_journeys]
+                journeys = []
+                for j in raw_journeys:
+                    try:
+                        journeys.append(JourneyDoc(**j))
+                    except Exception:
+                        pass
+                incidents_by_node = extract_incidents_by_node(raw_incidents, services)
                 report = topology_builder.build(
-                    services=services, edges=edges, journeys=journeys
+                    services=services,
+                    edges=edges,
+                    journeys=journeys,
+                    incidents=incidents_by_node,
+                    golden_signals=golden_by_node,
                 )
                 return report.model_dump(mode="json")
+
+        if perception.last_topology is not None:
+            return perception.last_topology.model_dump(mode="json")
 
         # If nothing perceived yet, return honestly empty topology graph
         empty_report = topology_builder.build(services=[], edges=[], journeys=[])

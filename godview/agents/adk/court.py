@@ -151,7 +151,9 @@ class CourtCriticAgent:
             "- hypothesis: synthesized root cause hypothesis\n"
             "- confidence: float (0.0 to 1.0)\n"
             "- citations: list of citations\n"
-            "- proposed_actions: list of remediation actions\n"
+            "- proposed_actions: list of remediation actions (each with capability_id, args, rationale, confidence; "
+            "for WAF sensitivity false positives use capability_id='armor.set_waf_sensitivity' with args={'policy_name': '<policy>', 'rule_priority': <int>, 'sensitivity': 1, 'preview_first': true}; "
+            "for Cloud Run config drift use 'run.restore_revision_config'; for GKE probes use 'gke.patch_probe'; for Pub/Sub DLQ use 'pubsub.replay_dlq')\n"
             "- root_cause_category: category\n"
             "- challenges: list of specific challenge strings for specialists\n"
         )
@@ -535,12 +537,92 @@ def register_in_process_court(ctx: Any) -> CourtOrchestrator:
             evidence_pack=ep,
         )
 
+        diag_dict = diagnosis.model_dump(mode="json")
+        if hasattr(incident_doc, "diagnoses") and isinstance(incident_doc.diagnoses, list):
+            incident_doc.diagnoses.append(diag_dict)
+        elif isinstance(incident_doc, dict):
+            incident_doc.setdefault("diagnoses", []).append(diag_dict)
+
+        inc_mgr = getattr(ctx, "incident_manager", None)
+        if inc_mgr is not None and hasattr(inc_mgr, "_active_incidents"):
+            for active_inc in inc_mgr._active_incidents.values():
+                if getattr(active_inc, "doc_id", None) == inc_id:
+                    if diag_dict not in active_inc.diagnoses:
+                        active_inc.diagnoses.append(diag_dict)
+
         if hasattr(ctx, "docs") and ctx.docs is not None:
             existing = ctx.docs.get("incidents", inc_id)
             if existing is not None:
                 diagnoses = list(existing.get("diagnoses", []))
-                diagnoses.append(diagnosis.model_dump(mode="json"))
-                ctx.docs.set("incidents", inc_id, {"diagnoses": diagnoses}, merge=True)
+                diagnoses.append(diag_dict)
+                ctx.docs.set(
+                    "incidents",
+                    inc_id,
+                    {
+                        "diagnoses": diagnoses,
+                        "participants": list(ARCHETYPE_DOMAINS),
+                        "convergence": {
+                            "consensus": diagnosis.confidence,
+                            "rounds": 1,
+                            "seconds": 5.0,
+                            "exit_reason": "consensus_reached" if diagnosis.confidence >= CONSENSUS_THRESHOLD else "max_rounds",
+                            "escalated_to_argon": True,
+                            "escalation_model": MODEL_TABLE["reasoning"].model_id,
+                        },
+                    },
+                    merge=True,
+                )
+
+        trust_gate = getattr(ctx, "trust_gate", None)
+        if trust_gate is not None and hasattr(trust_gate, "create_approval_request"):
+            from godview.agents.adk.specialist import is_mutating_capability
+
+            existing_approvals = (
+                ctx.docs.list_docs("approvals")
+                if hasattr(ctx, "docs") and ctx.docs is not None and hasattr(ctx.docs, "list_docs")
+                else []
+            )
+            lead_agent_id = str(inc_data.get("lead_agent_id") or "platform__default")
+            target_res = str(
+                inc_data.get("target_resource")
+                or inc_data.get("resource_id")
+                or "unknown"
+            )
+            evp_id = str(
+                (ep.get("pack_id") if isinstance(ep, dict) else getattr(ep, "pack_id", None))
+                or f"evp-{inc_id}"
+            )
+            for act in diagnosis.proposed_actions:
+                cap_id = getattr(act, "capability_id", "") or ""
+                if not cap_id or not is_mutating_capability(cap_id):
+                    continue
+                already_open = any(
+                    a.get("incident_id") == inc_id
+                    and (a.get("capability") == cap_id or a.get("action_type") == cap_id)
+                    and a.get("decision", a.get("status", "pending")) == "pending"
+                    for a in existing_approvals
+                )
+                if not already_open:
+                    act_args = dict(getattr(act, "args", {}) or {})
+                    act_target = str(
+                        act_args.get("policy_name")
+                        or act_args.get("service_name")
+                        or act_args.get("deployment")
+                        or target_res
+                    )
+                    try:
+                        trust_gate.create_approval_request(
+                            incident_id=inc_id,
+                            agent_id=lead_agent_id,
+                            capability_id=cap_id,
+                            target_resource=act_target,
+                            trust_level_required=2,
+                            narrative=getattr(act, "rationale", "") or diagnosis.hypothesis,
+                            evidence_pack_id=evp_id,
+                            args=act_args,
+                        )
+                    except Exception as apr_exc:
+                        logger.warning("Failed to create approval card for %s on %s: %s", cap_id, inc_id, apr_exc)
 
         return diagnosis
 

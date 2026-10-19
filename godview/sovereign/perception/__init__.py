@@ -242,14 +242,23 @@ class PerceptionOrgan:
                 svc.routes = list(gateway_routes_by_backend[doc_id])
 
             # Check if business context already exists in service or Firestore
-            business_ctx = svc.business_context
-            if business_ctx is None and hasattr(self._firestore, "get"):
+            from godview.sovereign.business_context.inferencer import is_business_context_stale
+
+            if reset and self._inferencer is not None and hasattr(self._inferencer, "_cache_by_evidence_hash"):
+                self._inferencer._cache_by_evidence_hash.clear()
+
+            business_ctx = svc.business_context if not reset else None
+            if business_ctx is None and not reset and hasattr(self._firestore, "get"):
                 existing_doc = self._firestore.get("discovered_services", doc_id)
                 if existing_doc and existing_doc.get("business_context"):
                     try:
-                        business_ctx = BusinessContext(**existing_doc["business_context"])
+                        candidate_bc = BusinessContext(**existing_doc["business_context"])
+                        if not is_business_context_stale(candidate_bc):
+                            business_ctx = candidate_bc
                     except Exception:
                         business_ctx = None
+            elif business_ctx is not None and is_business_context_stale(business_ctx):
+                business_ctx = None
 
             existing = self._firestore.get("discovered_services", doc_id) if hasattr(self._firestore, "get") else None
             updated_doc = svc.model_copy(
@@ -418,14 +427,14 @@ class PerceptionOrgan:
                 except Exception:
                     pass
 
-            for inc in self._firestore.list_docs("incidents"):
-                if inc.get("status") in ("open", "escalated", "investigating"):
-                    target_node = inc.get("node_id") or inc.get("resource_id") or inc.get("entity_id") or ""
-                    services = inc.get("services") or []
-                    keys = [target_node] + list(services)
-                    for k in keys:
-                        if k:
-                            incidents_by_node.setdefault(k, []).append(inc)
+            from godview.sovereign.topology.builder import extract_incidents_by_node
+
+            incidents_by_node.update(
+                extract_incidents_by_node(
+                    self._firestore.list_docs("incidents"),
+                    services_to_persist,
+                )
+            )
 
             for g in self._firestore.list_docs("golden_signals"):
                 node = g.get("node_id") or g.get("service") or g.get("_id")
@@ -483,10 +492,11 @@ class PerceptionOrgan:
 
         # Phase 2: Run business context inference with bounded concurrency (never blocking initial discovery)
         if self._inferencer is not None:
+            from godview.sovereign.business_context.inferencer import is_business_context_stale
+
             services_needing_inference = [
                 s for s in services_to_persist
-                if s.business_context is None
-                or getattr(s.business_context, "confidence", 0.0) == 0.0
+                if reset or is_business_context_stale(s.business_context)
             ]
             if services_needing_inference:
                 sem = asyncio.Semaphore(5)

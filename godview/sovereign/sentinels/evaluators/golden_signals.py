@@ -124,6 +124,24 @@ class GoldenSignalsEvaluator(BaseSentinelEvaluator):
 
         error_rate = (error_count_5xx / total_requests) if total_requests > 0 else 0.0
 
+        # Persist measured golden signals snapshot to Firestore when non-zero
+        if (total_requests > 0 or p95_ms > 0) and ctx.firestore is not None and hasattr(ctx.firestore, "set"):
+            try:
+                ctx.firestore.set(
+                    "golden_signals",
+                    service_name,
+                    {
+                        "node_id": service_name,
+                        "service": service_name,
+                        "rps": round(total_requests / max(window_s, 1), 4),
+                        "p95_ms": round(p95_ms, 2),
+                        "error_ratio": round(error_rate, 4),
+                    },
+                    merge=True,
+                )
+            except Exception:
+                pass
+
         # Check for 504 / cold-start latency burst
         if p95_ms >= p95_threshold_ms:
             sig = "cold_start_504_burst" if (error_count_5xx > 0 or instance_count == 0) else "latency_p95_exceeded"

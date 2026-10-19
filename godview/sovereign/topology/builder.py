@@ -144,6 +144,66 @@ def map_edge_kind(protocol: str) -> EdgeKind:
     return "http"
 
 
+def extract_incidents_by_node(
+    incidents_raw: list[dict[str, Any]],
+    services: list[DiscoveredServiceDoc] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Map open/active incident docs to topology node IDs and short service names."""
+    from urllib.parse import urlsplit
+
+    incidents_by_node: dict[str, list[dict[str, Any]]] = {}
+    svc_list = services or []
+    for inc in incidents_raw:
+        state = str(inc.get("outcome") or inc.get("status") or "").lower()
+        if state not in ("open", "escalated", "investigating"):
+            continue
+        evp = inc.get("evidence_pack") if isinstance(inc.get("evidence_pack"), dict) else {}
+        affected = evp.get("affected") if isinstance(evp.get("affected"), dict) else {}
+        aff_services = affected.get("services") if isinstance(affected.get("services"), list) else []
+        inc_services = inc.get("services") if isinstance(inc.get("services"), list) else []
+        dedupe = str(inc.get("dedupe_key") or "")
+        dedupe_res = dedupe.split(":", 1)[1] if ":" in dedupe else ""
+
+        raw_keys = [
+            inc.get("target_resource"),
+            inc.get("resource_id"),
+            inc.get("node_id"),
+            inc.get("entity_id"),
+            dedupe_res,
+            *inc_services,
+            *aff_services,
+        ]
+        expanded: set[str] = set()
+        for rk in raw_keys:
+            if not rk or not isinstance(rk, str):
+                continue
+            k = rk.strip()
+            if not k:
+                continue
+            expanded.add(k)
+            if "://" in k:
+                parsed = urlsplit(k)
+                host = parsed.hostname or ""
+                if host:
+                    expanded.add(host)
+                    expanded.add(f"{parsed.scheme}://{host}")
+                    for s in svc_list:
+                        loc = str(s.locator or "")
+                        s_name = str(s.name or "")
+                        if host in loc or host in s_name or any(host in str(r) for r in (s.routes or [])):
+                            expanded.add(s.name)
+                            if s.doc_id:
+                                expanded.add(s.doc_id)
+            else:
+                if ":" in k:
+                    expanded.add(k.split(":")[0])
+                if "/" in k:
+                    expanded.add(k.rstrip("/").split("/")[-1])
+        for key in expanded:
+            incidents_by_node.setdefault(key, []).append(inc)
+    return incidents_by_node
+
+
 class TopologyBuilder:
     """Builds and merges the canonical God-View topology graph."""
 
@@ -155,7 +215,7 @@ class TopologyBuilder:
         services: list[DiscoveredServiceDoc],
         edges: list[DiscoveredEdgeDoc],
         journeys: list[JourneyDoc] | None = None,
-        incidents_by_node: dict[str, int] | None = None,
+        incidents_by_node: dict[str, Any] | None = None,
         golden_by_node: dict[str, dict[str, Any]] | None = None,
         posture_by_node: dict[str, Posture] | None = None,
         *,
@@ -163,13 +223,11 @@ class TopologyBuilder:
         golden_signals: dict[str, Any] | None = None,
     ) -> TopologyReport:
         now_iso = datetime.now(tz=UTC).isoformat()
-        if incidents_by_node is None and incidents is not None:
-            incidents_map = {
-                k: (len(v) if isinstance(v, list) else int(v))
-                for k, v in incidents.items()
-            }
-        else:
-            incidents_map = incidents_by_node or {}
+        raw_incidents = incidents_by_node if incidents_by_node is not None else (incidents or {})
+        incidents_map = {
+            k: (len(v) if isinstance(v, (list, tuple, set)) else int(v or 0))
+            for k, v in raw_incidents.items()
+        }
         golden_map = golden_by_node or golden_signals or {}
         posture_map = posture_by_node or {}
 
@@ -235,8 +293,15 @@ class TopologyBuilder:
             # Incidents open count
             inc_open = incidents_map.get(node_id, 0)
             if not inc_open:
-                # Also check by short name
+                # Also check by short name or locator
                 inc_open = incidents_map.get(name, 0)
+            if not inc_open and s.locator:
+                inc_open = incidents_map.get(s.locator, 0)
+                if not inc_open and "://" in s.locator:
+                    from urllib.parse import urlsplit
+                    loc_host = urlsplit(s.locator).hostname or ""
+                    if loc_host:
+                        inc_open = incidents_map.get(loc_host, 0)
 
             # Golden signals
             node_golden = golden_map.get(node_id) or golden_map.get(name) or {}

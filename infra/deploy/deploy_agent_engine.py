@@ -17,13 +17,19 @@ Spec alignment:
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import logging
 import os
+import re
+import subprocess
 import sys
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
+
+os.environ.setdefault("GOOGLE_API_USE_CLIENT_CERTIFICATE", "false")
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT / "shared") not in sys.path:
@@ -200,11 +206,12 @@ def build_agent_payload(
         container_concurrency=4,
         env_vars=env_vars,
     )
+    safe_subject = re.sub(r"[^a-z0-9_-]", "-", subject_key.lower())[:63]
     labels = {
         "godview_managed": "true",
         "godview_role": "court",
         "agent_type": agent_type.replace("_", "-"),
-        "subject": subject_key[:63],
+        "subject": safe_subject,
     }
     return AgentEnginePayload(
         agent_id=agent_id,
@@ -327,7 +334,11 @@ class VertexAgentEngineBackend:
             )
         return results
 
-    def deploy_reasoning_engine(self, payload: AgentEnginePayload) -> dict[str, Any]:
+    def deploy_reasoning_engine(
+        self,
+        payload: AgentEnginePayload,
+        existing_resource_name: str | None = None,
+    ) -> dict[str, Any]:
         vertexai, _ = self._init_sdk()
         from vertexai import agent_engines  # type: ignore[import-not-found]
 
@@ -335,6 +346,12 @@ class VertexAgentEngineBackend:
         agent_id = payload.agent_id
         agent_type = payload.agent_type
         subject_key = payload.subject_key
+
+        card_data = dict(payload.a2a_card)
+        if existing_resource_name:
+            card_data["url"] = (
+                f"https://{payload.location}-aiplatform.googleapis.com/v1beta1/{existing_resource_name}:query"
+            )
 
         class CourtAgentWrapper:
             """Cloudpickle-safe Vertex AI Agent Engine wrapper for God-View Court Specialist."""
@@ -345,17 +362,31 @@ class VertexAgentEngineBackend:
                 aid: str,
                 atype: str,
                 skey: str,
-                card_data: dict[str, Any] | None = None,
+                cdata: dict[str, Any] | None = None,
             ) -> None:
                 self.sovereign_url = sov_url
                 self.agent_id = aid
                 self.agent_type = atype
                 self.subject_key = skey
-                self.card_data = card_data or {}
+                self.card_data = cdata or {}
                 self._agent: Any = None
                 self._llm: Any = None
 
             def set_up(self) -> None:
+                import os
+                import sys
+
+                cwd = os.getcwd()
+                for rel in (
+                    "shared",
+                    ".",
+                    "usr/local/google/home/kambleashish/Documents/Projects/god-view/shared",
+                    "usr/local/google/home/kambleashish/Documents/Projects/god-view",
+                ):
+                    candidate = os.path.abspath(os.path.join(cwd, rel))
+                    if os.path.isdir(candidate) and candidate not in sys.path:
+                        sys.path.insert(0, candidate)
+
                 auth = None
                 try:
                     from godview_shared.auth import TokenProvider
@@ -394,7 +425,7 @@ class VertexAgentEngineBackend:
                     logger.warning("Could not initialize specialist agent in set_up: %s", exc)
                     self._agent = None
 
-            def agent_card(self) -> dict[str, Any]:
+            def get_agent_card(self) -> dict[str, Any]:
                 """Return the A2A AgentCard for this deployed specialist."""
                 if self.card_data:
                     return dict(self.card_data)
@@ -411,7 +442,7 @@ class VertexAgentEngineBackend:
                     merged.get("action") in ("card", "get_card")
                     or merged.get("get_card")
                 ):
-                    return self.agent_card()
+                    return self.get_agent_card()
 
                 incident_id = str(merged.get("incident_id") or "adhoc")
                 evidence = merged.get("evidence_pack") or merged.get("evidence") or {}
@@ -459,33 +490,66 @@ class VertexAgentEngineBackend:
             aid=agent_id,
             atype=agent_type,
             skey=subject_key,
-            card_data=payload.a2a_card,
+            cdata=card_data,
         )
 
+        os.chdir(REPO_ROOT)
         extra_packages = [
-            str(REPO_ROOT / "godview"),
-            str(REPO_ROOT / "shared"),
+            "godview/__init__.py",
+            "godview/agents",
+            "godview/adapters",
+            "shared",
+        ]
+        requirements = [
+            "google-cloud-aiplatform[agent_engines,adk]>=1.88.0",
+            "google-adk>=0.1.0",
+            "google-genai>=0.1.0",
+            "google-auth>=2.30.0",
+            "pydantic>=2.7.0",
+            "httpx>=0.27.0",
+            "pyyaml>=6.0.1",
+            "opentelemetry-api>=1.25.0",
+            "opentelemetry-sdk>=1.25.0",
+            "prometheus-client>=0.20.0",
+            "duckdb>=1.0.0",
+            "sqlglot>=25.0.0",
+            "PyJWT>=2.8.0",
+            "cryptography>=42.0.0",
         ]
 
-        remote_agent = agent_engines.create(
-            app_instance,
-            display_name=payload.display_name,
-            description=payload.description,
-            extra_packages=extra_packages,
-            requirements=[
-                "google-cloud-aiplatform[agent_engines,adk]>=1.88.0",
-                "google-adk>=0.1.0",
-                "pydantic>=2.7.0",
-                "httpx>=0.27.0",
-            ],
-            env_vars=payload.deployment_spec.env_vars,
-            min_instances=payload.deployment_spec.min_instances,
-            max_instances=payload.deployment_spec.max_instances,
-            resource_limits=payload.deployment_spec.resource_limits,
-            container_concurrency=payload.deployment_spec.container_concurrency,
-            service_account=payload.service_account if payload.service_account else None,
-        )
-        resource_name = remote_agent.resource_name
+        if existing_resource_name:
+            remote_agent = agent_engines.update(
+                existing_resource_name,
+                agent_engine=app_instance,
+                display_name=payload.display_name,
+                description=payload.description,
+                extra_packages=extra_packages,
+                requirements=requirements,
+                env_vars=payload.deployment_spec.env_vars,
+                min_instances=payload.deployment_spec.min_instances,
+                max_instances=payload.deployment_spec.max_instances,
+                resource_limits=payload.deployment_spec.resource_limits,
+                container_concurrency=payload.deployment_spec.container_concurrency,
+                service_account=payload.service_account if payload.service_account else None,
+                gcs_dir_name=f"agent_engine_{payload.agent_id}",
+            )
+            resource_name = existing_resource_name
+        else:
+            remote_agent = agent_engines.create(
+                app_instance,
+                display_name=payload.display_name,
+                description=payload.description,
+                extra_packages=extra_packages,
+                requirements=requirements,
+                env_vars=payload.deployment_spec.env_vars,
+                min_instances=payload.deployment_spec.min_instances,
+                max_instances=payload.deployment_spec.max_instances,
+                resource_limits=payload.deployment_spec.resource_limits,
+                container_concurrency=payload.deployment_spec.container_concurrency,
+                service_account=payload.service_account if payload.service_account else None,
+                gcs_dir_name=f"agent_engine_{payload.agent_id}",
+            )
+            resource_name = remote_agent.resource_name
 
         from google.cloud import aiplatform_v1beta1
         from google.protobuf import field_mask_pb2
@@ -579,6 +643,8 @@ def fetch_spawn_plan(sovereign_url: str, token: str | None = None) -> list[tuple
     headers = {}
     auth_token = token
     if not auth_token:
+        auth_token = os.environ.get("GODVIEW_ID_TOKEN") or None
+    if not auth_token:
         try:
             import google.auth.transport.requests
             import google.oauth2.id_token
@@ -587,6 +653,16 @@ def fetch_spawn_plan(sovereign_url: str, token: str | None = None) -> list[tuple
             auth_token = google.oauth2.id_token.fetch_id_token(auth_req, sovereign_url)
         except Exception as exc:
             logger.debug("Could not mint ID token for sovereign perceive at %s: %s", sovereign_url, exc)
+    if not auth_token:
+        try:
+            auth_token = subprocess.check_output(
+                ["gcloud", "auth", "print-identity-token"],
+                text=True,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            ).strip()
+        except Exception as exc:
+            logger.debug("Could not print gcloud identity token: %s", exc)
 
     if auth_token:
         headers["Authorization"] = f"Bearer {auth_token}"
@@ -594,6 +670,19 @@ def fetch_spawn_plan(sovereign_url: str, token: str | None = None) -> list[tuple
     url = f"{sovereign_url.rstrip('/')}/api/v1/perceive"
     try:
         resp = httpx.get(url, headers=headers, timeout=15.0)
+        if resp.status_code in (401, 403) and not token:
+            try:
+                gcloud_tok = subprocess.check_output(
+                    ["gcloud", "auth", "print-identity-token"],
+                    text=True,
+                    stderr=subprocess.DEVNULL,
+                    timeout=10,
+                ).strip()
+                if gcloud_tok:
+                    headers["Authorization"] = f"Bearer {gcloud_tok}"
+                    resp = httpx.get(url, headers=headers, timeout=15.0)
+            except Exception as exc:
+                logger.debug("Fallback gcloud identity token failed: %s", exc)
         resp.raise_for_status()
         data = resp.json()
         spawn_plan = data.get("spawn_plan") or data.get("court_roster") or []
@@ -638,10 +727,42 @@ def main(argv: list[str] | None = None) -> int:
 
     targets: list[tuple[str, str]] = []
     if args.from_perceive:
-        targets = fetch_spawn_plan(args.sovereign_url)
-        if not targets:
+        raw_targets = fetch_spawn_plan(args.sovereign_url)
+        if not raw_targets:
             print("Perceive spawn plan returned 0 targets.", file=sys.stderr)
             return 1
+        if len(raw_targets) > 6 and not args.hermetic:
+            # Select representative core court roster covering all 5 archetypes
+            by_type: dict[str, list[str]] = {}
+            for atype, skey in raw_targets:
+                if skey not in by_type.setdefault(atype, []):
+                    by_type[atype].append(skey)
+            selected: list[tuple[str, str]] = []
+            # Preferred application targets
+            app_candidates = by_type.get("application", [])
+            preferred_apps = [
+                s for s in ("loan-orchestrator-api", "kyc-model-armor-svc", "god-view-edge-policy")
+                if s in app_candidates
+            ]
+            for s in preferred_apps[:2]:
+                selected.append(("application", s))
+            if not selected and app_candidates:
+                selected.append(("application", app_candidates[0]))
+            # Data
+            for s in by_type.get("data", [])[:1] or ["god-view-pg"]:
+                selected.append(("data", s))
+            # Business line
+            for s in by_type.get("business_line", [])[:1] or ["vehicle-loan-application"]:
+                selected.append(("business_line", re.sub(r"[^a-z0-9_-]", "-", s.lower())[:45]))
+            # Change
+            for s in by_type.get("change", [])[:1] or ["god-view"]:
+                selected.append(("change", s))
+            # Platform
+            for s in by_type.get("platform", [])[:1] or ["gcp-general-ak"]:
+                selected.append(("platform", s))
+            targets = selected
+        else:
+            targets = raw_targets
     elif args.targets:
         for pair in args.targets.split(","):
             pair = pair.strip()
@@ -688,7 +809,54 @@ def main(argv: list[str] | None = None) -> int:
             staging_bucket=args.staging_bucket,
         )
 
-    deployed = [deploy_court_agent(backend, p) for p in payloads]
+    if args.hermetic or len(payloads) <= 1:
+        deployed = [deploy_court_agent(backend, p) for p in payloads]
+    else:
+        existing_engines = backend.list_reasoning_engines()
+        existing_by_display = {
+            e.get("display_name"): e
+            for e in existing_engines
+            if e.get("labels", {}).get("godview_managed") == "true"
+        }
+
+        def _deploy_or_reuse(p: AgentEnginePayload) -> dict[str, Any]:
+            if p.display_name in existing_by_display:
+                ex = existing_by_display[p.display_name]
+                rname = ex["name"]
+                return backend.deploy_reasoning_engine(p, existing_resource_name=rname)
+            return backend.deploy_reasoning_engine(p)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, len(payloads))) as pool:
+            deployed = list(pool.map(_deploy_or_reuse, payloads))
+
+    if not args.hermetic and args.project_id:
+        try:
+            from godview_shared.contracts import CourtAgentDoc
+            from godview_shared.stores.firestore_store import FirestoreStore
+
+            fs = FirestoreStore(project=args.project_id, database="god-view-memory-db")
+            now_iso = datetime.now(tz=UTC).isoformat()
+            for item in deployed:
+                aid = item["agent_id"]
+                doc = CourtAgentDoc(
+                    doc_id=aid,
+                    agent_type=item["agent_type"],
+                    subject_ref=item["subject_key"],
+                    reasoning_engine=item["name"],
+                    a2a_card_url=item["a2a_card_url"],
+                    state="sleeping",
+                    warmth_min_instances=0,
+                    memory_bank_id=f"mem-{aid}",
+                    namespace=aid,
+                    token_budget_daily=50000,
+                    tokens_spent_today=0,
+                    wakes_7d=0,
+                    spawned_at=now_iso,
+                )
+                fs.set("court_agents", aid, doc.model_dump(mode="json"))
+        except Exception as exc:
+            logger.warning("Could not sync deployed court agents to Firestore: %s", exc)
+
     print(json.dumps(deployed, indent=2))
     return 0
 

@@ -101,9 +101,9 @@ export const OrganismTab: React.FC<OrganismTabProps> = ({
   }
 
   const warmCount = court.filter((a) => a.warmth_min_instances === 1).length;
-  const totalTokensToday = court.reduce((acc, a) => acc + a.tokens_spent_today, 0);
+  const totalTokensToday = court.reduce((acc, a) => acc + (a.tokens_spent_today ?? 0), 0);
   const totalAgentUsdToday = court.reduce(
-    (acc, a) => acc + a.tokens_spent_today_usd,
+    (acc, a) => acc + (a.tokens_spent_today_usd ?? 0),
     0
   );
 
@@ -174,8 +174,8 @@ export const OrganismTab: React.FC<OrganismTabProps> = ({
                 Court Token Budget Today
               </span>
               <Badge variant="outline" className="num-tabular">
-                {formatUsd(totalAgentUsdToday + perceive.sovereign_spent_today_usd)}{' '}
-                / {formatUsd(perceive.court_ceiling_daily_usd)}
+                {formatUsd(totalAgentUsdToday + (perceive.sovereign_spent_today_usd ?? 0))}{' '}
+                / {formatUsd(perceive.court_ceiling_daily_usd ?? 5)}
               </Badge>
             </div>
             <p className="mt-2 text-xl font-semibold text-slate-900 num-tabular">
@@ -400,8 +400,8 @@ export const OrganismTab: React.FC<OrganismTabProps> = ({
                 );
                 const isAwake = agentsOfType.some((a) => a.state === 'awake');
                 const highestTrust = agentsOfType.reduce((max, a) => {
-                  const agentMax = a.trust_records.reduce(
-                    (m, r) => Math.max(m, r.level),
+                  const agentMax = (a.trust_records ?? []).reduce(
+                    (m, r) => Math.max(m, r.level ?? 0),
                     0
                   );
                   return Math.max(max, agentMax);
@@ -535,12 +535,12 @@ export const OrganismTab: React.FC<OrganismTabProps> = ({
             const pctSpent = Math.min(
               100,
               Math.round(
-                (agent.tokens_spent_today_usd /
-                  Math.max(0.01, agent.token_budget_daily_usd)) *
+                ((agent.tokens_spent_today_usd ?? 0) /
+                  Math.max(0.01, agent.token_budget_daily_usd ?? 1)) *
                   100
               )
             );
-            const firstThresholds = agent.trust_records[0]?.thresholds;
+            const firstThresholds = (agent.trust_records ?? [])[0]?.thresholds;
             return (
               <Card key={agent.id} className="p-4">
                 <div className="border-b border-slate-200 pb-3">
@@ -636,7 +636,7 @@ export const OrganismTab: React.FC<OrganismTabProps> = ({
                     )}
                   </div>
                   <div className="mt-1.5 divide-y divide-slate-200 rounded border border-slate-200">
-                    {agent.trust_records.map((rec) => (
+                    {(agent.trust_records ?? []).map((rec) => (
                       <div
                         key={rec.id}
                         className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-xs"
@@ -652,14 +652,14 @@ export const OrganismTab: React.FC<OrganismTabProps> = ({
                         </div>
                         <div className="flex items-center gap-3">
                           <span className="text-slate-500 num-tabular">
-                            Rec {rec.counters.recommendations_correct}/
-                            {rec.thresholds.n1} · Exec{' '}
-                            {rec.counters.approved_executions}/
-                            {rec.thresholds.n2} · Biz{' '}
-                            {rec.counters.business_successes}/
-                            {rec.thresholds.n3}
+                            Rec {rec.counters?.recommendations_correct ?? 0}/
+                            {rec.thresholds?.n1 ?? 5} · Exec{' '}
+                            {rec.counters?.approved_executions ?? 0}/
+                            {rec.thresholds?.n2 ?? 10} · Biz{' '}
+                            {rec.counters?.business_successes ?? 0}/
+                            {rec.thresholds?.n3 ?? 25}
                           </span>
-                          <TrustLevelBadge level={rec.level} />
+                          <TrustLevelBadge level={rec.level ?? 1} />
                         </div>
                       </div>
                     ))}
@@ -724,7 +724,7 @@ export const OrganismTab: React.FC<OrganismTabProps> = ({
             subtitle="Identity-only perception availability report (Available / Partial / Unavailable)"
           />
           <div className="mt-3 divide-y divide-slate-200">
-            {perceive.senses.map((sense) => (
+            {(perceive.senses ?? []).map((sense) => (
               <div key={sense.adapter_family} className="py-2.5 text-xs">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
@@ -774,7 +774,7 @@ export const OrganismTab: React.FC<OrganismTabProps> = ({
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200">
-                {perceive.discovered_services.map((svc) => (
+                {(perceive.discovered_services ?? []).map((svc) => (
                   <tr key={svc.id} className="hover:bg-slate-50">
                     <td className="px-3 py-2 font-mono font-semibold text-slate-900">
                       {svc.name}
@@ -788,7 +788,7 @@ export const OrganismTab: React.FC<OrganismTabProps> = ({
                       {svc.inferred_role}
                     </td>
                     <td className="px-3 py-2 text-right font-semibold text-slate-900 num-tabular">
-                      {Math.round(svc.role_confidence * 100)}%
+                      {Math.round((svc.role_confidence ?? 0) * 100)}%
                     </td>
                     <td className="px-3 py-2">
                       <button

@@ -41,6 +41,11 @@ def _unwrap_vectors(data: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _sanitize_doc_id(doc_id: str) -> str:
+    """Sanitize a document ID so it does not contain forward slashes."""
+    return str(doc_id).replace("/", "__")
+
+
 class FirestoreStore:
     """Production Firestore Native DocumentStore."""
 
@@ -90,10 +95,11 @@ class FirestoreStore:
     ) -> dict[str, Any]:
         """Create or update a document in a top-level collection."""
         self._validate_collection(collection)
+        safe_id = _sanitize_doc_id(doc_id)
         client = self._get_client()
         stored = copy.deepcopy(data)
         stored["_id"] = doc_id
-        ref = client.collection(collection).document(doc_id)
+        ref = client.collection(collection).document(safe_id)
         firestore_data = _wrap_vectors(stored)
         ref.set(firestore_data, merge=merge)
         return copy.deepcopy(stored)
@@ -101,21 +107,23 @@ class FirestoreStore:
     def get(self, collection: str, doc_id: str) -> dict[str, Any] | None:
         """Fetch a single document by ID, or None if not found."""
         self._validate_collection(collection)
+        safe_id = _sanitize_doc_id(doc_id)
         client = self._get_client()
-        ref = client.collection(collection).document(doc_id)
+        ref = client.collection(collection).document(safe_id)
         snap = ref.get()
         if not snap.exists:
             return None
         data = snap.to_dict() or {}
-        data["_id"] = doc_id
+        data["_id"] = data.get("_id") or doc_id
         unwrapped = _unwrap_vectors(data)
         return copy.deepcopy(unwrapped)
 
     def delete(self, collection: str, doc_id: str) -> bool:
         """Delete a document by ID."""
         self._validate_collection(collection)
+        safe_id = _sanitize_doc_id(doc_id)
         client = self._get_client()
-        ref = client.collection(collection).document(doc_id)
+        ref = client.collection(collection).document(safe_id)
         snap = ref.get()
         if not snap.exists:
             return False
@@ -143,7 +151,7 @@ class FirestoreStore:
                 query = query.where(filter=FieldFilter(k, "==", v))
 
         if cursor is not None:
-            cursor_ref = col_ref.document(cursor)
+            cursor_ref = col_ref.document(_sanitize_doc_id(cursor))
             cursor_snap = cursor_ref.get()
             if cursor_snap.exists:
                 query = query.start_after(cursor_snap)
@@ -155,7 +163,7 @@ class FirestoreStore:
         results: list[dict[str, Any]] = []
         for snap in query.stream():
             d = snap.to_dict() or {}
-            d["_id"] = snap.id
+            d["_id"] = d.get("_id") or snap.id
             unwrapped = _unwrap_vectors(d)
             if predicate is None or predicate(unwrapped):
                 results.append(copy.deepcopy(unwrapped))
@@ -178,9 +186,9 @@ class FirestoreStore:
         stored["_id"] = sub_id
         ref = (
             client.collection(collection)
-            .document(doc_id)
+            .document(_sanitize_doc_id(doc_id))
             .collection(subcollection)
-            .document(sub_id)
+            .document(_sanitize_doc_id(sub_id))
         )
         firestore_data = _wrap_vectors(stored)
         ref.set(firestore_data)
@@ -198,15 +206,15 @@ class FirestoreStore:
         client = self._get_client()
         ref = (
             client.collection(collection)
-            .document(doc_id)
+            .document(_sanitize_doc_id(doc_id))
             .collection(subcollection)
-            .document(sub_id)
+            .document(_sanitize_doc_id(sub_id))
         )
         snap = ref.get()
         if not snap.exists:
             return None
         data = snap.to_dict() or {}
-        data["_id"] = sub_id
+        data["_id"] = data.get("_id") or sub_id
         unwrapped = _unwrap_vectors(data)
         return copy.deepcopy(unwrapped)
 
@@ -221,13 +229,13 @@ class FirestoreStore:
         client = self._get_client()
         query = (
             client.collection(collection)
-            .document(doc_id)
+            .document(_sanitize_doc_id(doc_id))
             .collection(subcollection)
         )
         results: list[dict[str, Any]] = []
         for snap in query.stream():
             d = snap.to_dict() or {}
-            d["_id"] = snap.id
+            d["_id"] = d.get("_id") or snap.id
             unwrapped = _unwrap_vectors(d)
             results.append(copy.deepcopy(unwrapped))
         return results

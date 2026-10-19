@@ -520,7 +520,18 @@ class IncidentManager:
                     eval_result.evidence_samples + existing_samples
                 )[:10]
 
+            # Sync diagnoses from Firestore if populated by async court callback
+            if not incident.diagnoses and self._firestore is not None and incident.doc_id:
+                try:
+                    stored_inc = self._firestore.get("incidents", incident.doc_id)
+                    if stored_inc and stored_inc.get("diagnoses"):
+                        incident.diagnoses = list(stored_inc["diagnoses"])
+                except Exception:
+                    pass
+
             self._persist_incident(incident)
+            if not incident.diagnoses and incident.evidence_pack is not None:
+                await self._notify_court(incident, incident.evidence_pack)
             await self._emit_incident_event("incident.updated", incident)
             return incident, False
 

@@ -59,20 +59,20 @@ export const IncidentsTab: React.FC<IncidentsTabProps> = ({
 
   const isDetailRoute = Boolean(selectedIncidentId);
   const evp = activeIncident.evidence_pack;
-  const isGreenButBroken = evp.golden_signals.status === 'green';
+  const isGreenButBroken = evp?.golden_signals?.status === 'green';
 
   const totalExposure = incidents.reduce((sum, i) => sum + (i.value_impact || 0), 0);
   const avgMtti =
     incidents.length > 0
       ? Math.round(
-          incidents.reduce((sum, i) => sum + i.convergence.seconds, 0) /
+          incidents.reduce((sum, i) => sum + (i.convergence?.seconds ?? 0), 0) /
             incidents.length
         )
       : 0;
   const avgConsensus =
     incidents.length > 0
       ? Math.round(
-          (incidents.reduce((sum, i) => sum + i.convergence.consensus, 0) /
+          (incidents.reduce((sum, i) => sum + (i.convergence?.consensus ?? 0), 0) /
             incidents.length) *
             100
         )
@@ -233,8 +233,8 @@ export const IncidentsTab: React.FC<IncidentsTabProps> = ({
                           {formatCurrency(inc.value_impact || 0)}
                         </td>
                         <td className="whitespace-nowrap px-3 py-2.5 font-mono text-slate-700">
-                          {(inc.convergence.consensus * 100).toFixed(0)}% ·{' '}
-                          {inc.convergence.rounds}r · {inc.convergence.seconds}s
+                          {((inc.convergence?.consensus ?? 0) * 100).toFixed(0)}% ·{' '}
+                          {inc.convergence?.rounds ?? 0}r · {inc.convergence?.seconds ?? 0}s
                         </td>
                         <td className="whitespace-nowrap px-3 py-2.5">
                           <Badge
@@ -292,8 +292,8 @@ export const IncidentsTab: React.FC<IncidentsTabProps> = ({
               </Badge>
               {isGreenButBroken && (
                 <Badge variant="success" dot>
-                  Infra golden signals green (P95 {evp.golden_signals.p95_ms}ms ·
-                  5xx {evp.golden_signals.error_rate_pct}%)
+                  Infra golden signals green (P95 {evp?.golden_signals?.p95_ms ?? 0}ms ·
+                  5xx {evp?.golden_signals?.error_rate_pct ?? 0}%)
                 </Badge>
               )}
             </div>
@@ -303,7 +303,7 @@ export const IncidentsTab: React.FC<IncidentsTabProps> = ({
             <p className="text-xs text-slate-600">
               Root Cause:{' '}
               <span className="font-semibold text-slate-900">
-                {activeIncident.root_cause}
+                {activeIncident.root_cause || (activeIncident as any).diagnoses?.[0]?.hypothesis || 'Investigation in progress'}
               </span>
             </p>
           </div>
@@ -316,7 +316,7 @@ export const IncidentsTab: React.FC<IncidentsTabProps> = ({
               {formatCurrency(activeIncident.value_impact || 0)}
             </p>
             <p className="text-xs text-slate-500">
-              {evp.affected.rows} affected records · Opened{' '}
+              {evp?.affected?.rows ?? 0} affected records · Opened{' '}
               {formatShortTime(activeIncident.opened_at)}
             </p>
           </div>
@@ -327,33 +327,33 @@ export const IncidentsTab: React.FC<IncidentsTabProps> = ({
           <div>
             <span className="text-slate-500">Convergence Score</span>
             <p className="mt-0.5 text-sm font-semibold text-slate-900">
-              {activeIncident.convergence.consensus.toFixed(2)} (
-              {Math.round(activeIncident.convergence.consensus * 100)}%)
+              {(activeIncident.convergence?.consensus ?? 0).toFixed(2)} (
+              {Math.round((activeIncident.convergence?.consensus ?? 0) * 100)}%)
             </p>
           </div>
           <div>
             <span className="text-slate-500">Swarm Rounds</span>
             <p className="mt-0.5 text-sm font-semibold text-slate-900">
-              {activeIncident.convergence.rounds} rounds
+              {activeIncident.convergence?.rounds ?? 0} rounds
             </p>
           </div>
           <div>
             <span className="text-slate-500">Time to Converge (MTTI)</span>
             <p className="mt-0.5 text-sm font-semibold text-slate-900">
-              {activeIncident.convergence.seconds}s
+              {activeIncident.convergence?.seconds ?? 0}s
             </p>
           </div>
           <div>
             <span className="text-slate-500">Exit Condition</span>
             <p className="mt-0.5 font-semibold text-green-800">
-              {formatEnumLabel(activeIncident.convergence.exit_reason)}
+              {formatEnumLabel(activeIncident.convergence?.exit_reason ?? 'investigating')}
             </p>
           </div>
           <div>
             <span className="text-slate-500">Escalated to Argon</span>
             <p className="mt-0.5 font-semibold text-slate-900">
-              {activeIncident.convergence.escalated_to_argon
-                ? `Yes (${activeIncident.convergence.escalation_model})`
+              {activeIncident.convergence?.escalated_to_argon
+                ? `Yes (${activeIncident.convergence?.escalation_model ?? 'gemini-4-argon'})`
                 : 'No (Flash sufficient)'}
             </p>
           </div>
@@ -367,10 +367,10 @@ export const IncidentsTab: React.FC<IncidentsTabProps> = ({
           <Card className="p-4">
             <SectionHeader
               title="Evidence Pack"
-              subtitle={`Schema v${evp.schema_version} · Dispatched at ${formatShortTime(evp.fired_at)}`}
+              subtitle={`Schema v${evp?.schema_version ?? '5.0'} · Dispatched at ${formatShortTime(evp?.fired_at ?? activeIncident.opened_at)}`}
               right={
                 <Badge variant="outline" className="font-mono">
-                  {evp.evidence_pack_id}
+                  {evp?.evidence_pack_id ?? (evp as any)?.pack_id ?? activeIncident.incident_id}
                 </Badge>
               }
             />
@@ -379,22 +379,22 @@ export const IncidentsTab: React.FC<IncidentsTabProps> = ({
               <div className="rounded border border-slate-200 bg-slate-50 p-3">
                 <div className="flex items-center justify-between">
                   <span className="font-mono font-semibold text-slate-900">
-                    {evp.sentinel.id}
+                    {evp?.sentinel?.id ?? (evp as any)?.sentinel_id ?? 'sentinel'}
                   </span>
-                  <Badge variant="outline">{evp.sentinel.class}</Badge>
+                  <Badge variant="outline">{evp?.sentinel?.class ?? (evp as any)?.sentinel_class ?? 'probe'}</Badge>
                 </div>
                 <pre className="mt-2 overflow-x-auto rounded border border-slate-200 bg-white p-2 font-mono text-xs text-slate-900">
-                  {evp.breach.statement}
+                  {evp?.breach?.statement ?? activeIncident.symptom_summary}
                 </pre>
                 <div className="mt-2 flex flex-wrap items-center justify-between text-slate-600 num-tabular">
                   <span>
-                    Observed: {evp.breach.observed.count} in{' '}
-                    {evp.breach.observed.window_s}s ({evp.breach.consecutive}x
+                    Observed: {evp?.breach?.observed?.count ?? (evp as any)?.observed_value ?? 1} in{' '}
+                    {evp?.breach?.observed?.window_s ?? 60}s ({evp?.breach?.consecutive ?? (activeIncident as any).consecutive_breaches ?? 1}x
                     consecutive)
                   </span>
                   <span>
-                    Baseline ({evp.baseline.model}): {evp.baseline.expected} ±{' '}
-                    {evp.baseline.stddev}
+                    Baseline ({evp?.baseline?.model ?? 'ewma'}): {evp?.baseline?.expected ?? 0} ±{' '}
+                    {evp?.baseline?.stddev ?? 0}
                   </span>
                 </div>
               </div>
@@ -404,15 +404,15 @@ export const IncidentsTab: React.FC<IncidentsTabProps> = ({
                 <p className="font-semibold text-slate-800">
                   Correlated Change Events Preceding Breach
                 </p>
-                {evp.correlated_changes.length === 0 ? (
+                {(evp?.correlated_changes ?? []).length === 0 ? (
                   <p className="mt-1 text-slate-500">
                     No correlated code or config deploys in window.
                   </p>
                 ) : (
                   <div className="mt-1.5 space-y-1.5">
-                    {evp.correlated_changes.map((chg) => (
+                    {(evp?.correlated_changes ?? []).map((chg, cIdx) => (
                       <div
-                        key={chg.change_event_id}
+                        key={chg.change_event_id || cIdx}
                         className="rounded border border-amber-200 bg-amber-50 p-2.5"
                       >
                         <div className="flex items-center justify-between">
@@ -436,15 +436,15 @@ export const IncidentsTab: React.FC<IncidentsTabProps> = ({
               <div className="grid grid-cols-2 gap-2.5">
                 <div className="rounded border border-slate-200 p-2.5">
                   <span className="text-slate-500">Episodic KNN Recall</span>
-                  {evp.recall.episodic.length === 0 ? (
+                  {(evp?.recall?.episodic ?? []).length === 0 ? (
                     <p className="mt-1 text-slate-500">Novel symptom</p>
                   ) : (
-                    evp.recall.episodic.map((ep) => (
+                    (evp?.recall?.episodic ?? []).map((ep) => (
                       <p
                         key={ep.incident_id}
                         className="mt-1 font-mono font-semibold text-slate-900 num-tabular"
                       >
-                        {ep.incident_id} (sim {(ep.similarity * 100).toFixed(0)}
+                        {ep.incident_id} (sim {((ep.similarity ?? 0) * 100).toFixed(0)}
                         %)
                       </p>
                     ))
@@ -452,12 +452,12 @@ export const IncidentsTab: React.FC<IncidentsTabProps> = ({
                 </div>
                 <div className="rounded border border-slate-200 p-2.5">
                   <span className="text-slate-500">Procedural Skill Recall</span>
-                  {evp.recall.skills.map((sk) => (
+                  {(evp?.recall?.skills ?? []).map((sk) => (
                     <p
                       key={sk.skill_slug}
                       className="mt-1 font-mono font-semibold text-blue-700 num-tabular"
                     >
-                      {sk.skill_slug} ({(sk.similarity * 100).toFixed(0)}%)
+                      {sk.skill_slug} ({((sk.similarity ?? 0) * 100).toFixed(0)}%)
                     </p>
                   ))}
                 </div>
@@ -469,7 +469,7 @@ export const IncidentsTab: React.FC<IncidentsTabProps> = ({
                   Wake-Time Trust Snapshot &amp; Token Budget
                 </span>
                 <div className="mt-1.5 flex flex-wrap items-center gap-2">
-                  {Object.entries(evp.trust_snapshot).map(([cap, lvl]) => (
+                  {Object.entries(evp?.trust_snapshot ?? {}).map(([cap, lvl]) => (
                     <span
                       key={cap}
                       className="inline-flex items-center gap-1 rounded border border-slate-200 bg-white px-2 py-0.5 font-mono"
@@ -478,7 +478,7 @@ export const IncidentsTab: React.FC<IncidentsTabProps> = ({
                     </span>
                   ))}
                   <span className="text-slate-600 num-tabular">
-                    Remaining: {formatNumber(evp.budget.agent_tokens_remaining)}{' '}
+                    Remaining: {formatNumber(evp?.budget?.agent_tokens_remaining ?? 50000)}{' '}
                     tok
                   </span>
                 </div>
@@ -493,7 +493,7 @@ export const IncidentsTab: React.FC<IncidentsTabProps> = ({
               subtitle="Detection → Wake → Swarm Convergence → Trust-Gated Remediation"
             />
             <div className="mt-3 space-y-3">
-              {activeIncident.timeline.map((step, idx) => (
+              {(activeIncident.timeline ?? []).map((step, idx) => (
                 <div
                   key={idx}
                   className="flex items-start gap-3 border-l-2 border-blue-600 pl-3 text-xs"
@@ -520,11 +520,11 @@ export const IncidentsTab: React.FC<IncidentsTabProps> = ({
           <Card className="p-4">
             <SectionHeader
               title="A2A Swarm Transcript (Rounds, Interrogations, Critiques & Handoffs)"
-              subtitle={`Lead: ${activeIncident.lead_agent_id} · Participants: ${activeIncident.participants.length} court agents`}
+              subtitle={`Lead: ${activeIncident.lead_agent_id} · Participants: ${(activeIncident.participants ?? []).length} court agents`}
             />
 
             <div className="mt-3 space-y-3">
-              {activeIncident.transcript.map((msg) => (
+              {(activeIncident.transcript ?? []).map((msg) => (
                 <div
                   key={msg.seq}
                   className="rounded border border-slate-200 bg-white p-3.5 text-xs"
@@ -582,7 +582,7 @@ export const IncidentsTab: React.FC<IncidentsTabProps> = ({
               subtitle="Every mutating call executes through POST /v1/capabilities/{id}:invoke as godview-act-sa with a reversal recipe"
             />
             <div className="mt-3 space-y-3">
-              {activeIncident.actions.map((act) => (
+              {(activeIncident.actions ?? []).map((act) => (
                 <div
                   key={act.audit_id}
                   className="rounded border border-slate-200 bg-slate-50 p-3.5 text-xs"
@@ -620,9 +620,9 @@ export const IncidentsTab: React.FC<IncidentsTabProps> = ({
                     <div>
                       <span className="text-slate-500">Reversal Recipe:</span>{' '}
                       <span className="font-mono text-slate-800">
-                        {act.reversal_recipe.capability} (
-                        {act.reversal_recipe.target ??
-                          act.reversal_recipe.args ??
+                        {act.reversal_recipe?.capability ?? 'manual'} (
+                        {act.reversal_recipe?.target ??
+                          act.reversal_recipe?.args ??
                           'auto'}
                         )
                       </span>
@@ -634,13 +634,13 @@ export const IncidentsTab: React.FC<IncidentsTabProps> = ({
           </Card>
 
           {/* Synthesized Procedural Skills (SKILL.md) */}
-          {activeIncident.skill_details.length > 0 && (
+          {(activeIncident.skill_details ?? []).length > 0 && (
             <Card className="p-4">
               <SectionHeader
                 title="Procedural Skill Synthesized / Executed (SKILL.md)"
                 subtitle="Mirrored to gs://...-agent-skills and proposed to godview/agent-skills/ via git.propose_files"
               />
-              {activeIncident.skill_details.map((sk) => (
+              {(activeIncident.skill_details ?? []).map((sk) => (
                 <div key={sk.skill_slug} className="mt-3 space-y-2 text-xs">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <span className="font-mono font-semibold text-slate-900">
@@ -648,7 +648,7 @@ export const IncidentsTab: React.FC<IncidentsTabProps> = ({
                     </span>
                     <div className="flex items-center gap-2 num-tabular">
                       <Badge variant="info">
-                        Conf. {Math.round(sk.confidence_score * 100)}%
+                        Conf. {Math.round((sk.confidence_score ?? 0) * 100)}%
                       </Badge>
                       <Badge variant="secondary">
                         {sk.executions_count} runs · avg MTTR{' '}

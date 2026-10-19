@@ -36,6 +36,7 @@ class LlmResponse:
     model_id: str = ""
     location: str = "global"
     usage: dict[str, Any] = field(default_factory=dict)
+    raw_content: Any | None = None
 
 
 def _deterministic_embedding(text: str, dim: int = 768) -> list[float]:
@@ -76,6 +77,7 @@ class LlmClient:
             or ""
         )
         self._clients: dict[str, Any] = {}
+        self.last_model_id: str | None = None
 
     def _get_genai_client(self, location: str) -> Any:
         if location not in self._clients:
@@ -129,6 +131,7 @@ class LlmClient:
                 except Exception:
                     parsed_obj = None
 
+            self.last_model_id = model_candidates[0][0]
             return LlmResponse(
                 text="Hermetic mock response for role " + role,
                 parsed=parsed_obj,
@@ -191,6 +194,12 @@ class LlmClient:
                 text_resp = getattr(res, "text", "") or ""
                 parsed_resp = getattr(res, "parsed", None)
                 func_calls = getattr(res, "function_calls", []) or []
+                raw_content = (
+                    res.candidates[0].content
+                    if getattr(res, "candidates", None) and res.candidates
+                    else None
+                )
+                self.last_model_id = model_id
 
                 return LlmResponse(
                     text=text_resp,
@@ -203,6 +212,7 @@ class LlmClient:
                         "completion_tokens": comp_tokens,
                         "total_tokens": total_tokens,
                     },
+                    raw_content=raw_content,
                 )
             except Exception as exc:
                 last_exc = exc

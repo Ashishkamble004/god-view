@@ -191,22 +191,26 @@ export function formatEnumLabel(raw: string | null | undefined): string {
   return spaced.charAt(0).toUpperCase() + spaced.slice(1).toLowerCase();
 }
 
-export function formatCurrency(amount: number): string {
-  if (amount > 0 && amount < 10) {
-    return `$${amount.toFixed(2)}`;
+export function formatCurrency(amount: number | null | undefined): string {
+  const n = Number(amount ?? 0);
+  if (Number.isNaN(n)) return '$0';
+  if (n > 0 && n < 10) {
+    return `$${n.toFixed(2)}`;
   }
   const formatted = new Intl.NumberFormat('en-US', {
     maximumFractionDigits: 0,
-  }).format(Math.round(amount));
+  }).format(Math.round(n));
   return `$${formatted}`;
 }
 
-export function formatUsd(amount: number): string {
-  return `$${amount.toFixed(2)}`;
+export function formatUsd(amount: number | null | undefined): string {
+  const n = Number(amount ?? 0);
+  return `$${(Number.isNaN(n) ? 0 : n).toFixed(2)}`;
 }
 
-export function formatNumber(val: number): string {
-  return new Intl.NumberFormat('en-US').format(val);
+export function formatNumber(val: number | null | undefined): string {
+  const n = Number(val ?? 0);
+  return new Intl.NumberFormat('en-US').format(Number.isNaN(n) ? 0 : n);
 }
 
 export function formatShortTime(iso: string | null | undefined): string {
